@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "capabilityNotice": "Capability values are configurable heuristics, not objective benchmark truth. Runtime telemetry is stored separately and never silently overwrites user configuration.",
+  "providers": {},
+  "harnesses": {},
+  "models": {},
+  "roles": {
+    "manager": {"id":"manager","description":"Owns objective decomposition, escalation and final integration.","capabilityWeights":{"reasoning":1,"planning":1,"reliability":0.8,"autonomy":0.8,"toolUse":0.5},"minimumCapability":0.78,"preferSubscription":true,"requireWrite":false,"requireShell":true},
+    "planner": {"id":"planner","description":"Builds a task graph and scoped briefs.","capabilityWeights":{"planning":1,"reasoning":0.9,"tokenEfficiency":0.3,"reliability":0.7},"minimumCapability":0.74,"preferSubscription":true},
+    "implementation": {"id":"implementation","description":"Implements scoped code changes.","capabilityWeights":{"coding":1,"debugging":0.8,"toolUse":0.8,"reliability":0.6,"autonomy":0.7},"minimumCapability":0.60,"preferSubscription":true,"requireWrite":true,"requireShell":true},
+    "research": {"id":"research","description":"Investigates external or repository evidence and returns structured findings.","capabilityWeights":{"research":1,"reasoning":0.7,"toolUse":0.6,"tokenEfficiency":0.4,"reliability":0.6},"minimumCapability":0.60,"preferSubscription":true,"requireNetwork":true},
+    "reviewer": {"id":"reviewer","description":"Independently reviews code, evidence and validation results.","capabilityWeights":{"reasoning":0.8,"coding":0.8,"debugging":0.8,"reliability":1,"toolUse":0.5},"minimumCapability":0.68,"preferSubscription":true,"independentFamilyReview":true},
+    "tester": {"id":"tester","description":"Writes and executes tests and reports reproducible failures.","capabilityWeights":{"coding":0.8,"debugging":0.9,"toolUse":0.9,"reliability":0.8,"speed":0.3},"minimumCapability":0.55,"requireWrite":true,"requireShell":true},
+    "cheap-worker": {"id":"cheap-worker","description":"Handles lookups, summaries and narrow low-risk work.","capabilityWeights":{"speed":1,"tokenEfficiency":1,"reliability":0.5,"toolUse":0.4},"minimumCapability":0.20,"preferSubscription":true}
+  },
+  "agents": {},
+  "routing": {
+    "weights":{"capability":5,"speed":1.2,"tokenEfficiency":1.5,"reliability":2,"subscription":1.2,"cost":1.2,"observedSuccess":2,"observedLatency":0.8,"familyDiversity":1.4,"availability":1.5},
+    "fallbackRoles":{"manager":["planner"],"planner":["manager"],"implementation":["tester","cheap-worker"],"research":["manager"],"reviewer":["manager"],"tester":["implementation"],"cheap-worker":["implementation"]},
+    "minimumScore":0.20
+  },
+  "constraints": {
+    "maxDelegationDepth":4,
+    "maxConcurrentTasks":4,
+    "maxRetries":2,
+    "permittedProviders":[],
+    "permittedFamilies":[],
+    "preferSubscription":true,
+    "defaultWriteScopes":["."],
+    "isolation":"path-locks",
+    "optionalTokenBudget":null,
+    "optionalApiCostBudgetUSD":null,
+    "enrollmentTtlSeconds":600,
+    "independentReviewComplexity":4
+  }
+}

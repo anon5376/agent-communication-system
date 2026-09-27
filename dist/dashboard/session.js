@@ -1,0 +1,120 @@
+/**
+ * Browser sessions for the dashboard. Ported from product-server.ts:65-133.
+ *
+ * The operator token never reaches the browser. A caller that holds the token
+ * (the `qagent dashboard` process itself, or `qagent dashboard link`) gets a
+ * single-use ticket; the page trades the ticket for an HttpOnly, SameSite=Strict
+ * cookie. Sessions live in memory and end when the dashboard process stops.
+ */
+import { randomBytes } from "node:crypto";
+export const SESSION_COOKIE = "qagent_dash";
+export const DEFAULT_TICKET_TTL_MS = 5 * 60_000;
+export const DEFAULT_SESSION_TTL_MS = 12 * 60 * 60_000;
+export class AuthError extends Error {
+    status;
+    constructor(status, message) {
+        super(message);
+        this.status = status;
+        this.name = "AuthError";
+    }
+}
+export class Sessions {
+    sessionTtlMs;
+    ticketTtlMs;
+    tickets = new Map();
+    sessions = new Map();
+    constructor(sessionTtlMs = DEFAULT_SESSION_TTL_MS, ticketTtlMs = DEFAULT_TICKET_TTL_MS) {
+        this.sessionTtlMs = sessionTtlMs;
+        this.ticketTtlMs = ticketTtlMs;
+    }
+    prune() {
+        const now = Date.now();
+        for (const [key, expires] of this.tickets)
+            if (expires <= now)
+                this.tickets.delete(key);
+        for (const [key, expires] of this.sessions)
+            if (expires <= now)
+                this.sessions.delete(key);
+    }
+    /** A single-use ticket. Only call this after the caller proved it holds the operator token. */
+    issueTicket() {
+        this.prune();
+        const ticket = randomBytes(24).toString("base64url");
+        this.tickets.set(ticket, Date.now() + this.ticketTtlMs);
+        return ticket;
+    }
+    /** Trade a ticket for a session id. The ticket is consumed whether or not it is valid. */
+    exchange(ticket) {
+        this.prune();
+        const expires = this.tickets.get(ticket);
+        this.tickets.delete(ticket);
+        if (!expires || expires <= Date.now())
+            throw new AuthError(401, "sign-in link is invalid or expired; run `qagent dashboard link`");
+        const session = randomBytes(32).toString("base64url");
+        this.sessions.set(session, Date.now() + this.sessionTtlMs);
+        return session;
+    }
+    valid(session) {
+        if (!session)
+            return false;
+        const expires = this.sessions.get(session);
+        if (!expires)
+            return false;
+        if (expires <= Date.now()) {
+            this.sessions.delete(session);
+            return false;
+        }
+        return true;
+    }
+    revoke(session) {
+        this.sessions.delete(session);
+    }
+    cookie(session) {
+        return `${SESSION_COOKIE}=${session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.ceil(this.sessionTtlMs / 1000)}`;
+    }
+}
+export function cookies(req) {
+    const out = {};
+    for (const piece of (req.headers.cookie ?? "").split(";")) {
+        const index = piece.indexOf("=");
+        if (index <= 0)
+            continue;
+        try {
+            out[piece.slice(0, index).trim()] = decodeURIComponent(piece.slice(index + 1).trim());
+        }
+        catch { /* ignore malformed */ }
+    }
+    return out;
+}
+export function sessionOf(req) {
+    return cookies(req)[SESSION_COOKIE] ?? "";
+}
+export function requireSession(req, sessions) {
+    const session = sessionOf(req);
+    if (!sessions.valid(session))
+        throw new AuthError(401, "dashboard session missing or expired; run `qagent dashboard link`");
+    return session;
+}
+/**
+ * Reject requests whose Host is not this loopback listener. A DNS-rebinding page
+ * reaches 127.0.0.1 with its own host name, so this check stops it before any
+ * cookie or ticket is looked at.
+ */
+export function requireLoopbackHost(req, port) {
+    const host = String(req.headers.host ?? "").toLowerCase();
+    if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`)
+        throw new AuthError(421, "unexpected Host header");
+}
+/** Writes must come from this page: Origin equal to our own, and no cross-site fetch metadata. */
+export function requireSameOrigin(req) {
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (!origin || !host)
+        throw new AuthError(403, "same-origin request required");
+    if (origin !== `http://${host}`)
+        throw new AuthError(403, "cross-origin request rejected");
+    const site = req.headers["sec-fetch-site"];
+    if (site !== undefined && site !== "same-origin")
+        throw new AuthError(403, "cross-site request rejected");
+}
+//# sourceMappingURL=session.js.map

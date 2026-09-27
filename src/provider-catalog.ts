@@ -1,0 +1,366 @@
+import {
+  BusConfig,
+  CapabilityProfile,
+  HarnessDefinition,
+  HarnessFeatureSet,
+  ModelDefinition,
+  ProviderDefinition,
+} from "./config.js";
+
+export interface CatalogBinary {
+  command: string;
+  knownPaths: string[];
+  probeArgs: string[];
+}
+
+export interface CatalogModelSeed {
+  id: string;
+  family: string;
+  exactModel?: string;
+  capabilities: CapabilityProfile;
+}
+
+export interface ProviderCatalogEntry {
+  id: string;
+  displayName: string;
+  authKind: ProviderDefinition["authKind"];
+  authSource: string;
+  subscriptionBacked: boolean;
+  loginCommand: string;
+  installHint: string;
+  apiKeyEnv?: string;
+  harnessId: string;
+  adapter: string;
+  binaries: CatalogBinary[];
+  modelDiscovery?: HarnessDefinition["modelDiscovery"];
+  features: HarnessFeatureSet;
+  models: CatalogModelSeed[];
+}
+
+const FULL_FEATURES: HarnessFeatureSet = {
+  headless: true,
+  resume: true,
+  mcp: true,
+  structuredOutput: true,
+  streaming: true,
+  cancellation: true,
+  modelSelection: true,
+  reasoningControl: true,
+  usageReporting: true,
+};
+
+const BASIC_FEATURES: HarnessFeatureSet = {
+  headless: true,
+  resume: false,
+  mcp: true,
+  structuredOutput: false,
+  streaming: true,
+  cancellation: true,
+  modelSelection: true,
+  reasoningControl: false,
+  usageReporting: false,
+};
+
+function heuristic(
+  partial: Partial<CapabilityProfile> & Pick<CapabilityProfile, "contextTokens" | "costClass">,
+): CapabilityProfile {
+  return {
+    coding: 0.7,
+    reasoning: 0.7,
+    planning: 0.65,
+    debugging: 0.65,
+    research: 0.65,
+    toolUse: 0.7,
+    speed: 0.55,
+    tokenEfficiency: 0.6,
+    reliability: 0.7,
+    autonomy: 0.7,
+    source: "heuristic-default",
+    notes: "Placeholder until you edit the model. Not a benchmark claim.",
+    ...partial,
+  };
+}
+
+function unixBin(command: string, extras: string[] = []): string[] {
+  return [
+    `~/.local/bin/${command}`,
+    `/usr/local/bin/${command}`,
+    `/opt/homebrew/bin/${command}`,
+    `~/bin/${command}`,
+    `/usr/bin/${command}`,
+    ...extras,
+  ];
+}
+
+export const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
+  {
+    id: "anthropic",
+    displayName: "Anthropic",
+    authKind: "subscription",
+    authSource: "Claude Code login",
+    subscriptionBacked: true,
+    loginCommand: "claude auth login",
+    installHint: "Install Claude Code, then run claude auth login.",
+    harnessId: "claude",
+    adapter: "claude",
+    binaries: [{ command: "claude", knownPaths: unixBin("claude"), probeArgs: ["--version"] }],
+    features: FULL_FEATURES,
+    models: [{
+      id: "anthropic-default",
+      family: "claude",
+      exactModel: "claude-opus-4-6",
+      capabilities: heuristic({ coding: 0.92, reasoning: 0.98, planning: 0.98, debugging: 0.92, toolUse: 0.95, speed: 0.35, reliability: 0.94, autonomy: 0.95, contextTokens: 200000, costClass: "subscription" }),
+    }],
+  },
+  {
+    id: "openai",
+    displayName: "OpenAI",
+    authKind: "subscription",
+    authSource: "Codex / ChatGPT login",
+    subscriptionBacked: true,
+    loginCommand: "codex login",
+    installHint: "Install the Codex CLI, then run codex login.",
+    harnessId: "codex",
+    adapter: "codex",
+    binaries: [{ command: "codex", knownPaths: unixBin("codex"), probeArgs: ["--version"] }],
+    features: FULL_FEATURES,
+    models: [{
+      id: "openai-default",
+      family: "gpt",
+      capabilities: heuristic({ coding: 0.96, reasoning: 0.93, planning: 0.88, debugging: 0.96, toolUse: 0.97, speed: 0.55, reliability: 0.92, autonomy: 0.96, contextTokens: 200000, costClass: "subscription" }),
+    }],
+  },
+  {
+    id: "cursor",
+    displayName: "Cursor",
+    authKind: "subscription",
+    authSource: "Cursor account / agent login",
+    subscriptionBacked: true,
+    loginCommand: "agent login",
+    installHint: "Install the Cursor CLI (cursor-agent or agent), then run agent login. You can also set CURSOR_API_KEY.",
+    apiKeyEnv: "CURSOR_API_KEY",
+    harnessId: "cursor",
+    adapter: "cursor",
+    binaries: [
+      { command: "cursor-agent", knownPaths: unixBin("cursor-agent", ["~/.cursor/bin/cursor-agent"]), probeArgs: ["--version"] },
+      { command: "agent", knownPaths: unixBin("agent", ["~/.cursor/bin/agent"]), probeArgs: ["--version"] },
+    ],
+    modelDiscovery: { args: ["--list-models"], format: "lines" },
+    features: FULL_FEATURES,
+    models: [{
+      id: "cursor-default",
+      family: "cursor",
+      capabilities: heuristic({ coding: 0.9, reasoning: 0.9, planning: 0.88, debugging: 0.88, toolUse: 0.92, speed: 0.6, reliability: 0.9, autonomy: 0.9, contextTokens: 200000, costClass: "subscription" }),
+    }],
+  },
+  {
+    id: "xai",
+    displayName: "xAI",
+    authKind: "subscription",
+    authSource: "Grok CLI login",
+    subscriptionBacked: true,
+    loginCommand: "grok login",
+    installHint: "Install the Grok CLI, then run grok login.",
+    harnessId: "grok",
+    adapter: "grok",
+    binaries: [{ command: "grok", knownPaths: unixBin("grok"), probeArgs: ["--version"] }],
+    features: { ...FULL_FEATURES, reasoningControl: false },
+    models: [{
+      id: "xai-default",
+      family: "grok",
+      capabilities: heuristic({ coding: 0.88, reasoning: 0.9, planning: 0.84, debugging: 0.86, toolUse: 0.88, speed: 0.7, reliability: 0.86, autonomy: 0.88, contextTokens: 200000, costClass: "subscription" }),
+    }],
+  },
+  {
+    id: "google",
+    displayName: "Google",
+    authKind: "subscription",
+    authSource: "Gemini CLI login",
+    subscriptionBacked: true,
+    loginCommand: "gemini",
+    installHint: "Install the Gemini CLI and complete its Google login flow.",
+    harnessId: "gemini",
+    adapter: "gemini",
+    binaries: [{ command: "gemini", knownPaths: unixBin("gemini"), probeArgs: ["--version"] }],
+    features: { ...BASIC_FEATURES, resume: true, structuredOutput: true },
+    models: [{
+      id: "google-default",
+      family: "gemini",
+      capabilities: heuristic({ coding: 0.82, reasoning: 0.87, planning: 0.82, debugging: 0.79, research: 0.94, toolUse: 0.87, speed: 0.68, reliability: 0.82, autonomy: 0.84, contextTokens: 1000000, costClass: "subscription" }),
+    }],
+  },
+  {
+    id: "moonshot",
+    displayName: "Moonshot AI",
+    authKind: "subscription",
+    authSource: "Kimi Code login",
+    subscriptionBacked: true,
+    loginCommand: "kimi",
+    installHint: "Install Kimi Code and complete its account login.",
+    harnessId: "kimi",
+    adapter: "kimi",
+    binaries: [{ command: "kimi", knownPaths: unixBin("kimi"), probeArgs: ["--version"] }],
+    features: { ...BASIC_FEATURES, resume: true, structuredOutput: true, usageReporting: true },
+    models: [{
+      id: "moonshot-default",
+      family: "kimi",
+      capabilities: heuristic({ coding: 0.83, reasoning: 0.82, planning: 0.76, debugging: 0.8, research: 0.83, toolUse: 0.84, speed: 0.72, tokenEfficiency: 0.82, reliability: 0.78, autonomy: 0.82, contextTokens: 128000, costClass: "subscription" }),
+    }],
+  },
+  {
+    id: "opencode",
+    displayName: "OpenCode",
+    authKind: "subscription",
+    authSource: "OpenCode provider account",
+    subscriptionBacked: true,
+    loginCommand: "opencode auth login",
+    installHint: "Install OpenCode, then run opencode auth login.",
+    harnessId: "opencode",
+    adapter: "opencode",
+    binaries: [{ command: "opencode", knownPaths: unixBin("opencode"), probeArgs: ["--version"] }],
+    modelDiscovery: { args: ["models", "--refresh", "--verbose"], format: "lines" },
+    features: FULL_FEATURES,
+    models: [{
+      id: "opencode-default",
+      family: "opencode",
+      capabilities: heuristic({ contextTokens: 128000, costClass: "subscription" }),
+    }],
+  },
+  {
+    id: "zai",
+    displayName: "Z.AI / GLM via OpenCode",
+    authKind: "subscription",
+    authSource: "OpenCode provider configuration",
+    subscriptionBacked: true,
+    loginCommand: "opencode auth login",
+    installHint: "Install OpenCode, configure a GLM-capable provider, and replace the exact model selector if `opencode models` reports a different route.",
+    harnessId: "opencode",
+    adapter: "opencode",
+    binaries: [{ command: "opencode", knownPaths: unixBin("opencode"), probeArgs: ["--version"] }],
+    modelDiscovery: { args: ["models", "--refresh", "--verbose"], format: "lines" },
+    features: FULL_FEATURES,
+    models: [{
+      id: "zai-glm-5.3",
+      family: "glm",
+      exactModel: "opencode-go/glm-5.3",
+      capabilities: heuristic({ coding: 0.84, reasoning: 0.84, planning: 0.78, debugging: 0.82, toolUse: 0.84, speed: 0.7, tokenEfficiency: 0.8, reliability: 0.8, autonomy: 0.82, contextTokens: 128000, costClass: "subscription" }),
+    }],
+  },
+  {
+    id: "ollama",
+    displayName: "Ollama",
+    authKind: "local",
+    authSource: "Local Ollama runtime",
+    subscriptionBacked: false,
+    loginCommand: "ollama serve",
+    installHint: "Install Ollama locally. Reach models through Codex --oss or OpenCode after the daemon is running.",
+    harnessId: "codex",
+    adapter: "codex",
+    binaries: [{ command: "ollama", knownPaths: unixBin("ollama"), probeArgs: ["--version"] }],
+    features: { ...FULL_FEATURES, structuredOutput: false },
+    models: [],
+  },
+  {
+    id: "novita",
+    displayName: "Novita",
+    authKind: "api",
+    authSource: "Novita API profile used by Hermes",
+    subscriptionBacked: false,
+    loginCommand: "hermes --help",
+    installHint: "Install Hermes and point it at a Novita (or local) profile.",
+    apiKeyEnv: "NOVITA_API_KEY",
+    harnessId: "hermes",
+    adapter: "hermes",
+    binaries: [{ command: "hermes", knownPaths: unixBin("hermes"), probeArgs: ["--version"] }],
+    features: { ...BASIC_FEATURES, resume: true, usageReporting: true, modelSelection: false },
+    models: [{
+      id: "novita-default",
+      family: "hermes",
+      capabilities: heuristic({ contextTokens: 128000, costClass: "medium" }),
+    }],
+  },
+];
+
+export function catalogEntry(id: string): ProviderCatalogEntry | undefined {
+  return PROVIDER_CATALOG.find((entry) => entry.id === id);
+}
+
+export const EMPTY_BUS_CONFIG: BusConfig = {
+  version: 1,
+  capabilityNotice: "Capability values are configurable heuristics, not objective benchmark truth. Runtime telemetry is stored separately and never silently overwrites user configuration.",
+  providers: {},
+  harnesses: {},
+  models: {},
+  agents: {},
+  roles: {
+    manager: { id: "manager", description: "Owns objective decomposition, escalation and final integration.", capabilityWeights: { reasoning: 1, planning: 1, reliability: 0.8, autonomy: 0.8, toolUse: 0.5 }, minimumCapability: 0.78, preferSubscription: true, requireWrite: false, requireShell: true },
+    planner: { id: "planner", description: "Builds a task graph and scoped briefs.", capabilityWeights: { planning: 1, reasoning: 0.9, tokenEfficiency: 0.3, reliability: 0.7 }, minimumCapability: 0.74, preferSubscription: true },
+    implementation: { id: "implementation", description: "Implements scoped code changes.", capabilityWeights: { coding: 1, debugging: 0.8, toolUse: 0.8, reliability: 0.6, autonomy: 0.7 }, minimumCapability: 0.60, preferSubscription: true, requireWrite: true, requireShell: true },
+    research: { id: "research", description: "Investigates external or repository evidence and returns structured findings.", capabilityWeights: { research: 1, reasoning: 0.7, toolUse: 0.6, tokenEfficiency: 0.4, reliability: 0.6 }, minimumCapability: 0.60, preferSubscription: true, requireNetwork: true },
+    reviewer: { id: "reviewer", description: "Independently reviews code, evidence and validation results.", capabilityWeights: { reasoning: 0.8, coding: 0.8, debugging: 0.8, reliability: 1, toolUse: 0.5 }, minimumCapability: 0.68, preferSubscription: true, independentFamilyReview: true },
+    tester: { id: "tester", description: "Writes and executes tests and reports reproducible failures.", capabilityWeights: { coding: 0.8, debugging: 0.9, toolUse: 0.9, reliability: 0.8, speed: 0.3 }, minimumCapability: 0.55, requireWrite: true, requireShell: true },
+    "cheap-worker": { id: "cheap-worker", description: "Handles lookups, summaries and narrow low-risk work.", capabilityWeights: { speed: 1, tokenEfficiency: 1, reliability: 0.5, toolUse: 0.4 }, minimumCapability: 0.20, preferSubscription: true },
+  },
+  routing: {
+    weights: { capability: 5, speed: 1.2, tokenEfficiency: 1.5, reliability: 2, subscription: 1.2, cost: 1.2, observedSuccess: 2, observedLatency: 0.8, familyDiversity: 1.4, availability: 1.5 },
+    fallbackRoles: { manager: ["planner"], planner: ["manager"], implementation: ["tester", "cheap-worker"], research: ["manager"], reviewer: ["manager"], tester: ["implementation"], "cheap-worker": ["implementation"] },
+    minimumScore: 0.20,
+  },
+  constraints: {
+    maxDelegationDepth: 4,
+    maxConcurrentTasks: 4,
+    maxRetries: 2,
+    permittedProviders: [],
+    permittedFamilies: [],
+    preferSubscription: true,
+    defaultWriteScopes: ["."],
+    isolation: "path-locks",
+    optionalTokenBudget: null,
+    optionalApiCostBudgetUSD: null,
+    enrollmentTtlSeconds: 600,
+    independentReviewComplexity: 4,
+  },
+};
+
+export function catalogProviderDefinition(entry: ProviderCatalogEntry, enabled = false): ProviderDefinition {
+  return {
+    id: entry.id,
+    displayName: entry.displayName,
+    authKind: entry.authKind,
+    authSource: entry.authSource,
+    subscriptionBacked: entry.subscriptionBacked,
+    enabled,
+    optional: true,
+    notes: entry.installHint,
+    loginCommand: entry.loginCommand,
+    installHint: entry.installHint,
+    apiKeyEnv: entry.apiKeyEnv,
+  };
+}
+
+export function catalogHarnessDefinition(entry: ProviderCatalogEntry, command: string, enabled = false): HarnessDefinition {
+  const providers = [entry.id];
+  if (entry.id === "ollama") providers.push("openai");
+  return {
+    id: entry.harnessId,
+    adapter: entry.adapter,
+    command,
+    providers: [...new Set(providers)],
+    features: entry.features,
+    probeArgs: entry.binaries[0]?.probeArgs ?? ["--version"],
+    modelDiscovery: entry.modelDiscovery,
+    enabled,
+  };
+}
+
+export function catalogModelDefinition(entry: ProviderCatalogEntry, seed: CatalogModelSeed, enabled = false): ModelDefinition {
+  return {
+    id: seed.id,
+    provider: entry.id,
+    harness: entry.harnessId,
+    family: seed.family,
+    exactModel: seed.exactModel,
+    capabilities: seed.capabilities,
+    enabled,
+  };
+}

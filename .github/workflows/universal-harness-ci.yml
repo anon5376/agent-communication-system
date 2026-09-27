@@ -1,0 +1,28 @@
+name: Agent Communication System CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Ubuntu build, unit, dashboard smoke, CLI smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: google-chrome --version
+      - run: command -v lsof
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run audit:public
+      - run: npm test

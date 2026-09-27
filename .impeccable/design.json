@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-30T03:15:00.000Z",
+  "title": "Design System: Agent Bus",
+  "extensions": {
+    "colorMeta": {
+      "console": { "role": "neutral", "displayName": "Console", "canonical": "#12141a" },
+      "console-2": { "role": "neutral", "displayName": "Console raised", "canonical": "#1a1d26" },
+      "console-ink": { "role": "neutral", "displayName": "Console ink", "canonical": "#ece8df" },
+      "paper": { "role": "primary", "displayName": "Paper", "canonical": "#e7e1d4" },
+      "paper-2": { "role": "neutral", "displayName": "Paper shade", "canonical": "#d9d1c0" },
+      "ink": { "role": "neutral", "displayName": "Ink", "canonical": "#1c1914" },
+      "ink-muted": { "role": "neutral", "displayName": "Ink muted", "canonical": "#5e574c" },
+      "live": { "role": "secondary", "displayName": "Live phosphor", "canonical": "#3aa8c1" },
+      "mark": { "role": "tertiary", "displayName": "Sector mark", "canonical": "#e0c14a" },
+      "alert": { "role": "primary", "displayName": "Stop", "canonical": "#d24a3d" },
+      "ok": { "role": "neutral", "displayName": "Accepted", "canonical": "#3d8f5a" },
+      "warn": { "role": "neutral", "displayName": "Working", "canonical": "#c48a2a" },
+      "phosphor": { "role": "neutral", "displayName": "Log well", "canonical": "#0a0c10" }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Mission title only." },
+      "title": { "displayName": "Title", "purpose": "Modal headings." },
+      "body": { "displayName": "Body", "purpose": "Chrome and prose." },
+      "label": { "displayName": "Label", "purpose": "Sector and bay wayfinding." },
+      "mono": { "displayName": "Callsign", "purpose": "Strip ids, figures, live log." }
+    },
+    "shadows": [],
+    "motion": [],
+    "breakpoints": [
+      { "name": "bay-stack", "value": "1100px" },
+      { "name": "sector-stack", "value": "720px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Paper fill on the dark console.",
+      "html": "<button class=\"ds-btn-primary\">New run</button>",
+      "css": ".ds-btn-primary { background: #e7e1d4; color: #1c1914; border: 1px solid #e7e1d4; border-radius: 0; padding: 6px 10px; font-weight: 650; } .ds-btn-primary:hover { background: #f3eee4; } .ds-btn-primary:focus-visible { outline: 2px solid #e0c14a; outline-offset: 2px; }"
+    },
+    {
+      "name": "Alert Button",
+      "kind": "button",
+      "refersTo": "button-alert",
+      "description": "Stop control. Red is reserved for this.",
+      "html": "<button class=\"ds-btn-alert\">STOP ALL</button>",
+      "css": ".ds-btn-alert { background: #d24a3d; color: #fff; border: 1px solid #d24a3d; border-radius: 0; padding: 6px 10px; font-weight: 700; } .ds-btn-alert:focus-visible { outline: 2px solid #e0c14a; outline-offset: 2px; }"
+    },
+    {
+      "name": "Console Button",
+      "kind": "button",
+      "refersTo": "button-console",
+      "description": "Secondary chrome on the console field.",
+      "html": "<button class=\"ds-btn-console\">Providers</button>",
+      "css": ".ds-btn-console { background: #1a1d26; color: #ece8df; border: 1px solid #3a3f4c; border-radius: 0; padding: 6px 10px; } .ds-btn-console:hover { background: #242833; } .ds-btn-console:focus-visible { outline: 2px solid #e0c14a; outline-offset: 2px; }"
+    },
+    {
+      "name": "Paper Strip",
+      "kind": "card",
+      "refersTo": "strip",
+      "description": "Flight-progress strip: square tab, callsign, state, actions.",
+      "html": "<article class=\"ds-strip\"><i class=\"ds-tab\"></i><span class=\"ds-strip-body\"><b>opus</b><small>manager · anthropic/claude</small></span><span class=\"ds-strip-meta\">idle</span><button class=\"ds-strip-start\">Start</button></article>",
+      "css": ".ds-strip { display: grid; grid-template-columns: 14px minmax(0,1fr) auto auto; gap: 8px; align-items: center; background: #e7e1d4; color: #1c1914; border: 1px solid #b7ae9c; border-radius: 0; padding: 8px 10px; } .ds-tab { width: 10px; height: 10px; background: #3d8f5a; } .ds-strip-body b { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; } .ds-strip-body small { color: #5e574c; font-size: 11px; } .ds-strip-meta { font-size: 11px; color: #5e574c; } .ds-strip-start { background: #1c1914; color: #e7e1d4; border: 1px solid #1c1914; border-radius: 0; padding: 4px 8px; font-size: 11px; }"
+    },
+    {
+      "name": "Console Field",
+      "kind": "input",
+      "refersTo": "modal",
+      "description": "Ink-on-paper field used inside modals.",
+      "html": "<label class=\"ds-field\">Project path<input value=\"/workspace/project\"></label>",
+      "css": ".ds-field { display: flex; flex-direction: column; gap: 6px; color: #1c1914; font-size: 14px; } .ds-field input { background: #fff; border: 1px solid #b7ae9c; color: #1c1914; padding: 8px 10px; border-radius: 0; } .ds-field input:focus-visible { outline: 2px solid #e0c14a; outline-offset: 2px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Night sector console.",
+    "overview": "Agent Bus is a local operator instrument, not an admin SaaS shell. The operator watches independent agents the way a controller watches flights: paper strips on a dark console, live figures in cyan, yellow only for wayfinding, red only to stop.\n\nThe dashboard is one surface: a yellow-ruled sector header, a display-size mission, two strip bays, and a phosphor live log. Providers live in a header popover. Projects and runs are header selects. State is a square tab on the strip, never a tinted card or a colored side stripe.",
+    "keyCharacteristics": [
+      "Dark console field with cream paper strips",
+      "Cyan for live numbers and log time; yellow for labels; red reserved for stop",
+      "Square corners, 1px rules, no glass and no gradient type",
+      "Callsigns and log in mono; UI chrome in the system sans",
+      "Topology is sector / mission / bay / console, never nav + metric cards + identical agent cards"
+    ],
+    "rules": [
+      { "name": "The Color-as-State Rule", "body": "Color marks status or a stop, not decoration. If a region is not live, not a label, and not an alert, it stays console or paper.", "section": "colors" },
+      { "name": "The Reserved-Red Rule", "body": "Red is stop and failure only. Do not use it for links, badges, or emphasis.", "section": "colors" },
+      { "name": "The Callsign Rule", "body": "Agent and task titles on paper use mono. Prose on paper uses the UI sans.", "section": "typography" }
+    ],
+    "dos": [
+      "Do put work on paper strips and keep the field dark.",
+      "Do keep providers in the header popover, not a left rail.",
+      "Do use a square tab for state.",
+      "Do reserve red for stop and failure."
+    ],
+    "donts": [
+      "Don't rebuild the three-column admin shell (nav + metric cards + identical agent cards).",
+      "Don't use a colored border-left as status.",
+      "Don't load webfonts; CSP is font-src 'self'.",
+      "Don't use Inter, gradient text, glass, or emoji as icons."
+    ]
+  }
+}

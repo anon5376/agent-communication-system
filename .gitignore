@@ -1,0 +1,14 @@
+node_modules/
+dist/*.tsbuildinfo
+dist-test/
+gui/AgentBus.app/
+.agent-bus/
+.qagent/
+.claude/
+.claude-flow/
+.env
+.env.*
+!.env.example
+scripts/devin-cloud-bridge.mjs
+*.log
+.DS_Store
