@@ -18,6 +18,7 @@ export class ChangeWatcher {
     maxPollMs;
     watcher = null;
     wakers = new Set();
+    fsEpoch = 0;
     closed = false;
     constructor(db, dbPath, options = {}) {
         this.db = db;
@@ -36,6 +37,7 @@ export class ChangeWatcher {
             this.watcher = watch(dirname(this.dbPath), { persistent: false }, (_event, filename) => {
                 if (filename && !interesting.has(String(filename)))
                     return;
+                this.fsEpoch += 1;
                 for (const wake of [...this.wakers])
                     wake();
             });
@@ -71,6 +73,7 @@ export class ChangeWatcher {
             const remaining = deadline - Date.now();
             if (remaining <= 0)
                 break;
+            const fsEpoch = this.fsEpoch;
             await this.sleep(Math.min(interval, remaining), signal);
             if (this.closed)
                 break;
@@ -83,7 +86,7 @@ export class ChangeWatcher {
                 interval = this.minPollMs;
             }
             else {
-                interval = Math.min(interval * 2, this.maxPollMs);
+                interval = this.fsEpoch === fsEpoch ? Math.min(interval * 2, this.maxPollMs) : this.minPollMs;
             }
         }
         return this.closed ? seq : this.currentSeq();

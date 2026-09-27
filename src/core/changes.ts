@@ -27,6 +27,7 @@ export class ChangeWatcher {
   private readonly maxPollMs: number;
   private watcher: FSWatcher | null = null;
   private readonly wakers = new Set<() => void>();
+  private fsEpoch = 0;
   private closed = false;
 
   constructor(private readonly db: DatabaseSync, private readonly dbPath: string, options: ChangeWatcherOptions = {}) {
@@ -43,6 +44,7 @@ export class ChangeWatcher {
     try {
       this.watcher = watch(dirname(this.dbPath), { persistent: false }, (_event, filename) => {
         if (filename && !interesting.has(String(filename))) return;
+        this.fsEpoch += 1;
         for (const wake of [...this.wakers]) wake();
       });
       this.watcher.on("error", () => { this.watcher?.close(); this.watcher = null; });
@@ -76,6 +78,7 @@ export class ChangeWatcher {
     while (!this.closed && !signal?.aborted) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
+      const fsEpoch = this.fsEpoch;
       await this.sleep(Math.min(interval, remaining), signal);
       if (this.closed) break;
       const current = this.dataVersion();
@@ -85,7 +88,7 @@ export class ChangeWatcher {
         if (seq > sinceSeq) return seq;
         interval = this.minPollMs;
       } else {
-        interval = Math.min(interval * 2, this.maxPollMs);
+        interval = this.fsEpoch === fsEpoch ? Math.min(interval * 2, this.maxPollMs) : this.minPollMs;
       }
     }
     return this.closed ? seq : this.currentSeq();
