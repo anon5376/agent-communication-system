@@ -1,0 +1,28 @@
+[package]
+name = "acs"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of the agent-communication-system bus and CLI (qagent)"
+license = "MIT"
+
+[lib]
+name = "acs"
+path = "src/lib.rs"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+rand = "0.8"
+dirs = "5"
+notify = "6"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+ctrlc = "3"
+
+[[bin]]
+name = "qagent"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2

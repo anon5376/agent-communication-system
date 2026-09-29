@@ -12,3 +12,6 @@ gui/AgentBus.app/
 scripts/devin-cloud-bridge.mjs
 *.log
 .DS_Store
+
+# Rust port build artifacts
+rust/target/

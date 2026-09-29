@@ -26,3 +26,12 @@ jobs:
       - run: npm audit --audit-level=high
       - run: npm run audit:public
       - run: npm test
+
+  rust-test:
+    name: Rust port tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --manifest-path rust/Cargo.toml
