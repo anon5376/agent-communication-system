@@ -748,9 +748,11 @@ export class Bus {
             }
             else {
                 const role = String(this.agentRow(me)?.role ?? "");
-                // Assigned-to-me first, then urgent before older ordinary work.
+                // Assigned-to-me first, then urgent before older ordinary work. Only the columns the
+                // lease check and error paths need; the claimed row is re-read whole via RETURNING.
                 candidates = prepared(this.db, `
-          SELECT * FROM tasks WHERE state IN ('open', 'changes_requested')
+          SELECT id, state, assignee, project, path_scopes_json FROM tasks
+          WHERE state IN ('open', 'changes_requested')
             AND (assignee = ? OR (assignee IS NULL AND (role = '' OR role = ?)))
           ORDER BY CASE WHEN assignee = ? THEN 0 ELSE 1 END,
                    CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
