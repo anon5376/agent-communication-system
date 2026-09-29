@@ -36,7 +36,7 @@ States: `open`, `blocked`, `claimed`, `submitted`, `changes_requested`, `accepte
 
 ## Waiting without a daemon
 
-`core/changes.ts` watches for commits by other processes. It polls `PRAGMA data_version`, which costs no disk write, backing off from 10 ms to 100 ms, and an `fs.watch` on the database directory wakes it early. Only when the version moves does it read `max(events.seq)`. The wait adds a watch on the agent's signal file, so a delivery wakes it at once.
+`core/changes.ts` watches for commits by other processes. It polls `PRAGMA data_version`, which costs no disk write, backing off from 10 ms to 100 ms, and an `fs.watch` on the database directory wakes it early. Only when the version moves does it read `max(events.seq)`. The wait adds a watch on the agent's signal file, so a delivery wakes it at once; long-lived waiters raise the poll ceiling to 1 s, since polling is only their missed-event fallback.
 
 A waiter writes `status = 'waiting'` and a deadline once, blocks, and writes `idle` once when it returns. A waiter that is killed leaves `waiting` behind; readers show it as offline once the deadline passes, and the agent's next action resets it.
 

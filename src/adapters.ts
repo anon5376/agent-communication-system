@@ -75,8 +75,10 @@ function stripAnsi(value: string): string {
 function jsonLines(stdout: string): Record<string, unknown>[] {
   const rows: Record<string, unknown>[] = [];
   for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue; // mixed prose lines are common and never parse
     try {
-      const parsed = JSON.parse(line.trim());
+      const parsed = JSON.parse(trimmed);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) rows.push(parsed as Record<string, unknown>);
     } catch {
       // Mixed prose/JSON output is normal for several CLIs.

@@ -69,7 +69,16 @@ export function runHarnessProcess(
       detached: process.platform !== "win32",
     });
     onSpawn?.(child.pid ?? null);
-    let output = "";
+    // Chunked with a tail cap: a 60-minute run can log more than memory justifies, and
+    // parsers only need the end (the result line) plus as much context as fits.
+    const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+    const chunks: Buffer[] = [];
+    let outputBytes = 0;
+    const capture = (data: Buffer) => {
+      chunks.push(data);
+      outputBytes += data.length;
+      while (outputBytes > MAX_OUTPUT_BYTES && chunks.length > 1) outputBytes -= chunks.shift()!.length;
+    };
     let settled = false;
     let timedOut = false;
     const finish = (code: number) => {
@@ -77,7 +86,7 @@ export function runHarnessProcess(
       settled = true;
       clearTimeout(timer);
       onSpawn?.(null);
-      resolve({ code, output, durationMs: Date.now() - started, timedOut });
+      resolve({ code, output: Buffer.concat(chunks).toString("utf8"), durationMs: Date.now() - started, timedOut });
     };
     const timer = setTimeout(() => {
       timedOut = true;
@@ -92,16 +101,16 @@ export function runHarnessProcess(
         }
       }, 3_000).unref();
     }, invocation.timeoutMs);
-    child.stdout.on("data", (data) => {
-      output += data.toString();
+    child.stdout.on("data", (data: Buffer) => {
+      capture(data);
       process.stdout.write(data);
     });
-    child.stderr.on("data", (data) => {
-      output += data.toString();
+    child.stderr.on("data", (data: Buffer) => {
+      capture(data);
       process.stderr.write(data);
     });
     child.on("error", (error) => {
-      output += `\nspawn error: ${error.message}`;
+      capture(Buffer.from(`\nspawn error: ${error.message}`));
       finish(-1);
     });
     child.on("close", (code) => finish(code ?? -1));

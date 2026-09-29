@@ -151,21 +151,36 @@ export function transaction(db, fn) {
         throw error;
     }
 }
+/** Constant SQL prepared once per connection instead of on every call. Entries die with the connection. */
+const statements = new WeakMap();
+export function prepared(db, sql) {
+    let perDb = statements.get(db);
+    if (!perDb) {
+        perDb = new Map();
+        statements.set(db, perDb);
+    }
+    let statement = perDb.get(sql);
+    if (!statement) {
+        statement = db.prepare(sql);
+        perDb.set(sql, statement);
+    }
+    return statement;
+}
 export function getMeta(db, key) {
-    const row = db.prepare("SELECT value FROM meta WHERE key = ?").get(key);
+    const row = prepared(db, "SELECT value FROM meta WHERE key = ?").get(key);
     return row?.value ?? null;
 }
 export function setMeta(db, key, value) {
-    db.prepare("INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
+    prepared(db, "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }
 export function appendEvent(db, event) {
-    const result = db.prepare(`
+    const result = prepared(db, `
     INSERT INTO events(ts_ms, actor, kind, entity, entity_id, data_json, source) VALUES(?, ?, ?, ?, ?, ?, ?)
   `).run(event.tsMs, event.actor, event.kind, event.entity, String(event.entityId), JSON.stringify(event.data ?? {}), event.source ?? "v2");
     return Number(result.lastInsertRowid);
 }
 export function latestEventSeq(db) {
-    const row = db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events").get();
+    const row = prepared(db, "SELECT COALESCE(MAX(seq), 0) AS seq FROM events").get();
     return Number(row.seq);
 }
 //# sourceMappingURL=db.js.map

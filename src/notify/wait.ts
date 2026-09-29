@@ -116,7 +116,9 @@ export interface WaitOptions {
 
 /** Block until `actor` has unread mail or a task event (Bus.waitForMail). The read cursor is not advanced. */
 export async function waitForMail(bus: Bus, actor: Identity, options: WaitOptions): Promise<WaitResult> {
-  const watcher = new SignalFileWatcher(bus.db, bus.dbPath, actor.agentId, options.watcherOptions);
+  // The inbox signal file and the database fs.watch wake promptly; the data_version poll is
+  // only a missed-event fallback, so a 1 s ceiling bounds idle cost near one read per second.
+  const watcher = new SignalFileWatcher(bus.db, bus.dbPath, actor.agentId, { maxPollMs: 1000, ...options.watcherOptions });
   try {
     return await bus.waitForMail(actor, { timeoutMs: options.timeoutMs, signal: options.signal, watcher });
   } finally {

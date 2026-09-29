@@ -9,6 +9,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { prepared } from "./db.js";
 import { BusError, OPERATOR_ID } from "./types.js";
 const SAFE_ID = /^[A-Za-z0-9._-]+$/;
 export function isSafeAgentId(id) {
@@ -83,7 +84,7 @@ export function agentIdFromEnv(env = process.env) {
     return null;
 }
 function rowFor(db, agentId) {
-    return db.prepare("SELECT * FROM identities WHERE agent_id = ?").get(agentId);
+    return prepared(db, "SELECT * FROM identities WHERE agent_id = ?").get(agentId);
 }
 function parsePermissions(json, authority) {
     try {
@@ -114,7 +115,7 @@ export function resolveIdentity(db, home, agentId) {
 /** Resolve an identity from a token value (used when a caller holds the token in memory). */
 export function identityForToken(db, agentId, token) {
     const tokenHash = hashToken(token);
-    const row = db.prepare("SELECT * FROM identities WHERE token_hash = ?").get(tokenHash);
+    const row = prepared(db, "SELECT * FROM identities WHERE token_hash = ?").get(tokenHash);
     if (!row)
         throw new BusError("unauthorized", `token for ${agentId} is not registered (rotate it with \`qagent token rotate ${agentId}\`)`);
     if (row.agent_id !== agentId)
@@ -136,7 +137,7 @@ export function requireOperator(identity, action) {
 export function storeNewToken(db, agentId, authority, nowMs, permissions) {
     const token = createBearerToken();
     const existing = rowFor(db, agentId);
-    db.prepare(`
+    prepared(db, `
     INSERT INTO identities(agent_id, token_hash, authority, permissions_json, created_ms, updated_ms)
     VALUES(?, ?, ?, ?, ?, ?)
     ON CONFLICT(agent_id) DO UPDATE SET token_hash = excluded.token_hash, authority = excluded.authority,
@@ -146,7 +147,7 @@ export function storeNewToken(db, agentId, authority, nowMs, permissions) {
 }
 /** Register an existing token file's hash for `agentId` (used by init to adopt operator.token). */
 export function adoptToken(db, agentId, authority, token, nowMs) {
-    db.prepare(`
+    prepared(db, `
     INSERT INTO identities(agent_id, token_hash, authority, permissions_json, created_ms, updated_ms)
     VALUES(?, ?, ?, ?, ?, ?)
     ON CONFLICT(agent_id) DO UPDATE SET token_hash = excluded.token_hash, authority = excluded.authority, updated_ms = excluded.updated_ms

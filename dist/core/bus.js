@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { ChangeWatcher } from "./changes.js";
-import { appendEvent, homeFor, latestEventSeq, openDatabase, resolveDbPath, transaction } from "./db.js";
+import { appendEvent, homeFor, latestEventSeq, openDatabase, prepared, resolveDbPath, transaction } from "./db.js";
 import { adoptToken, agentIdFromEnv, assertSafeAgentId, ensurePrivateDirectories, hashToken, operatorTokenPath, readTokenFile, requireOperator, resolveIdentity, storedIdentity, storeNewToken, tokenPathFor, writePrivateToken, } from "./identity.js";
 import { boundedString, BusError, CLAIM_TTL_MS, CLOSED_STATES, contextReferences, LIMITS, MESSAGE_TYPES, OPERATOR_ID, PRIORITIES, STALE_AGENT_MS, TASK_STATES, } from "./types.js";
 function json(value, fallback) {
@@ -88,10 +88,10 @@ export class Bus {
      */
     touch(agentId, status) {
         if (status) {
-            this.db.prepare("UPDATE agents SET last_seen_ms = ?, status = ?, wait_until_ms = NULL WHERE id = ?").run(this.now(), status, agentId);
+            prepared(this.db, "UPDATE agents SET last_seen_ms = ?, status = ?, wait_until_ms = NULL WHERE id = ?").run(this.now(), status, agentId);
         }
         else {
-            this.db.prepare(`
+            prepared(this.db, `
         UPDATE agents SET last_seen_ms = ?, status = CASE WHEN status IN ('offline', 'waiting') THEN 'idle' ELSE status END,
           wait_until_ms = CASE WHEN status = 'waiting' THEN NULL ELSE wait_until_ms END
         WHERE id = ?
@@ -124,7 +124,7 @@ export class Bus {
         const tokenPath = operatorTokenPath(this.home);
         const operator = this.write(() => {
             const now = this.now();
-            this.db.prepare(`
+            prepared(this.db, `
         INSERT INTO agents(id, role, model, harness, status, last_seen_ms, created_ms) VALUES(?, 'operator', 'human', 'cli', 'idle', ?, ?)
         ON CONFLICT(id) DO NOTHING
       `).run(OPERATOR_ID, now, now);
@@ -133,7 +133,7 @@ export class Bus {
             if (stored && fileToken && hashToken(fileToken) === stored.tokenHash && stored.authority === "operator")
                 return "unchanged";
             const owner = fileToken
-                ? this.db.prepare("SELECT agent_id FROM identities WHERE token_hash = ?").get(hashToken(fileToken))
+                ? prepared(this.db, "SELECT agent_id FROM identities WHERE token_hash = ?").get(hashToken(fileToken))
                 : undefined;
             let outcome;
             if (!stored && fileToken && !owner) {
@@ -171,13 +171,13 @@ export class Bus {
             if (existing && storedIdentity(this.db, id))
                 throw new BusError("conflict", `agent ${id} already exists; use \`qagent token rotate ${id}\``);
             if (existing) {
-                this.db.prepare(`
+                prepared(this.db, `
           UPDATE agents SET role = COALESCE(NULLIF(?, ''), role), model = COALESCE(NULLIF(?, ''), model),
             harness = COALESCE(NULLIF(?, ''), harness), parent_id = COALESCE(?, parent_id) WHERE id = ?
         `).run(role, model, harness, parent, id);
             }
             else {
-                this.db.prepare(`
+                prepared(this.db, `
           INSERT INTO agents(id, role, model, harness, parent_id, status, created_ms) VALUES(?, ?, ?, ?, ?, 'offline', ?)
         `).run(id, role, model, harness, parent, now);
             }
@@ -203,7 +203,7 @@ export class Bus {
     }
     // ------------------------------------------------------------------ agents
     agentRow(id) {
-        return this.db.prepare("SELECT * FROM agents WHERE id = ?").get(id);
+        return prepared(this.db, "SELECT * FROM agents WHERE id = ?").get(id);
     }
     toAgent(row) {
         const now = this.now();
@@ -233,13 +233,13 @@ export class Bus {
         };
     }
     getAgent(id) {
-        const row = this.db.prepare(`
+        const row = prepared(this.db, `
       SELECT a.*, i.authority FROM agents a LEFT JOIN identities i ON i.agent_id = a.id WHERE a.id = ?
     `).get(id);
         return row ? this.toAgent(row) : null;
     }
     listAgents() {
-        const rows = this.db.prepare(`
+        const rows = prepared(this.db, `
       SELECT a.*, i.authority,
         (SELECT COUNT(*) FROM messages m
           WHERE m.seq > COALESCE(c.last_seq, 0) AND (m.recipient = a.id OR (m.recipient IS NULL AND m.sender <> a.id))) AS unread
@@ -273,7 +273,7 @@ export class Bus {
     insertMessage(sender, recipient, fields) {
         const id = `msg_${randomUUID()}`;
         const ts = this.now();
-        const result = this.db.prepare(`
+        const result = prepared(this.db, `
       INSERT INTO messages(id, ts_ms, sender, recipient, type, subject, body, thread, task_id, refs_json, requires_ack)
       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, ts, sender, recipient, fields.type, fields.subject, fields.body, fields.thread, fields.taskId, JSON.stringify(fields.refs), fields.requiresAck ? 1 : 0);
@@ -283,7 +283,7 @@ export class Bus {
             this.pendingSignals.set(recipient, seq);
         }
         else {
-            for (const row of this.db.prepare("SELECT id FROM agents WHERE id <> ?").all(sender))
+            for (const row of prepared(this.db, "SELECT id FROM agents WHERE id <> ?").all(sender))
                 this.pendingSignals.set(String(row.id), seq);
         }
         return { seq, id, tsMs: ts, sender, recipient, ...fields, source: "v2" };
@@ -346,18 +346,21 @@ export class Bus {
         });
     }
     cursor(agentId) {
-        const row = this.db.prepare("SELECT last_seq FROM cursors WHERE agent_id = ?").get(agentId);
+        const row = prepared(this.db, "SELECT last_seq FROM cursors WHERE agent_id = ?").get(agentId);
         return Number(row?.last_seq ?? 0);
     }
-    unreadRows(agentId, limit) {
-        return this.db.prepare(`
-      SELECT * FROM messages
+    /** Unread rows plus the full unread count in one scan; `total` counts everything past the cursor, not just the fetched page. */
+    unreadRows(agentId, cursor, limit) {
+        const rows = prepared(this.db, `
+      SELECT *, (SELECT COUNT(*) FROM messages WHERE seq > ? AND (recipient = ? OR (recipient IS NULL AND sender <> ?))) AS total
+      FROM messages
       WHERE seq > ? AND (recipient = ? OR (recipient IS NULL AND sender <> ?))
       ORDER BY seq LIMIT ?
-    `).all(this.cursor(agentId), agentId, agentId, limit);
+    `).all(cursor, agentId, agentId, cursor, agentId, agentId, limit);
+        return { rows, total: rows.length ? Number(rows[0].total) : 0 };
     }
     unreadCount(agentId) {
-        const row = this.db.prepare(`
+        const row = prepared(this.db, `
       SELECT COUNT(*) AS n FROM messages WHERE seq > ? AND (recipient = ? OR (recipient IS NULL AND sender <> ?))
     `).get(this.cursor(agentId), agentId, agentId);
         return Number(row.n);
@@ -367,30 +370,35 @@ export class Bus {
         const limit = Math.max(1, Math.min(LIMITS.inboxLimit, Math.floor(options.limit ?? 50)));
         const me = actor.agentId;
         if (options.peek) {
-            const messages = this.unreadRows(me, limit).map((row) => this.toMessage(row));
-            return { messages, cursor: this.cursor(me), remaining: this.unreadCount(me) - messages.length };
+            const cursor = this.cursor(me);
+            const { rows, total } = this.unreadRows(me, cursor, limit);
+            const messages = rows.map((row) => this.toMessage(row));
+            return { messages, cursor, remaining: total - messages.length };
         }
         return this.write(() => {
-            const messages = this.unreadRows(me, limit).map((row) => this.toMessage(row));
+            const readAt = this.cursor(me);
+            const { rows, total } = this.unreadRows(me, readAt, limit);
+            const messages = rows.map((row) => this.toMessage(row));
             if (messages.length) {
                 const last = messages[messages.length - 1].seq;
-                this.db.prepare(`
+                prepared(this.db, `
           INSERT INTO cursors(agent_id, last_seq) VALUES(?, ?)
           ON CONFLICT(agent_id) DO UPDATE SET last_seq = MAX(cursors.last_seq, excluded.last_seq)
         `).run(me, last);
                 this.event(me, "inbox_read", "agent", me, { cursor: last, count: messages.length });
                 this.touch(me);
+                return { messages, cursor: last, remaining: total - messages.length };
             }
-            return { messages, cursor: this.cursor(me), remaining: this.unreadCount(me) };
+            return { messages, cursor: readAt, remaining: 0 };
         });
     }
     ack(actor, seq) {
         return this.write(() => {
-            const row = this.db.prepare("SELECT * FROM messages WHERE seq = ?").get(seq);
+            const row = prepared(this.db, "SELECT * FROM messages WHERE seq = ?").get(seq);
             if (!row || !(row.recipient === actor.agentId || row.recipient === null))
                 throw new BusError("not_found", `no message ${seq} for ${actor.agentId}`);
             const ackMs = this.now();
-            this.db.prepare("INSERT OR IGNORE INTO acks(seq, agent_id, ack_ms) VALUES(?, ?, ?)").run(seq, actor.agentId, ackMs);
+            prepared(this.db, "INSERT OR IGNORE INTO acks(seq, agent_id, ack_ms) VALUES(?, ?, ?)").run(seq, actor.agentId, ackMs);
             this.event(actor.agentId, "ack", "message", seq);
             this.touch(actor.agentId);
             return { seq, ackMs };
@@ -400,13 +408,13 @@ export class Bus {
         const limit = Math.max(1, Math.min(1000, options.limit ?? 100));
         let rows;
         if (options.taskId !== undefined)
-            rows = this.db.prepare("SELECT * FROM messages WHERE task_id = ? AND seq > ? ORDER BY seq LIMIT ?").all(options.taskId, options.sinceSeq ?? 0, limit);
+            rows = prepared(this.db, "SELECT * FROM messages WHERE task_id = ? AND seq > ? ORDER BY seq LIMIT ?").all(options.taskId, options.sinceSeq ?? 0, limit);
         else if (options.thread)
-            rows = this.db.prepare("SELECT * FROM messages WHERE thread = ? AND seq > ? ORDER BY seq LIMIT ?").all(options.thread, options.sinceSeq ?? 0, limit);
+            rows = prepared(this.db, "SELECT * FROM messages WHERE thread = ? AND seq > ? ORDER BY seq LIMIT ?").all(options.thread, options.sinceSeq ?? 0, limit);
         else if (options.sinceSeq !== undefined)
-            rows = this.db.prepare("SELECT * FROM messages WHERE seq > ? ORDER BY seq LIMIT ?").all(options.sinceSeq, limit);
+            rows = prepared(this.db, "SELECT * FROM messages WHERE seq > ? ORDER BY seq LIMIT ?").all(options.sinceSeq, limit);
         else
-            rows = this.db.prepare("SELECT * FROM messages ORDER BY seq DESC LIMIT ?").all(limit).reverse();
+            rows = prepared(this.db, "SELECT * FROM messages ORDER BY seq DESC LIMIT ?").all(limit).reverse();
         return rows.map((row) => this.toMessage(row));
     }
     // ----------------------------------------------------------------- waiting
@@ -422,7 +430,7 @@ export class Bus {
             // A waiter killed earlier (kill -9) can leave 'waiting' stored; clear it without writing otherwise.
             if (String(this.agentRow(me)?.status ?? "") === "waiting") {
                 this.write(() => {
-                    this.db.prepare("UPDATE agents SET status = 'idle', wait_until_ms = NULL, last_seen_ms = ? WHERE id = ? AND status = 'waiting'").run(this.now(), me);
+                    prepared(this.db, "UPDATE agents SET status = 'idle', wait_until_ms = NULL, last_seen_ms = ? WHERE id = ? AND status = 'waiting'").run(this.now(), me);
                 });
             }
             return { status: "mail", messages: pending, events: [], seq: latestEventSeq(this.db) };
@@ -430,10 +438,12 @@ export class Bus {
         const timeoutMs = Math.max(0, options.timeoutMs);
         const deadline = Date.now() + timeoutMs;
         let since = this.write(() => {
-            this.db.prepare("UPDATE agents SET status = 'waiting', wait_until_ms = ?, last_seen_ms = ? WHERE id = ?").run(this.now() + timeoutMs, this.now(), me);
+            prepared(this.db, "UPDATE agents SET status = 'waiting', wait_until_ms = ?, last_seen_ms = ? WHERE id = ?").run(this.now() + timeoutMs, this.now(), me);
             return this.event(me, "agent_waiting", "agent", me, { until: this.now() + timeoutMs });
         });
-        const watcher = options.watcher ?? new ChangeWatcher(this.db, this.dbPath, options.watcherOptions);
+        // Waiters poll data_version only as a missed fs.watch fallback; a 1 s ceiling keeps an
+        // idle wait near one read per second instead of the 100 ms default meant for short waits.
+        const watcher = options.watcher ?? new ChangeWatcher(this.db, this.dbPath, { maxPollMs: 1000, ...options.watcherOptions });
         let result = { status: "timeout", messages: [], events: [], seq: since };
         try {
             while (!options.signal?.aborted) {
@@ -463,7 +473,7 @@ export class Bus {
             if (this.db.isOpen) {
                 const reason = result.status;
                 this.write(() => {
-                    this.db.prepare("UPDATE agents SET status = 'idle', wait_until_ms = NULL, last_seen_ms = ? WHERE id = ? AND status = 'waiting'").run(this.now(), me);
+                    prepared(this.db, "UPDATE agents SET status = 'idle', wait_until_ms = NULL, last_seen_ms = ? WHERE id = ? AND status = 'waiting'").run(this.now(), me);
                     this.event(me, "agent_idle", "agent", me, { reason });
                 });
             }
@@ -473,7 +483,7 @@ export class Bus {
     /** Task events after `afterSeq` by someone else on a task this agent owns, reviews, or could claim. */
     taskEventsFor(agentId, afterSeq, uptoSeq = Number.MAX_SAFE_INTEGER) {
         const role = String(this.agentRow(agentId)?.role ?? "");
-        const rows = this.db.prepare(`
+        const rows = prepared(this.db, `
       SELECT e.* FROM events e JOIN tasks t ON e.entity = 'task' AND t.id = CAST(e.entity_id AS INTEGER)
       WHERE e.seq > ? AND e.seq <= ? AND e.actor <> ? AND e.source = 'v2'
         AND (t.assignee = ? OR t.reviewer = ? OR (t.reviewer IS NULL AND t.creator = ?)
@@ -499,16 +509,32 @@ export class Bus {
         return latestEventSeq(this.db);
     }
     events(sinceSeq = 0, limit = 200) {
-        const rows = this.db.prepare("SELECT * FROM events WHERE seq > ? ORDER BY seq LIMIT ?").all(sinceSeq, Math.max(1, Math.min(5000, limit)));
+        const rows = prepared(this.db, "SELECT * FROM events WHERE seq > ? ORDER BY seq LIMIT ?").all(sinceSeq, Math.max(1, Math.min(5000, limit)));
         return rows.map((row) => this.toEvent(row));
     }
     // ------------------------------------------------------------------- tasks
     taskRow(id) {
-        return this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
+        return prepared(this.db, "SELECT * FROM tasks WHERE id = ?").get(id);
     }
-    toTask(row) {
+    taskDeps(id) {
+        return prepared(this.db, "SELECT depends_on FROM task_deps WHERE task_id = ? ORDER BY depends_on").all(id).map((row) => Number(row.depends_on));
+    }
+    /** All dependencies for `ids` in one query, keyed by task id. */
+    dependenciesFor(ids) {
+        const map = new Map();
+        if (!ids.length)
+            return map;
+        const rows = this.db.prepare(`SELECT task_id, depends_on FROM task_deps WHERE task_id IN (${placeholders(ids.length)}) ORDER BY depends_on`).all(...ids);
+        for (const row of rows) {
+            const taskId = Number(row.task_id);
+            const list = map.get(taskId) ?? [];
+            list.push(Number(row.depends_on));
+            map.set(taskId, list);
+        }
+        return map;
+    }
+    toTask(row, dependencies) {
         const id = Number(row.id);
-        const deps = this.db.prepare("SELECT depends_on FROM task_deps WHERE task_id = ? ORDER BY depends_on").all(id);
         return {
             id,
             legacyId: row.legacy_id ? String(row.legacy_id) : null,
@@ -533,8 +559,13 @@ export class Bus {
             claimExpiresMs: num(row.claim_expires_ms),
             createdMs: Number(row.created_ms),
             updatedMs: Number(row.updated_ms),
-            dependencies: deps.map((dep) => Number(dep.depends_on)),
+            dependencies: dependencies ?? this.taskDeps(id),
         };
+    }
+    /** Rows -> tasks with one shared dependency query instead of one per task. */
+    toTasks(rows) {
+        const dependencies = this.dependenciesFor(rows.map((row) => Number(row.id)));
+        return rows.map((row) => this.toTask(row, dependencies.get(Number(row.id))));
     }
     requireTask(id) {
         if (!Number.isInteger(id) || id <= 0)
@@ -546,11 +577,11 @@ export class Bus {
     }
     getTask(id) {
         const task = this.requireTask(id);
-        const notes = this.db.prepare("SELECT * FROM task_notes WHERE task_id = ? ORDER BY id").all(id).map((row) => ({
+        const notes = prepared(this.db, "SELECT * FROM task_notes WHERE task_id = ? ORDER BY id").all(id).map((row) => ({
             id: Number(row.id), taskId: Number(row.task_id), author: String(row.author), tsMs: Number(row.ts_ms), body: String(row.body),
         }));
-        const dependents = this.db.prepare("SELECT task_id FROM task_deps WHERE depends_on = ? ORDER BY task_id").all(id).map((row) => Number(row.task_id));
-        const leases = this.db.prepare("SELECT path FROM leases WHERE task_id = ? ORDER BY path").all(id).map((row) => String(row.path));
+        const dependents = prepared(this.db, "SELECT task_id FROM task_deps WHERE depends_on = ? ORDER BY task_id").all(id).map((row) => Number(row.task_id));
+        const leases = prepared(this.db, "SELECT path FROM leases WHERE task_id = ? ORDER BY path").all(id).map((row) => String(row.path));
         return { ...task, notes, dependents, messages: this.getMessages({ taskId: id, limit: 1000 }), leases };
     }
     /** Summary columns for the given task ids, without deps, notes or messages (dashboard deltas). */
@@ -585,7 +616,7 @@ export class Bus {
         }
         const limit = Math.max(1, Math.min(1000, input.limit ?? 200));
         const sql = `SELECT * FROM tasks ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id LIMIT ?`;
-        return this.db.prepare(sql).all(...args, limit).map((row) => this.toTask(row));
+        return this.toTasks(this.db.prepare(sql).all(...args, limit));
     }
     /**
      * Claimed tasks with no claim/note activity for `stallMs` — a probably-dead claim.
@@ -636,13 +667,13 @@ export class Bus {
     /** Reopen claims past their expiry. There is no sweeper process; every task write calls this first. */
     reopenExpiredClaims() {
         const now = this.now();
-        const expired = this.db.prepare("SELECT id, assignee FROM tasks WHERE state = 'claimed' AND claim_expires_ms IS NOT NULL AND claim_expires_ms < ?").all(now);
+        const expired = prepared(this.db, "SELECT id, assignee FROM tasks WHERE state = 'claimed' AND claim_expires_ms IS NOT NULL AND claim_expires_ms < ?").all(now);
         for (const row of expired) {
             const id = Number(row.id);
-            const created = this.db.prepare("SELECT data_json FROM events WHERE entity = 'task' AND entity_id = ? AND kind = 'task_created' ORDER BY seq LIMIT 1").get(String(id));
+            const created = prepared(this.db, "SELECT data_json FROM events WHERE entity = 'task' AND entity_id = ? AND kind = 'task_created' ORDER BY seq LIMIT 1").get(String(id));
             const preassigned = json(created?.data_json, {}).assignee ?? null;
-            this.db.prepare("UPDATE tasks SET state = 'open', assignee = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(preassigned, now, id);
-            this.db.prepare("DELETE FROM leases WHERE task_id = ?").run(id);
+            prepared(this.db, "UPDATE tasks SET state = 'open', assignee = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(preassigned, now, id);
+            prepared(this.db, "DELETE FROM leases WHERE task_id = ?").run(id);
             this.event("system", "claim_expired", "task", id, { previousAssignee: row.assignee ?? null });
         }
     }
@@ -677,13 +708,13 @@ export class Bus {
             for (const dep of dependencies)
                 blocked = this.requireTask(dep).state !== "accepted" || blocked;
             const state = blocked ? "blocked" : "open";
-            const result = this.db.prepare(`
+            const result = prepared(this.db, `
         INSERT INTO tasks(project, parent_id, title, brief, acceptance, role, priority, state, creator, assignee, reviewer,
           path_scopes_json, refs_json, max_retries, created_ms, updated_ms)
         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(project, input.parentId ?? null, title, brief, acceptance, role, priority, state, actor.agentId, to, reviewer, JSON.stringify(pathScopes), JSON.stringify(refs), maxRetries, now, now);
             const id = Number(result.lastInsertRowid);
-            const insertDep = this.db.prepare("INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES(?, ?)");
+            const insertDep = prepared(this.db, "INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES(?, ?)");
             for (const dep of dependencies)
                 insertDep.run(id, dep);
             this.event(actor.agentId, "task_created", "task", id, { title: title.slice(0, 200), assignee: to, role, state });
@@ -698,7 +729,7 @@ export class Bus {
     /**
      * Claim a task atomically. The claim is one UPDATE ... WHERE state IN ('open','changes_requested')
      * AND (assignee IS NULL OR assignee = me) RETURNING; it wins only if that row came back.
-     * Without an id, the oldest claimable task assigned to me, or unassigned for my role, is taken.
+     * Without an id, the most urgent claimable task assigned to me, or unassigned for my role, is taken.
      */
     claimTask(actor, taskId) {
         const me = actor.agentId;
@@ -707,54 +738,73 @@ export class Bus {
             this.reopenExpiredClaims();
             let candidates;
             if (explicit) {
-                candidates = [this.requireTask(Number(taskId)).id];
+                const id = Number(taskId);
+                if (!Number.isInteger(id) || id <= 0)
+                    throw new BusError("invalid", `invalid task id: ${taskId}`);
+                const row = this.taskRow(id);
+                if (!row)
+                    throw new BusError("not_found", `unknown task: ${taskId}`);
+                candidates = [row];
             }
             else {
                 const role = String(this.agentRow(me)?.role ?? "");
-                candidates = this.db.prepare(`
-          SELECT id FROM tasks WHERE state IN ('open', 'changes_requested')
+                // Assigned-to-me first, then urgent before older ordinary work.
+                candidates = prepared(this.db, `
+          SELECT * FROM tasks WHERE state IN ('open', 'changes_requested')
             AND (assignee = ? OR (assignee IS NULL AND (role = '' OR role = ?)))
-          ORDER BY CASE WHEN assignee = ? THEN 0 ELSE 1 END, id LIMIT 100
-        `).all(me, role, me).map((row) => Number(row.id));
+          ORDER BY CASE WHEN assignee = ? THEN 0 ELSE 1 END,
+                   CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+                   id LIMIT 100
+        `).all(me, role, me);
             }
-            for (const id of candidates) {
-                const current = this.requireTask(id);
+            for (const row of candidates) {
+                const current = this.toLiteTask(row);
                 const conflicts = this.leaseConflicts(current);
                 if (conflicts.length) {
                     if (explicit)
-                        throw new BusError("conflict", `task ${id} path scopes overlap leases held by ${conflicts.map((c) => `#${c.taskId}:${c.path}`).join(", ")}`);
+                        throw new BusError("conflict", `task ${current.id} path scopes overlap leases held by ${conflicts.map((c) => `#${c.taskId}:${c.path}`).join(", ")}`);
                     continue;
                 }
                 const now = this.now();
-                const row = this.db.prepare(`
+                const claimed = prepared(this.db, `
           UPDATE tasks SET state = 'claimed', assignee = ?, claim_expires_ms = ?, updated_ms = ?
           WHERE id = ? AND state IN ('open', 'changes_requested') AND (assignee IS NULL OR assignee = ?)
           RETURNING *
-        `).get(me, now + this.claimTtlMs, now, id, me);
-                if (!row) {
+        `).get(me, now + this.claimTtlMs, now, current.id, me);
+                if (!claimed) {
                     if (explicit) {
                         const reason = current.assignee && current.assignee !== me ? `is ${current.state} and assigned to ${current.assignee}` : `is ${current.state}`;
-                        throw new BusError("conflict", `task ${id} cannot be claimed: it ${reason}`);
+                        throw new BusError("conflict", `task ${current.id} cannot be claimed: it ${reason}`);
                     }
                     continue;
                 }
-                const task = this.toTask(row);
+                const task = this.toTask(claimed);
                 if (task.project) {
-                    const insert = this.db.prepare("INSERT OR REPLACE INTO leases(project, path, task_id, created_ms) VALUES(?, ?, ?, ?)");
+                    const insert = prepared(this.db, "INSERT OR REPLACE INTO leases(project, path, task_id, created_ms) VALUES(?, ?, ?, ?)");
                     for (const path of task.pathScopes)
-                        insert.run(task.project, path, id, now);
+                        insert.run(task.project, path, task.id, now);
                 }
-                this.event(me, "task_claimed", "task", id, { round: task.round, leases: task.pathScopes });
+                this.event(me, "task_claimed", "task", task.id, { round: task.round, leases: task.pathScopes });
                 this.touch(me, "working");
                 return task;
             }
             throw new BusError("not_found", "no claimable task");
         });
     }
+    /** The claim path's cheap view of a task row: no dependency or refs parsing. */
+    toLiteTask(row) {
+        return {
+            id: Number(row.id),
+            state: String(row.state),
+            assignee: row.assignee ? String(row.assignee) : null,
+            project: row.project ? String(row.project) : null,
+            pathScopes: json(row.path_scopes_json, []),
+        };
+    }
     leaseConflicts(task) {
         if (!task.project || !task.pathScopes.length)
             return [];
-        const active = this.db.prepare("SELECT task_id, path FROM leases WHERE project = ? AND task_id <> ?").all(task.project, task.id);
+        const active = prepared(this.db, "SELECT task_id, path FROM leases WHERE project = ? AND task_id <> ?").all(task.project, task.id);
         const conflicts = [];
         for (const wanted of task.pathScopes) {
             for (const lease of active)
@@ -769,12 +819,12 @@ export class Bus {
             this.reopenExpiredClaims();
             const task = this.requireTask(taskId);
             const now = this.now();
-            const result = this.db.prepare("INSERT INTO task_notes(task_id, author, ts_ms, body) VALUES(?, ?, ?, ?)").run(task.id, actor.agentId, now, body);
+            const result = prepared(this.db, "INSERT INTO task_notes(task_id, author, ts_ms, body) VALUES(?, ?, ?, ?)").run(task.id, actor.agentId, now, body);
             if (task.state === "claimed" && task.assignee === actor.agentId) {
-                this.db.prepare("UPDATE tasks SET claim_expires_ms = ?, updated_ms = ? WHERE id = ?").run(now + this.claimTtlMs, now, task.id);
+                prepared(this.db, "UPDATE tasks SET claim_expires_ms = ?, updated_ms = ? WHERE id = ?").run(now + this.claimTtlMs, now, task.id);
             }
             else {
-                this.db.prepare("UPDATE tasks SET updated_ms = ? WHERE id = ?").run(now, task.id);
+                prepared(this.db, "UPDATE tasks SET updated_ms = ? WHERE id = ?").run(now, task.id);
             }
             const id = Number(result.lastInsertRowid);
             this.event(actor.agentId, "task_note", "task", task.id, { noteId: id });
@@ -810,7 +860,7 @@ export class Bus {
                 throw new BusError("conflict", `task ${task.id} is ${task.state}; claim it before submitting`);
             const now = this.now();
             const result = { summary, details, changedFiles, artifacts, validation, completedMs: now };
-            this.db.prepare("UPDATE tasks SET state = 'submitted', result_json = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?")
+            prepared(this.db, "UPDATE tasks SET state = 'submitted', result_json = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?")
                 .run(JSON.stringify(result), now, task.id);
             const reviewer = task.reviewer ?? task.creator;
             this.event(actor.agentId, "task_submitted", "task", task.id, { round: task.round, reviewer });
@@ -845,8 +895,8 @@ export class Bus {
             const review = { reviewer: actor.agentId, accepted: Boolean(input.accepted), feedback, reviewedMs: now };
             const thread = `task-${task.id}`;
             if (review.accepted) {
-                this.db.prepare("UPDATE tasks SET state = 'accepted', review_json = ?, updated_ms = ? WHERE id = ?").run(JSON.stringify(review), now, task.id);
-                this.db.prepare("DELETE FROM leases WHERE task_id = ?").run(task.id);
+                prepared(this.db, "UPDATE tasks SET state = 'accepted', review_json = ?, updated_ms = ? WHERE id = ?").run(JSON.stringify(review), now, task.id);
+                prepared(this.db, "DELETE FROM leases WHERE task_id = ?").run(task.id);
                 this.event(actor.agentId, "task_accepted", "task", task.id, { round: task.round });
                 if (task.assignee && task.assignee !== actor.agentId) {
                     this.insertMessage(actor.agentId, task.assignee, { type: "feedback", subject: `[ACCEPTED #${task.id}] ${task.title}`, body: `${feedback}\n\nNo further action is required on this task.`, thread, taskId: task.id, refs: [], requiresAck: false });
@@ -856,15 +906,15 @@ export class Bus {
             else {
                 const round = task.round + 1;
                 if (round - 1 > task.maxRetries) {
-                    this.db.prepare("UPDATE tasks SET state = 'failed', round = ?, review_json = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(round, JSON.stringify(review), now, task.id);
-                    this.db.prepare("DELETE FROM leases WHERE task_id = ?").run(task.id);
+                    prepared(this.db, "UPDATE tasks SET state = 'failed', round = ?, review_json = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(round, JSON.stringify(review), now, task.id);
+                    prepared(this.db, "DELETE FROM leases WHERE task_id = ?").run(task.id);
                     this.event(actor.agentId, "task_failed", "task", task.id, { round, reason: "review retry limit exceeded" });
                     if (task.creator !== actor.agentId) {
                         this.insertMessage(actor.agentId, task.creator, { type: "control", subject: `[ESCALATE #${task.id}] review retry limit exceeded`, body: feedback, thread, taskId: task.id, refs: [], requiresAck: false });
                     }
                 }
                 else {
-                    this.db.prepare("UPDATE tasks SET state = 'changes_requested', round = ?, review_json = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(round, JSON.stringify(review), now, task.id);
+                    prepared(this.db, "UPDATE tasks SET state = 'changes_requested', round = ?, review_json = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(round, JSON.stringify(review), now, task.id);
                     this.event(actor.agentId, "task_changes_requested", "task", task.id, { round });
                     if (task.assignee) {
                         this.insertMessage(actor.agentId, task.assignee, { type: "feedback", subject: `[CHANGES #${task.id} r${round}] ${task.title}`, body: `${feedback}\n\nRevise the existing work and submit the same task again.`, thread, taskId: task.id, refs: [], requiresAck: false });
@@ -876,16 +926,16 @@ export class Bus {
         });
     }
     unblockDependents(taskId, actor) {
-        const dependents = this.db.prepare(`
+        const dependents = prepared(this.db, `
       SELECT t.id FROM task_deps d JOIN tasks t ON t.id = d.task_id WHERE d.depends_on = ? AND t.state = 'blocked'
     `).all(taskId);
         for (const row of dependents) {
             const id = Number(row.id);
-            const open = this.db.prepare(`
+            const open = prepared(this.db, `
         SELECT COUNT(*) AS n FROM task_deps d JOIN tasks t ON t.id = d.depends_on WHERE d.task_id = ? AND t.state <> 'accepted'
       `).get(id);
             if (Number(open.n) === 0) {
-                this.db.prepare("UPDATE tasks SET state = 'open', updated_ms = ? WHERE id = ?").run(this.now(), id);
+                prepared(this.db, "UPDATE tasks SET state = 'open', updated_ms = ? WHERE id = ?").run(this.now(), id);
                 this.event(actor, "task_unblocked", "task", id, { releasedBy: taskId });
             }
         }
@@ -911,10 +961,10 @@ export class Bus {
                 throw new BusError("conflict", `task ${task.id} is ${task.state}, not claimed`);
             const now = this.now();
             if (!claimExpired) {
-                const created = this.db.prepare("SELECT data_json FROM events WHERE entity = 'task' AND entity_id = ? AND kind = 'task_created' ORDER BY seq LIMIT 1").get(String(task.id));
+                const created = prepared(this.db, "SELECT data_json FROM events WHERE entity = 'task' AND entity_id = ? AND kind = 'task_created' ORDER BY seq LIMIT 1").get(String(task.id));
                 const preassigned = json(created?.data_json, {}).assignee ?? null;
-                this.db.prepare("UPDATE tasks SET state = 'open', assignee = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(preassigned, now, task.id);
-                this.db.prepare("DELETE FROM leases WHERE task_id = ?").run(task.id);
+                prepared(this.db, "UPDATE tasks SET state = 'open', assignee = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(preassigned, now, task.id);
+                prepared(this.db, "DELETE FROM leases WHERE task_id = ?").run(task.id);
             }
             this.event(actor.agentId, "task_released", "task", task.id, { reason: text.slice(0, 500), previousAssignee: before.assignee });
             this.touch(actor.agentId, "idle");
@@ -960,17 +1010,17 @@ export class Bus {
             const now = this.now();
             const attempts = task.attempts + 1;
             const thread = `task-${task.id}`;
-            this.db.prepare("INSERT INTO task_notes(task_id, author, ts_ms, body) VALUES(?, ?, ?, ?)").run(task.id, actor.agentId, now, `failure (attempt ${attempts}): ${note}`);
-            this.db.prepare("DELETE FROM leases WHERE task_id = ?").run(task.id);
+            prepared(this.db, "INSERT INTO task_notes(task_id, author, ts_ms, body) VALUES(?, ?, ?, ?)").run(task.id, actor.agentId, now, `failure (attempt ${attempts}): ${note}`);
+            prepared(this.db, "DELETE FROM leases WHERE task_id = ?").run(task.id);
             if (attempts <= task.maxRetries) {
-                this.db.prepare("UPDATE tasks SET state = 'open', attempts = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(attempts, now, task.id);
+                prepared(this.db, "UPDATE tasks SET state = 'open', attempts = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(attempts, now, task.id);
                 this.event(actor.agentId, "task_retry", "task", task.id, { attempts, maxRetries: task.maxRetries });
                 if (task.assignee) {
                     this.insertMessage("system", task.assignee, { type: "task", subject: `[RETRY #${task.id}] attempt ${attempts + 1}: ${task.title}`, body: `${note}\n\nRetry the original scoped task. Do not broaden scope.`, thread, taskId: task.id, refs: task.refs, requiresAck: false });
                 }
             }
             else {
-                this.db.prepare("UPDATE tasks SET state = 'failed', attempts = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(attempts, now, task.id);
+                prepared(this.db, "UPDATE tasks SET state = 'failed', attempts = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(attempts, now, task.id);
                 this.event(actor.agentId, "task_failed", "task", task.id, { attempts, reason: "retry limit exceeded" });
                 if (task.creator !== actor.agentId) {
                     this.insertMessage(actor.agentId, task.creator, { type: "control", subject: `[ESCALATE #${task.id}] attempts exhausted`, body: note, thread, taskId: task.id, refs: [], requiresAck: false });
@@ -983,14 +1033,15 @@ export class Bus {
     cancelTask(actor, taskId, reason) {
         const text = boundedString(reason, "reason", LIMITS.reason) || "cancelled";
         return this.write(() => {
+            this.reopenExpiredClaims();
             const task = this.requireTask(taskId);
             if (actor.authority !== "operator" && actor.agentId !== task.creator)
                 throw new BusError("forbidden", `only ${task.creator} or the operator may cancel task ${task.id}`);
             if (CLOSED_STATES.includes(task.state))
                 throw new BusError("conflict", `task ${task.id} is already ${task.state}`);
             const now = this.now();
-            this.db.prepare("UPDATE tasks SET state = 'cancelled', claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(now, task.id);
-            this.db.prepare("DELETE FROM leases WHERE task_id = ?").run(task.id);
+            prepared(this.db, "UPDATE tasks SET state = 'cancelled', claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(now, task.id);
+            prepared(this.db, "DELETE FROM leases WHERE task_id = ?").run(task.id);
             this.event(actor.agentId, "task_cancelled", "task", task.id, { reason: text.slice(0, 500) });
             if (task.assignee && task.assignee !== actor.agentId) {
                 this.insertMessage(actor.agentId, task.assignee, { type: "control", subject: `[CANCELLED #${task.id}] ${task.title}`, body: text, thread: `task-${task.id}`, taskId: task.id, refs: [], requiresAck: false });
@@ -1002,7 +1053,7 @@ export class Bus {
     // ------------------------------------------------------------------ status
     status() {
         const counts = {};
-        for (const row of this.db.prepare("SELECT state, COUNT(*) AS n FROM tasks GROUP BY state").all())
+        for (const row of prepared(this.db, "SELECT state, COUNT(*) AS n FROM tasks GROUP BY state").all())
             counts[String(row.state)] = Number(row.n);
         return { dbPath: this.dbPath, seq: this.latestSeq(), agents: this.listAgents(), counts, openTasks: this.listTasks({ limit: 200 }) };
     }
