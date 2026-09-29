@@ -398,3 +398,60 @@ pub fn render_status(status: &StatusResult) -> String {
         render_tasks(&status.open_tasks)
     )
 }
+
+fn counts(record: &std::collections::HashMap<String, u64>) -> String {
+    let mut entries: Vec<(&String, &u64)> = record.iter().filter(|(_, n)| **n > 0).collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    if entries.is_empty() {
+        "none".to_string()
+    } else {
+        entries
+            .iter()
+            .map(|(k, n)| format!("{k} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+pub fn render_import(report: &crate::import::ImportReport) -> String {
+    let mut lines = vec![format!(
+        "{}Import into {}",
+        if report.dry_run {
+            "Dry run: nothing written. "
+        } else {
+            ""
+        },
+        report.db_path
+    )];
+    if report.sources.is_empty() {
+        lines.push("  (no sources found)".to_string());
+    }
+    for source in &report.sources {
+        lines.push(String::new());
+        lines.push(format!("{}  {}", source.kind, source.path));
+        lines.push(format!(
+            "  sha256     {}{}",
+            source.sha256,
+            if source.already_imported {
+                "  (already imported; use --force to recheck)"
+            } else {
+                ""
+            }
+        ));
+        lines.push(format!("  read       {}", counts(&source.read)));
+        lines.push(format!(
+            "  {:<10} {}",
+            if report.dry_run { "would add" } else { "added" },
+            counts(&source.inserted)
+        ));
+        lines.push(format!("  existing   {}", counts(&source.duplicates)));
+        lines.push(format!("  invalid    {}", counts(&source.invalid)));
+    }
+    lines.push(String::new());
+    lines.push(if report.cursor_seq > 0 {
+        format!("Cursors raised to message #{}.", report.cursor_seq)
+    } else {
+        "Cursors unchanged.".to_string()
+    });
+    lines.join("\n")
+}

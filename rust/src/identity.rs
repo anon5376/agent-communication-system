@@ -28,7 +28,7 @@ pub struct Identity {
     pub permissions: Permissions,
 }
 
-fn is_safe_agent_id(id: &str) -> bool {
+pub(crate) fn is_safe_agent_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && id

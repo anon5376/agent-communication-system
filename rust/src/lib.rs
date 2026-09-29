@@ -10,6 +10,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod identity;
+pub mod import;
 pub mod render;
 pub mod types;
 pub mod wait;

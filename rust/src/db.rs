@@ -223,3 +223,16 @@ pub fn latest_event_seq(conn: &Connection) -> Result<i64> {
         .prepare_cached("SELECT COALESCE(MAX(seq), 0) AS seq FROM events")?
         .query_row([], |row| row.get(0))?)
 }
+
+pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(conn
+        .prepare_cached("SELECT value FROM meta WHERE key = ?")?
+        .query_row([key], |row| row.get(0))
+        .ok())
+}
+
+pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.prepare_cached("INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")?
+        .execute(rusqlite::params![key, value])?;
+    Ok(())
+}

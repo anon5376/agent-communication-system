@@ -2,9 +2,10 @@
 //! SQLite file directly; there is no broker.
 
 use crate::bus::{Bus, CreateTaskInput, ListTasksInput, SendInput, SubmitInput};
-use crate::db::resolve_db_path_with;
+use crate::db::{home_for, resolve_db_path_with};
 use crate::error::{BusError, Code, Result};
 use crate::identity::{self, Identity};
+use crate::import::{default_import_sources, run_import, ImportOptions, ImportSources};
 use crate::render::*;
 use crate::types::OPERATOR_ID;
 use crate::wait;
@@ -679,19 +680,17 @@ fn doctor_command(ctx: &mut Context) -> Result<i32> {
                     env_map.get(name).cloned()
                 })
             });
-            let resolved = crate::config::load_config(&config_path)
-                .and_then(|config| {
-                    crate::config::resolve_agent(&config, agent_id)
-                        .map(|r| {
-                            (
-                                r.harness.id.clone(),
-                                r.harness.command.clone(),
-                                r.harness.adapter.clone(),
-                                r.agent.auto_start,
-                                r.agent.enabled,
-                            )
-                        })
-                });
+            let resolved = crate::config::load_config(&config_path).and_then(|config| {
+                crate::config::resolve_agent(&config, agent_id).map(|r| {
+                    (
+                        r.harness.id.clone(),
+                        r.harness.command.clone(),
+                        r.harness.adapter.clone(),
+                        r.agent.auto_start,
+                        r.agent.enabled,
+                    )
+                })
+            });
             match resolved {
                 Ok((harness_id, harness_command, harness_adapter, auto_start, agent_enabled)) => {
                     lines.push(format!(
@@ -737,7 +736,10 @@ fn dispatch(ctx: &mut Context) -> Result<i32> {
             let result = ctx.bus()?.init()?;
             ctx.out(
                 serde_json::to_value(&result)?,
-                &format!("bus {}\noperator token {} ({})", result.db_path, result.operator_token_path, result.operator),
+                &format!(
+                    "bus {}\noperator token {} ({})",
+                    result.db_path, result.operator_token_path, result.operator
+                ),
             );
             Ok(0)
         }
@@ -747,7 +749,13 @@ fn dispatch(ctx: &mut Context) -> Result<i32> {
             let role = who
                 .agent
                 .as_ref()
-                .map(|a| if a.role.is_empty() { String::new() } else { format!(", role {}", a.role) })
+                .map(|a| {
+                    if a.role.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", role {}", a.role)
+                    }
+                })
                 .unwrap_or_default();
             ctx.out(
                 serde_json::to_value(&who)?,
@@ -772,7 +780,9 @@ fn dispatch(ctx: &mut Context) -> Result<i32> {
                         .iter()
                         .map(|(agent, unread)| {
                             let mut value = serde_json::to_value(agent).unwrap_or(json!({}));
-                            value.as_object_mut().map(|o| o.insert("unread".into(), json!(unread)));
+                            value
+                                .as_object_mut()
+                                .map(|o| o.insert("unread".into(), json!(unread)));
                             value
                         })
                         .collect::<Vec<_>>(),
@@ -806,7 +816,9 @@ fn dispatch(ctx: &mut Context) -> Result<i32> {
                 );
                 Ok(0)
             }
-            _ => Err(BusError::invalid("usage: qagent agent add <id> --role R | qagent agent list")),
+            _ => Err(BusError::invalid(
+                "usage: qagent agent add <id> --role R | qagent agent list",
+            )),
         },
         Some("token") => {
             if sub.as_deref() != Some("rotate") {
@@ -825,18 +837,35 @@ fn dispatch(ctx: &mut Context) -> Result<i32> {
             let me = ctx.identity(false)?;
             let to = ctx.position(1, "recipient")?;
             let subject = ctx.position(2, "subject")?;
-            let body = ctx.maybe_stdin(ctx.parsed.positionals.get(3).cloned()).unwrap_or_default();
+            let body = ctx
+                .maybe_stdin(ctx.parsed.positionals.get(3).cloned())
+                .unwrap_or_default();
             let task_id = ctx.int_flag("task")?;
             let msg_type = ctx.str_flag("type");
             let thread = ctx.str_flag("thread");
             let requires_ack = ctx.bool_flag("ack");
             let sent = ctx.bus()?.send(
                 &me,
-                SendInput { to, subject: Some(subject), body, msg_type, thread, task_id, refs: None, requires_ack },
+                SendInput {
+                    to,
+                    subject: Some(subject),
+                    body,
+                    msg_type,
+                    thread,
+                    task_id,
+                    refs: None,
+                    requires_ack,
+                },
             )?;
             let text = sent
                 .iter()
-                .map(|message| format!("sent #{} to {}", message.seq, message.recipient.clone().unwrap_or_else(|| "*".into())))
+                .map(|message| {
+                    format!(
+                        "sent #{} to {}",
+                        message.seq,
+                        message.recipient.clone().unwrap_or_else(|| "*".into())
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             ctx.out(serde_json::to_value(&sent)?, &text);
@@ -847,8 +876,15 @@ fn dispatch(ctx: &mut Context) -> Result<i32> {
             let peek = ctx.bool_flag("peek");
             let limit = ctx.int_flag("limit")?;
             let result = ctx.bus()?.inbox(&me, peek, limit)?;
-            let extra = if result.remaining > 0 { format!("\n({} more unread)", result.remaining) } else { String::new() };
-            let text = format!("{}{extra}", render_messages(&result.messages, "(no new messages)"));
+            let extra = if result.remaining > 0 {
+                format!("\n({} more unread)", result.remaining)
+            } else {
+                String::new()
+            };
+            let text = format!(
+                "{}{extra}",
+                render_messages(&result.messages, "(no new messages)")
+            );
             ctx.out(
                 json!({ "messages": serde_json::to_value(&result.messages)?, "cursor": result.cursor, "remaining": result.remaining }),
                 &text,
@@ -858,19 +894,59 @@ fn dispatch(ctx: &mut Context) -> Result<i32> {
         Some("ack") => {
             let raw = ctx.position(1, "message seq")?;
             let raw = raw.strip_prefix('#').unwrap_or(&raw).to_string();
-            let seq: i64 = raw.parse().map_err(|_| BusError::invalid("ack needs a message sequence number"))?;
+            let seq: i64 = raw
+                .parse()
+                .map_err(|_| BusError::invalid("ack needs a message sequence number"))?;
             let me = ctx.identity(false)?;
             let (seq, ack_ms) = ctx.bus()?.ack(&me, seq)?;
-            ctx.out(json!({ "seq": seq, "ackMs": ack_ms }), &format!("acknowledged #{seq}"));
+            ctx.out(
+                json!({ "seq": seq, "ackMs": ack_ms }),
+                &format!("acknowledged #{seq}"),
+            );
             Ok(0)
         }
         Some("wait") => wait_command(ctx),
         Some("log") => log_command(ctx),
         Some("task") => task_command(ctx, sub.as_ref()),
-        Some("import") => Err(BusError::invalid(
-            "`import` is not implemented in the Rust port yet — use the Node qagent for v1 migrations",
-        )),
-        Some(other) => Err(BusError::invalid(format!("unknown command: {other}\n\n{USAGE}"))),
+        Some("import") => {
+            let explicit = ["jsonl", "qagent-state", "prototype"]
+                .iter()
+                .any(|name| ctx.str_flag(name).is_some());
+            let sources = if explicit {
+                ImportSources {
+                    jsonl: ctx.str_flag("jsonl").map(PathBuf::from),
+                    qagent_state: ctx.str_flag("qagent-state").map(PathBuf::from),
+                    prototype: ctx.str_flag("prototype").map(PathBuf::from),
+                }
+            } else {
+                default_import_sources(&home_for(&ctx.db_path))
+            };
+            let dry_run = ctx.bool_flag("dry-run");
+            // A dry run never opens bus.db for writing (and never creates it).
+            if !dry_run {
+                let me = ctx.identity(true)?;
+                if me.authority != "operator" {
+                    return Err(BusError::forbidden("only the operator may import"));
+                }
+                ctx.bus = None;
+            }
+            let report = run_import(
+                &ctx.db_path,
+                sources,
+                ImportOptions {
+                    dry_run,
+                    force: ctx.bool_flag("force"),
+                    actor: Some(OPERATOR_ID.to_string()),
+                    ..Default::default()
+                },
+            )?;
+            let text = render_import(&report);
+            ctx.out(serde_json::to_value(&report).unwrap_or_default(), &text);
+            Ok(0)
+        }
+        Some(other) => Err(BusError::invalid(format!(
+            "unknown command: {other}\n\n{USAGE}"
+        ))),
         None => Err(BusError::invalid(format!("unknown command\n\n{USAGE}"))),
     }
 }
