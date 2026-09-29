@@ -11,8 +11,9 @@ use crate::wait;
 use crate::watcher::{ChangeWatcher, ChangeWatcherOptions};
 use serde_json::json;
 use std::collections::HashMap;
+use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -139,7 +140,7 @@ Global: --db PATH (or QAGENT_BUS_DB; default ~/.agent-bus/bus.db)  --as ID|opera
   qagent mcp [--operator] | mcp-config | supervise <agent> [dir] | doctor | dashboard
 ";
 
-const LAZY: &[&str] = &["mcp", "mcp-config", "supervise", "doctor", "dashboard"];
+const LAZY: &[&str] = &["mcp", "mcp-config", "supervise", "dashboard"];
 
 /// Index of the command word: the first positional, skipping the values of flags that take one.
 fn command_position(argv: &[String]) -> Option<usize> {
@@ -586,6 +587,148 @@ fn task_command(ctx: &mut Context, sub: Option<&String>) -> Result<i32> {
     }
 }
 
+/// PATH lookup with the exec bit — doctor never runs the harness, only finds it.
+fn on_path(command: &str) -> bool {
+    let candidates: Vec<PathBuf> = if Path::new(command).is_absolute() || command.contains('/') {
+        vec![PathBuf::from(command)]
+    } else {
+        std::env::var_os("PATH")
+            .map(|paths| {
+                std::env::split_paths(&paths)
+                    .map(|dir| dir.join(command))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    candidates.iter().any(|path| {
+        let meta = match fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(_) => return false,
+        };
+        if !meta.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            meta.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    })
+}
+
+/// `qagent doctor [agent] [project-dir] [--config PATH]` — read-only checks.
+/// Never runs a harness binary; it only looks for it on PATH.
+fn doctor_command(ctx: &mut Context) -> Result<i32> {
+    let agent_id = ctx.parsed.positionals.get(1).cloned();
+    let dir = ctx.parsed.positionals.get(2).cloned();
+    let config_flag = ctx.str_flag("config");
+    let mut problems: Vec<String> = vec![];
+    let mut lines: Vec<String> = vec![];
+    let db_exists = ctx.db_path.exists();
+    let missing = if db_exists {
+        String::new()
+    } else {
+        " (missing: run `qagent init`)".to_string()
+    };
+    lines.push(format!("bus {}{missing}", ctx.db_path.display()));
+    if !db_exists {
+        for line in &lines {
+            (ctx.io.stdout)(&format!("{line}\n"));
+        }
+        return Ok(1);
+    }
+    {
+        let bus = ctx.bus()?;
+        let operator_token_path = crate::identity::operator_token_path(&bus.home);
+        if crate::identity::read_token_file(&operator_token_path).is_none() {
+            problems.push(format!(
+                "no operator token at {}",
+                operator_token_path.display()
+            ));
+        }
+        let agents = bus.list_agents()?;
+        let ids = agents
+            .iter()
+            .map(|(agent, _)| agent.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!(
+            "agents {}",
+            if ids.is_empty() {
+                "(none)".to_string()
+            } else {
+                ids
+            }
+        ));
+        if let Some(agent_id) = agent_id.as_deref() {
+            match crate::identity::resolve_identity(&bus.conn, &bus.home, agent_id) {
+                Ok(_) => lines.push(format!("identity {agent_id} ok")),
+                Err(error) => problems.push(format!("identity {agent_id}: {}", error.message)),
+            }
+            let project_root = match dir.as_deref() {
+                Some(dir) => crate::db::absolutize(Path::new(dir)),
+                None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            };
+            let env_map = ctx.io.env.clone();
+            let config_path = config_flag.map(PathBuf::from).unwrap_or_else(|| {
+                crate::config::config_path_from_project(&project_root, &|name| {
+                    env_map.get(name).cloned()
+                })
+            });
+            let resolved = crate::config::load_config(&config_path)
+                .and_then(|config| {
+                    crate::config::resolve_agent(&config, agent_id)
+                        .map(|r| {
+                            (
+                                r.harness.id.clone(),
+                                r.harness.command.clone(),
+                                r.harness.adapter.clone(),
+                                r.agent.auto_start,
+                                r.agent.enabled,
+                            )
+                        })
+                });
+            match resolved {
+                Ok((harness_id, harness_command, harness_adapter, auto_start, agent_enabled)) => {
+                    lines.push(format!(
+                        "config {}: {} ({}), autoStart {}",
+                        config_path.display(),
+                        harness_id,
+                        harness_command,
+                        auto_start
+                    ));
+                    if !agent_enabled {
+                        problems.push(format!(
+                            "{agent_id} is disabled in {}",
+                            config_path.display()
+                        ));
+                    }
+                    if harness_adapter != "fake" && !on_path(&harness_command) {
+                        problems.push(format!("{harness_command} is not on PATH"));
+                    }
+                }
+                Err(error) => problems.push(format!("config: {}", error.message)),
+            }
+        }
+    }
+    for problem in &problems {
+        lines.push(format!("problem: {problem}"));
+    }
+    lines.push(if problems.is_empty() {
+        "ok".to_string()
+    } else {
+        format!("{} problem(s)", problems.len())
+    });
+    for line in &lines {
+        (ctx.io.stdout)(&format!("{line}\n"));
+    }
+    Ok(if problems.is_empty() { 0 } else { 1 })
+}
+
 fn dispatch(ctx: &mut Context) -> Result<i32> {
     let command = ctx.parsed.positionals.first().cloned();
     let sub = ctx.parsed.positionals.get(1).cloned();
@@ -615,6 +758,7 @@ fn dispatch(ctx: &mut Context) -> Result<i32> {
             );
             Ok(0)
         }
+        Some("doctor") => doctor_command(ctx),
         Some("status") => {
             let status = ctx.bus()?.status()?;
             ctx.out(serde_json::to_value(&status)?, &render_status(&status));

@@ -109,3 +109,53 @@ fn simultaneous_claims_produce_exactly_one_winner() {
     let json: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(json["state"], "claimed");
 }
+
+#[test]
+fn doctor_reports_bus_agents_and_config() {
+    let home = fresh_home();
+    let db = home.join("bus.db");
+    let db_str = db.to_str().unwrap();
+
+    // Missing bus: exit 1 with the missing hint.
+    let (code, out, _) = run(&["--db", db_str, "doctor"]);
+    assert_eq!(code, 1);
+    assert!(out.contains("(missing: run `qagent init`)"));
+
+    run(&["--db", db_str, "init"]);
+    let (code, out, _) = run(&["--db", db_str, "doctor"]);
+    assert_eq!(code, 0, "doctor output: {out}");
+    assert!(out.contains("agents operator"));
+    assert!(out.trim_end().ends_with("ok"));
+
+    // A config-resolvable agent with no token: problem listed, exit 1.
+    let project = fresh_home();
+    fs::create_dir_all(project.join(".qagent")).unwrap();
+    fs::write(
+        project.join(".qagent/config.json"),
+        r#"{
+          "version": 1,
+          "capabilityNotice": "",
+          "providers": { "p": { "id": "p", "enabled": true } },
+          "harnesses": { "h": { "id": "h", "adapter": "fake", "command": "qagent-fake-harness", "providers": ["p"], "features": {}, "enabled": true } },
+          "models": { "m": { "id": "m", "provider": "p", "harness": "h", "family": "f", "capabilities": { "coding": 0.5, "reasoning": 0.5, "planning": 0.5, "debugging": 0.5, "research": 0.5, "toolUse": 0.5, "speed": 0.5, "tokenEfficiency": 0.5, "reliability": 0.5, "autonomy": 0.5, "contextTokens": 1000 }, "enabled": true } },
+          "agents": { "a1": { "id": "a1", "model": "m", "role": "r", "authority": "worker", "description": "", "enabled": true, "autoStart": true, "permissions": { "canDelegate": false, "canReview": false, "filesystem": "none", "shell": false, "network": false, "maxDelegationDepth": 0 } } },
+          "roles": { "r": { "id": "r" } },
+          "routing": { "weights": {}, "fallbackRoles": {}, "minimumScore": 0 },
+          "constraints": { "maxDelegationDepth": 0, "maxConcurrentTasks": 1, "maxRetries": 0 }
+        }"#,
+    )
+    .unwrap();
+    let project_str = project.to_str().unwrap();
+    let (code, out, _) = run(&["--db", db_str, "doctor", "a1", project_str]);
+    assert_eq!(code, 1);
+    assert!(out.contains("config "), "doctor output: {out}");
+    assert!(
+        out.contains("h (qagent-fake-harness), autoStart true"),
+        "doctor output: {out}"
+    );
+    assert!(
+        out.contains("problem: identity a1:"),
+        "doctor output: {out}"
+    );
+    assert!(out.contains("1 problem(s)"));
+}
