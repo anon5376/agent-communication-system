@@ -54,16 +54,25 @@ export function runHarnessProcess(invocation, agent, workdir, onSpawn) {
             detached: process.platform !== "win32",
         });
         onSpawn?.(child.pid ?? null);
-        // Chunked with a tail cap: a 60-minute run can log more than memory justifies, and
-        // parsers only need the end (the result line) plus as much context as fits.
-        const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
-        const chunks = [];
-        let outputBytes = 0;
+        // Chunked with head+tail caps: a 60-minute run can log more than memory justifies.
+        // Parsers need the head (session/thread ids are announced at turn start) and the tail
+        // (the result line); the middle is expendable.
+        const MAX_HEAD_BYTES = 256 * 1024;
+        const MAX_TAIL_BYTES = 8 * 1024 * 1024;
+        const head = [];
+        const tail = [];
+        let headBytes = 0;
+        let tailBytes = 0;
         const capture = (data) => {
-            chunks.push(data);
-            outputBytes += data.length;
-            while (outputBytes > MAX_OUTPUT_BYTES && chunks.length > 1)
-                outputBytes -= chunks.shift().length;
+            if (headBytes < MAX_HEAD_BYTES) {
+                head.push(data);
+                headBytes += data.length;
+                return;
+            }
+            tail.push(data);
+            tailBytes += data.length;
+            while (tailBytes > MAX_TAIL_BYTES && tail.length > 1)
+                tailBytes -= tail.shift().length;
         };
         let settled = false;
         let timedOut = false;
@@ -73,7 +82,7 @@ export function runHarnessProcess(invocation, agent, workdir, onSpawn) {
             settled = true;
             clearTimeout(timer);
             onSpawn?.(null);
-            resolve({ code, output: Buffer.concat(chunks).toString("utf8"), durationMs: Date.now() - started, timedOut });
+            resolve({ code, output: Buffer.concat([...head, ...tail]).toString("utf8"), durationMs: Date.now() - started, timedOut });
         };
         const timer = setTimeout(() => {
             timedOut = true;

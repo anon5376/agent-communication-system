@@ -565,7 +565,7 @@ export class Bus {
     /** Rows -> tasks with one shared dependency query instead of one per task. */
     toTasks(rows) {
         const dependencies = this.dependenciesFor(rows.map((row) => Number(row.id)));
-        return rows.map((row) => this.toTask(row, dependencies.get(Number(row.id))));
+        return rows.map((row) => this.toTask(row, dependencies.get(Number(row.id)) ?? []));
     }
     requireTask(id) {
         if (!Number.isInteger(id) || id <= 0)
@@ -736,59 +736,68 @@ export class Bus {
         const explicit = taskId !== undefined && taskId !== null;
         return this.write(() => {
             this.reopenExpiredClaims();
-            let candidates;
-            if (explicit) {
-                const id = Number(taskId);
-                if (!Number.isInteger(id) || id <= 0)
-                    throw new BusError("invalid", `invalid task id: ${taskId}`);
-                const row = this.taskRow(id);
-                if (!row)
-                    throw new BusError("not_found", `unknown task: ${taskId}`);
-                candidates = [row];
-            }
-            else {
-                const role = String(this.agentRow(me)?.role ?? "");
-                // Assigned-to-me first, then urgent before older ordinary work. Only the columns the
-                // lease check and error paths need; the claimed row is re-read whole via RETURNING.
-                candidates = prepared(this.db, `
-          SELECT id, state, assignee, project, path_scopes_json FROM tasks
-          WHERE state IN ('open', 'changes_requested')
-            AND (assignee = ? OR (assignee IS NULL AND (role = '' OR role = ?)))
-          ORDER BY CASE WHEN assignee = ? THEN 0 ELSE 1 END,
-                   CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
-                   id LIMIT 100
-        `).all(me, role, me);
-            }
-            for (const row of candidates) {
-                const current = this.toLiteTask(row);
-                const conflicts = this.leaseConflicts(current);
-                if (conflicts.length) {
-                    if (explicit)
-                        throw new BusError("conflict", `task ${current.id} path scopes overlap leases held by ${conflicts.map((c) => `#${c.taskId}:${c.path}`).join(", ")}`);
-                    continue;
+            const role = explicit ? "" : String(this.agentRow(me)?.role ?? "");
+            const candidateStmt = prepared(this.db, `
+        SELECT id, state, assignee, project, path_scopes_json FROM tasks
+        WHERE state IN ('open', 'changes_requested')
+          AND (assignee = ? OR (assignee IS NULL AND (role = '' OR role = ?)))
+        ORDER BY CASE WHEN assignee = ? THEN 0 ELSE 1 END,
+                 CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+                 id LIMIT 100 OFFSET ?
+      `);
+            // Assigned-to-me first, then urgent before older ordinary work. Pages past the first
+            // 100 too: a pile of lease-conflicted urgent tasks must not starve later claimable ones.
+            let pageStart = 0;
+            for (;;) {
+                let candidates;
+                if (explicit) {
+                    const id = Number(taskId);
+                    if (!Number.isInteger(id) || id <= 0)
+                        throw new BusError("invalid", `invalid task id: ${taskId}`);
+                    const row = this.taskRow(id);
+                    if (!row)
+                        throw new BusError("not_found", `unknown task: ${taskId}`);
+                    candidates = [row];
                 }
-                const now = this.now();
-                const claimed = prepared(this.db, `
-          UPDATE tasks SET state = 'claimed', assignee = ?, claim_expires_ms = ?, updated_ms = ?
-          WHERE id = ? AND state IN ('open', 'changes_requested') AND (assignee IS NULL OR assignee = ?)
-          RETURNING *
-        `).get(me, now + this.claimTtlMs, now, current.id, me);
-                if (!claimed) {
-                    if (explicit) {
-                        const reason = current.assignee && current.assignee !== me ? `is ${current.state} and assigned to ${current.assignee}` : `is ${current.state}`;
-                        throw new BusError("conflict", `task ${current.id} cannot be claimed: it ${reason}`);
+                else {
+                    candidates = candidateStmt.all(me, role, me, pageStart);
+                    pageStart += 100;
+                    if (!candidates.length)
+                        break;
+                }
+                for (const row of candidates) {
+                    const current = this.toLiteTask(row);
+                    const conflicts = this.leaseConflicts(current);
+                    if (conflicts.length) {
+                        if (explicit)
+                            throw new BusError("conflict", `task ${current.id} path scopes overlap leases held by ${conflicts.map((c) => `#${c.taskId}:${c.path}`).join(", ")}`);
+                        continue;
                     }
-                    continue;
+                    const now = this.now();
+                    const claimed = prepared(this.db, `
+            UPDATE tasks SET state = 'claimed', assignee = ?, claim_expires_ms = ?, updated_ms = ?
+            WHERE id = ? AND state IN ('open', 'changes_requested') AND (assignee IS NULL OR assignee = ?)
+            RETURNING *
+          `).get(me, now + this.claimTtlMs, now, current.id, me);
+                    if (!claimed) {
+                        if (explicit) {
+                            const reason = current.assignee && current.assignee !== me ? `is ${current.state} and assigned to ${current.assignee}` : `is ${current.state}`;
+                            throw new BusError("conflict", `task ${current.id} cannot be claimed: it ${reason}`);
+                        }
+                        continue;
+                    }
+                    const task = this.toTask(claimed);
+                    if (task.project) {
+                        const insert = prepared(this.db, "INSERT OR REPLACE INTO leases(project, path, task_id, created_ms) VALUES(?, ?, ?, ?)");
+                        for (const path of task.pathScopes)
+                            insert.run(task.project, path, task.id, now);
+                    }
+                    this.event(me, "task_claimed", "task", task.id, { round: task.round, leases: task.pathScopes });
+                    this.touch(me, "working");
+                    return task;
                 }
-                const task = this.toTask(claimed);
-                if (task.project) {
-                    const insert = prepared(this.db, "INSERT OR REPLACE INTO leases(project, path, task_id, created_ms) VALUES(?, ?, ?, ?)");
-                    for (const path of task.pathScopes)
-                        insert.run(task.project, path, task.id, now);
-                }
-                this.event(me, "task_claimed", "task", task.id, { round: task.round, leases: task.pathScopes });
-                this.touch(me, "working");
-                return task;
+                if (explicit)
+                    break;
             }
             throw new BusError("not_found", "no claimable task");
         });
@@ -1035,6 +1044,10 @@ export class Bus {
     cancelTask(actor, taskId, reason) {
         const text = boundedString(reason, "reason", LIMITS.reason) || "cancelled";
         return this.write(() => {
+            // The expired-claim sweep can clear this task's assignee; the former claimer still
+            // deserves the cancelled notice, so remember who held it.
+            const prior = this.taskRow(taskId);
+            const priorAssignee = prior?.assignee ? String(prior.assignee) : null;
             this.reopenExpiredClaims();
             const task = this.requireTask(taskId);
             if (actor.authority !== "operator" && actor.agentId !== task.creator)
@@ -1045,8 +1058,9 @@ export class Bus {
             prepared(this.db, "UPDATE tasks SET state = 'cancelled', claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(now, task.id);
             prepared(this.db, "DELETE FROM leases WHERE task_id = ?").run(task.id);
             this.event(actor.agentId, "task_cancelled", "task", task.id, { reason: text.slice(0, 500) });
-            if (task.assignee && task.assignee !== actor.agentId) {
-                this.insertMessage(actor.agentId, task.assignee, { type: "control", subject: `[CANCELLED #${task.id}] ${task.title}`, body: text, thread: `task-${task.id}`, taskId: task.id, refs: [], requiresAck: false });
+            const notify = task.assignee ?? priorAssignee;
+            if (notify && notify !== actor.agentId) {
+                this.insertMessage(actor.agentId, notify, { type: "control", subject: `[CANCELLED #${task.id}] ${task.title}`, body: text, thread: `task-${task.id}`, taskId: task.id, refs: [], requiresAck: false });
             }
             this.touch(actor.agentId);
             return this.requireTask(task.id);
