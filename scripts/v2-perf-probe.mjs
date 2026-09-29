@@ -54,6 +54,8 @@ measure("inbox(peek)", () => bus.inbox(worker, { peek: true }));
 measure("inbox()", () => bus.inbox(worker));
 measure("claimTask(auto)", () => { try { bus.claimTask(bus.identify(`w${(measure.i = (measure.i ?? 0) + 1) % 20}`)); } catch { /* exhausted */ } }, 20);
 measure("listAgents()", () => bus.listAgents());
+measure("agentSummaries(20)", () => bus.agentSummaries(Array.from({ length: 20 }, (_, i) => `w${i}`)));
+measure("messageSummaries(50)", () => bus.messageSummaries(Array.from({ length: 50 }, (_, i) => i + 1)));
 measure("getTask()", () => bus.getTask(1));
 measure("taskEventsFor()", () => bus.taskEventsFor("w0", 0));
 measure("events(500)", () => bus.events(0, 500));
@@ -61,3 +63,39 @@ measure("events(500)", () => bus.events(0, 500));
 bus.db.prepare = original;
 bus.close();
 rmSync(home, { recursive: true, force: true });
+
+// Router probe (pure CPU): 50 enabled agents x 50 telemetry + availability rows.
+const { loadConfig } = await import(`../${buildDir}/config.js`);
+const { routeTask } = await import(`../${buildDir}/router.js`);
+const config = loadConfig(join(process.cwd(), "tests", "fixtures", "test-bus.config.json"));
+for (const model of Object.values(config.models)) model.enabled = model.provider === "fake";
+for (const provider of Object.values(config.providers)) provider.enabled = provider.id === "fake";
+for (const harness of Object.values(config.harnesses)) harness.enabled = harness.id === "fake";
+const small = config.agents["fake-small"];
+const strong = config.agents["fake-strong"];
+config.agents = {};
+for (let i = 0; i < 50; i++) {
+  const base = i % 2 === 0 ? small : strong;
+  config.agents[`a${i}`] = { ...base, id: `a${i}`, role: "implementation", enabled: true };
+}
+const telemetry = Array.from({ length: 50 }, (_, i) => ({
+  agentId: `a${i}`, taskCount: 10, acceptedCount: 8, failedCount: 1,
+  reviewRejectedCount: 0, averageLatencyMs: 30_000, averageTokens: 20_000,
+}));
+const availability = Array.from({ length: 50 }, (_, i) => ({
+  agentId: `a${i}`, status: i % 3 === 0 ? "working" : "idle", openTasks: i % 3,
+}));
+const routingTask = {
+  role: "implementation", complexity: 3, contextTokens: 8_000,
+  writeAccess: true, shell: true, network: false,
+};
+{
+  const times = [];
+  for (let i = 0; i < 50; i++) {
+    const t0 = performance.now();
+    routeTask(config, routingTask, telemetry, availability);
+    times.push(performance.now() - t0);
+  }
+  times.sort((a, b) => a - b);
+  console.log(`${"routeTask(50 agents)".padEnd(34)} median ${times[25].toFixed(3)} ms   (pure CPU)`);
+}

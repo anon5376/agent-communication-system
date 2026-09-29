@@ -16,7 +16,7 @@ import type { AddressInfo } from "node:net";
 import { Bus } from "../core/bus.js";
 import { ChangeWatcher } from "../core/changes.js";
 import { identityForToken } from "../core/identity.js";
-import { BusError, CLOSED_STATES, type Agent, type Message, OPERATOR_ID } from "../core/types.js";
+import { type AgentSummary, BusError, CLOSED_STATES, type MessageSummary, OPERATOR_ID } from "../core/types.js";
 import { type AgentView, type MessageView, renderPage, renderSignedOut, type TaskView, type ViewState } from "./page.js";
 import { AuthError, requireLoopbackHost, requireSameOrigin, requireSession, Sessions, sessionOf } from "./session.js";
 
@@ -72,11 +72,11 @@ class CountingWatcher extends ChangeWatcher {
   override currentSeq(): number { this.stats.queries += 1; return super.currentSeq(); }
 }
 
-function agentView(agent: Agent): AgentView {
+function agentView(agent: AgentSummary): AgentView {
   return { id: agent.id, status: agent.storedStatus, waitUntilMs: agent.waitUntilMs, lastSeenMs: agent.lastSeenMs };
 }
 
-function messageView(message: Message): MessageView {
+function messageView(message: MessageSummary): MessageView {
   const first = (message.subject.trim() || message.body.trim()).split("\n")[0] ?? "";
   return { seq: message.seq, tsMs: message.tsMs, sender: message.sender, recipient: message.recipient, line: first.slice(0, 300) };
 }
@@ -125,11 +125,10 @@ class Reader {
     }
     agentIds.delete(OPERATOR_ID);
     agentIds.delete("system");
-    const agents: AgentView[] = [];
-    for (const id of agentIds) {
+    let agents: AgentView[] = [];
+    if (agentIds.size) {
       this.stats.queries += 1;
-      const agent = this.bus.getAgent(id);
-      if (agent) agents.push(agentView(agent));
+      agents = this.bus.agentSummaries([...agentIds]).map(agentView);
     }
     let tasks: TaskView[] = [];
     const ids = [...taskIds].filter((id) => Number.isInteger(id) && id > 0).slice(0, 500);
@@ -143,10 +142,7 @@ class Reader {
     let messages: MessageView[] = [];
     if (messageSeqs.size) {
       this.stats.queries += 1;
-      const seqs = [...messageSeqs].sort((a, b) => a - b);
-      const newest = seqs.slice(-100);
-      messages = this.bus.getMessages({ sinceSeq: newest[0] - 1, limit: newest[newest.length - 1] - newest[0] + 1 })
-        .filter((message) => messageSeqs.has(message.seq)).map(messageView);
+      messages = this.bus.messageSummaries([...messageSeqs].sort((a, b) => a - b).slice(-100)).map(messageView);
     }
     return {
       seq: to,

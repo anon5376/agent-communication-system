@@ -130,6 +130,24 @@ export interface TaskSummary {
   updatedMs: number;
 }
 
+/** The columns a status view needs, without role, authority or meta. */
+export interface AgentSummary {
+  id: string;
+  storedStatus: string;
+  waitUntilMs: number | null;
+  lastSeenMs: number | null;
+}
+
+/** The columns a message-line view needs, without refs, thread or ack flags. */
+export interface MessageSummary {
+  seq: number;
+  tsMs: number;
+  sender: string;
+  recipient: string | null;
+  subject: string;
+  body: string;
+}
+
 export interface Task {
   id: number;
   legacyId: string | null;

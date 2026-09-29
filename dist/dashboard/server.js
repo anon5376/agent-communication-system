@@ -92,12 +92,10 @@ class Reader {
         }
         agentIds.delete(OPERATOR_ID);
         agentIds.delete("system");
-        const agents = [];
-        for (const id of agentIds) {
+        let agents = [];
+        if (agentIds.size) {
             this.stats.queries += 1;
-            const agent = this.bus.getAgent(id);
-            if (agent)
-                agents.push(agentView(agent));
+            agents = this.bus.agentSummaries([...agentIds]).map(agentView);
         }
         let tasks = [];
         const ids = [...taskIds].filter((id) => Number.isInteger(id) && id > 0).slice(0, 500);
@@ -111,10 +109,7 @@ class Reader {
         let messages = [];
         if (messageSeqs.size) {
             this.stats.queries += 1;
-            const seqs = [...messageSeqs].sort((a, b) => a - b);
-            const newest = seqs.slice(-100);
-            messages = this.bus.getMessages({ sinceSeq: newest[0] - 1, limit: newest[newest.length - 1] - newest[0] + 1 })
-                .filter((message) => messageSeqs.has(message.seq)).map(messageView);
+            messages = this.bus.messageSummaries([...messageSeqs].sort((a, b) => a - b).slice(-100)).map(messageView);
         }
         return {
             seq: to,

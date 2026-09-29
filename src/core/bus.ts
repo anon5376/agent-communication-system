@@ -18,8 +18,8 @@ import {
   readTokenFile, requireOperator, resolveIdentity, storedIdentity, storeNewToken, tokenPathFor, writePrivateToken,
 } from "./identity.js";
 import {
-  Agent, AgentStatus, Authority, boundedString, BusError, BusEvent, CLAIM_TTL_MS, CLOSED_STATES, ContextReference,
-  contextReferences, LIMITS, Message, MESSAGE_TYPES, MessageType, OPERATOR_ID, PRIORITIES, Priority, STALE_AGENT_MS,
+  Agent, AgentStatus, AgentSummary, Authority, boundedString, BusError, BusEvent, CLAIM_TTL_MS, CLOSED_STATES, ContextReference,
+  contextReferences, LIMITS, Message, MESSAGE_TYPES, MessageSummary, MessageType, OPERATOR_ID, PRIORITIES, Priority, STALE_AGENT_MS,
   Task, TASK_STATES, TaskDetail, TaskNote, TaskResult, TaskReview, TaskState, TaskSummary, TaskTrace, TraceItem, ValidationObservation,
 } from "./types.js";
 
@@ -324,6 +324,17 @@ export class Bus {
     return rows.map((row) => ({ ...this.toAgent(row), unread: Number(row.unread) }));
   }
 
+  /** Stored status columns for the given agent ids in one query (dashboard deltas). */
+  agentSummaries(ids: string[]): AgentSummary[] {
+    const wanted = [...new Set(ids.map(String))].filter((id) => id.length > 0).slice(0, 500);
+    if (!wanted.length) return [];
+    const rows = this.db.prepare(`SELECT id, status, wait_until_ms, last_seen_ms FROM agents WHERE id IN (${placeholders(wanted.length)}) ORDER BY id`)
+      .all(...wanted) as Row[];
+    return rows.map((row) => ({
+      id: String(row.id), storedStatus: String(row.status), waitUntilMs: num(row.wait_until_ms), lastSeenMs: num(row.last_seen_ms),
+    }));
+  }
+
   whoami(actor: Identity): { agent: Agent | null; authority: Authority; unread: number; cursor: number; dbPath: string } {
     return { agent: this.getAgent(actor.agentId), authority: actor.authority, unread: this.unreadCount(actor.agentId), cursor: this.cursor(actor.agentId), dbPath: this.dbPath };
   }
@@ -484,6 +495,19 @@ export class Bus {
     else if (options.sinceSeq !== undefined) rows = prepared(this.db, "SELECT * FROM messages WHERE seq > ? ORDER BY seq LIMIT ?").all(options.sinceSeq, limit) as Row[];
     else rows = (prepared(this.db, "SELECT * FROM messages ORDER BY seq DESC LIMIT ?").all(limit) as Row[]).reverse();
     return rows.map((row) => this.toMessage(row));
+  }
+
+  /** Subject/body columns for the given message seqs in one query (dashboard deltas). */
+  messageSummaries(seqs: number[]): MessageSummary[] {
+    const wanted = [...new Set(seqs.map(Number))].filter((seq) => Number.isInteger(seq) && seq > 0).slice(0, 500);
+    if (!wanted.length) return [];
+    const rows = this.db.prepare(`SELECT seq, ts_ms, sender, recipient, subject, body FROM messages WHERE seq IN (${placeholders(wanted.length)}) ORDER BY seq`)
+      .all(...wanted) as Row[];
+    return rows.map((row) => ({
+      seq: Number(row.seq), tsMs: Number(row.ts_ms), sender: String(row.sender),
+      recipient: row.recipient === null || row.recipient === undefined ? null : String(row.recipient),
+      subject: String(row.subject ?? ""), body: String(row.body ?? ""),
+    }));
   }
 
   // ----------------------------------------------------------------- waiting
