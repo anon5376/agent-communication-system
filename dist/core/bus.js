@@ -921,13 +921,17 @@ export class Bus {
             return this.requireTask(task.id);
         });
     }
-    /** Release a claimed task back to the pool with no assignee — anyone may claim it. */
+    /**
+     * Return a task to the pool with no assignee — anyone may claim it. Works on a
+     * claimed task and on an open one, so requeuing a batch of expired claims still
+     * pools each of them even after the expiry sweep reopened them mid-batch.
+     */
     requeueTask(actor, taskId, reason) {
         const text = boundedString(reason, "reason", LIMITS.reason) || "requeued";
         return this.write(() => {
             const before = this.requireTask(taskId);
-            if (before.state !== "claimed")
-                throw new BusError("conflict", `task ${before.id} is ${before.state}, not claimed`);
+            if (before.state !== "claimed" && before.state !== "open")
+                throw new BusError("conflict", `task ${before.id} is ${before.state}, not claimed or open`);
             if (actor.authority !== "operator" && actor.agentId !== before.assignee)
                 throw new BusError("forbidden", `only ${before.assignee ?? "the assignee"} or the operator may requeue task ${before.id}`);
             this.reopenExpiredClaims();
