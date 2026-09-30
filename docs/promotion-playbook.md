@@ -67,7 +67,7 @@
 - It's an article channel, not a launchpad — "we just launched X" dies. Write the engineering story instead: *"SQLite as a message bus for autonomous coding agents"* — WAL concurrency, claim/lease design, why no broker. Tags: `#showdev #ai #agents #sqlite`. If you also blog it, use `canonical_url` so your site keeps the SEO.
 
 ### 10. Console.dev
-- Free weekly devtools newsletter (Thu), editorially reviewed — email **hello@console.dev** a 3-sentence pitch emphasizing DX and time-to-first-agent. Only pitch once docs/onboarding are polished.
+- Free weekly devtools newsletter (Thu), editorially reviewed — pitch them via console.dev's contact inbox with a 3-sentence blurb emphasizing DX and time-to-first-agent. Only pitch once docs/onboarding are polished.
 
 ### 11. DevHunt
 - devhunt.org — dev-tools-only launchpad, weekly batches, GitHub-verified voters. Free queue or $49 to pick a week. Explicitly accepts "AI agents and MCP servers."
@@ -108,5 +108,5 @@
 
 - **Week 0 (prep):** LICENSE + npm publish + demo GIF + GitHub topics + `smithery.yaml`/`glama.json`/`server.json` in-repo.
 - **Launch day (Tue–Thu):** Show HN at ~9am ET → r/claudecode + r/mcp → X clip → be in the HN thread all day.
-- **Week 1 (evergreen):** registry sweep (official → Glama → Smithery → mcpservers.org → mcp.so), awesome-list issues/PRs, DevHunt submission, Terminal Trove, hello@console.dev.
+- **Week 1 (evergreen):** registry sweep (official → Glama → Smithery → mcpservers.org → mcp.so), awesome-list issues/PRs, DevHunt submission, Terminal Trove, Console.dev pitch.
 - **Weeks 2–4 (compound):** dev.to deep-dive, answer "how do I coordinate parallel agents" threads across claudecode/LocalLLaMA/AI_Agents, build karma before any LocalLLaMA post.
