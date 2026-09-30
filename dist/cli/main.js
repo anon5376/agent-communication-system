@@ -429,7 +429,7 @@ async function taskCommand(ctx, sub) {
             return 0;
         }
         case "requeue": {
-            const task = bus.releaseTask(ctx.identity(), ctx.taskId(2), ctx.str("reason"));
+            const task = bus.requeueTask(ctx.identity(), ctx.taskId(2), ctx.str("reason"));
             ctx.out(task, `requeued task #${task.id}`);
             return 0;
         }

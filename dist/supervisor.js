@@ -297,9 +297,9 @@ export async function supervise(options) {
             }
             if (!sweeper)
                 return;
-            for (const task of bus.stalledTasks(options.autoRequeueMs)) {
+            for (const task of bus.deadClaims(options.autoRequeueMs)) {
                 try {
-                    bus.releaseTask(sweeper, task.id, `auto-requeue: claim idle beyond ${Math.round(options.autoRequeueMs / 60_000)} min`);
+                    bus.requeueTask(sweeper, task.id, `auto-requeue: claim idle beyond ${Math.round(options.autoRequeueMs / 60_000)} min`);
                     log(`auto-requeued stalled task #${task.id} (was claimed by ${task.assignee ?? "nobody"})`);
                 }
                 catch (error) {

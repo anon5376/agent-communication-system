@@ -93,8 +93,34 @@ test("stalledTasks surfaces idle claims, notes clear the stall, and the operator
   assert.deepEqual(bus.stalledTasks(1_800_000), []);
 
   bus.db.prepare("UPDATE tasks SET updated_ms = ? WHERE id = ?").run(Date.now() - 3_600_000, task.id);
-  const requeued = bus.releaseTask(operator, task.id, "auto-requeue: stalled claim");
+  const requeued = bus.requeueTask(operator, task.id, "auto-requeue: stalled claim");
   assert.equal(requeued.state, "open");
-  assert.equal(requeued.assignee, "bob");
+  assert.equal(requeued.assignee, null);
   assert.ok(bus.events().some((event) => event.kind === "task_released" && event.entityId === String(task.id)));
+});
+
+test("release and requeue work on expired claims, and deadClaims needs a dead worker", (t) => {
+  const { bus, operator, alice, bob } = setup(t);
+  const task = bus.createTask(alice, { title: "expiring", brief: "b", to: "bob" });
+  bus.claimTask(bob, task.id);
+
+  // Alive assignee (fresh last_seen) + unexpired claim: deadClaims must not fire.
+  bus.db.prepare("UPDATE tasks SET updated_ms = ? WHERE id = ?").run(Date.now() - 7_200_000, task.id);
+  assert.deepEqual(bus.deadClaims(3_600_000), []);
+
+  // Expired lease: releaseTask used to throw conflict and roll back the reopen.
+  bus.db.prepare("UPDATE tasks SET claim_expires_ms = ? WHERE id = ?").run(Date.now() - 1, task.id);
+  assert.deepEqual(bus.deadClaims(3_600_000).map((s) => s.id), [task.id]);
+  const released = bus.releaseTask(operator, task.id, "expired");
+  assert.equal(released.state, "open");
+  assert.equal(released.assignee, "bob"); // release restores the preassigned worker
+  bus.claimTask(bob, task.id);
+
+  // Dead assignee: task idle AND agent silent — deadClaims fires; requeue clears assignee.
+  bus.db.prepare("UPDATE tasks SET updated_ms = ? WHERE id = ?").run(Date.now() - 7_200_000, task.id);
+  bus.db.prepare("UPDATE agents SET last_seen_ms = ? WHERE id = 'bob'").run(Date.now() - 7_200_000);
+  assert.deepEqual(bus.deadClaims(3_600_000).map((s) => s.id), [task.id]);
+  const requeued = bus.requeueTask(operator, task.id, "dead worker");
+  assert.equal(requeued.state, "open");
+  assert.equal(requeued.assignee, null); // back to the pool: anyone may claim it
 });
