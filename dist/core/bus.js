@@ -587,6 +587,14 @@ export class Bus {
         const sql = `SELECT * FROM tasks ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id LIMIT ?`;
         return this.db.prepare(sql).all(...args, limit).map((row) => this.toTask(row));
     }
+    /**
+     * Claimed tasks with no claim/note activity for `stallMs` — a probably-dead claim.
+     * `updated_ms` moves on claim and on every note, so it is the last-activity clock.
+     */
+    stalledTasks(stallMs) {
+        const cutoff = this.now() - Math.max(0, stallMs);
+        return this.db.prepare("SELECT * FROM tasks WHERE state = 'claimed' AND updated_ms < ? ORDER BY id").all(cutoff).map((row) => this.toTask(row));
+    }
     /** Reopen claims past their expiry. There is no sweeper process; every task write calls this first. */
     reopenExpiredClaims() {
         const now = this.now();
