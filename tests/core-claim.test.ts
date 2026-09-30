@@ -21,6 +21,12 @@ interface ChildResult { code: number | null; stdout: string; stderr: string }
 
 function run(args: string[], env: NodeJS.ProcessEnv, onLine?: (line: string) => void): { done: Promise<ChildResult>; release: () => void } {
   const child = spawn(process.execPath, args, { env, stdio: ["pipe", "pipe", "pipe"] });
+  // Children that exit before release() leave a dead stdin; writing to it
+  // raises EPIPE. Absorb it so the child's exit code still reaches the
+  // assertions instead of crashing the whole test.
+  child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EPIPE") throw error;
+  });
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
