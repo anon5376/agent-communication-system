@@ -123,4 +123,15 @@ test("release and requeue work on expired claims, and deadClaims needs a dead wo
   const requeued = bus.requeueTask(operator, task.id, "dead worker");
   assert.equal(requeued.state, "open");
   assert.equal(requeued.assignee, null); // back to the pool: anyone may claim it
+
+  // Batch of expired claims: the first requeue's internal sweep reopens the
+  // second, so its later requeue must still pool it, not reject as 'open'.
+  const second = bus.createTask(alice, { title: "also expiring", brief: "b", to: "bob" });
+  bus.claimTask(bob, task.id);
+  bus.claimTask(bob, second.id);
+  bus.db.prepare("UPDATE tasks SET claim_expires_ms = ? WHERE id IN (?, ?)").run(Date.now() - 1, task.id, second.id);
+  bus.requeueTask(operator, task.id, "batch");
+  const secondRequeued = bus.requeueTask(operator, second.id, "batch");
+  assert.equal(secondRequeued.state, "open");
+  assert.equal(secondRequeued.assignee, null);
 });
