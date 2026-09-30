@@ -5,23 +5,27 @@
  */
 import { accessSync, constants, existsSync } from "node:fs";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
-import { configPathFromProject, loadConfig, resolveAgent } from "../config.js";
+import { configPathFromProject, enabledAgents, loadConfig, resolveAgent } from "../config.js";
 import { Bus } from "../core/bus.js";
 import { operatorTokenPath, readTokenFile } from "../core/identity.js";
 import { BusError } from "../core/types.js";
 import { supervise } from "../supervisor.js";
 const USAGE = `usage: qagent supervise <agent> [project-dir] [--config PATH] [--auto-requeue-min M]
+       qagent supervise --roster [project-dir] [--config PATH] [--auto-requeue-min M]   every enabled agent
        qagent doctor [agent] [project-dir] [--config PATH]
 `;
 function split(argv) {
     const positionals = [];
     let config;
     let autoRequeueMin;
+    let roster = false;
     let help = false;
     for (let index = 0; index < argv.length; index += 1) {
         const arg = argv[index];
         if (arg === "-h" || arg === "--help")
             help = true;
+        else if (arg === "--roster")
+            roster = true;
         else if (arg === "--config")
             config = argv[index += 1];
         else if (arg.startsWith("--config="))
@@ -42,7 +46,7 @@ function split(argv) {
     if (autoRequeueMin !== undefined && (!Number.isFinite(autoRequeueMin) || autoRequeueMin <= 0)) {
         throw new BusError("invalid", "--auto-requeue-min must be a positive number of minutes");
     }
-    return { positionals, config, autoRequeueMin, help };
+    return { positionals, config, autoRequeueMin, roster, help };
 }
 function commandName(context) {
     return context.command === "doctor" ? "doctor" : "supervise";
@@ -108,7 +112,7 @@ export async function main(argv, context) {
     const out = context.stdout ?? ((text) => { process.stdout.write(text); });
     const err = context.stderr ?? ((text) => { process.stderr.write(text); });
     try {
-        const { positionals, config, autoRequeueMin, help } = split(argv);
+        const { positionals, config, autoRequeueMin, roster, help } = split(argv);
         if (help) {
             out(USAGE);
             return 0;
@@ -116,7 +120,7 @@ export async function main(argv, context) {
         if (commandName(context) === "doctor")
             return doctor(positionals, config, context, out);
         const [agentId, dir] = positionals;
-        if (!agentId) {
+        if (!roster && !agentId) {
             err(USAGE);
             return 1;
         }
@@ -125,7 +129,20 @@ export async function main(argv, context) {
         process.once("SIGINT", stop);
         process.once("SIGTERM", stop);
         try {
-            await supervise({ agentId, workdir: resolve(dir ?? process.cwd()), dbPath: context.dbPath, configPath: config, autoRequeueMs: autoRequeueMin !== undefined ? autoRequeueMin * 60_000 : undefined, signal: controller.signal });
+            const workdir = resolve(dir ?? process.cwd());
+            const shared = { workdir, dbPath: context.dbPath, configPath: config, autoRequeueMs: autoRequeueMin !== undefined ? autoRequeueMin * 60_000 : undefined, signal: controller.signal };
+            if (roster) {
+                const loaded = loadConfig(config ?? configPathFromProject(workdir));
+                const agents = enabledAgents(loaded);
+                if (!agents.length) {
+                    err("qagent supervise --roster: no enabled agents in config\n");
+                    return 1;
+                }
+                out(`supervising roster: ${agents.map((agent) => agent.id).join(", ")}\n`);
+                await Promise.all(agents.map((agent) => supervise({ ...shared, agentId: agent.id })));
+                return 0;
+            }
+            await supervise({ ...shared, agentId });
         }
         finally {
             process.off("SIGINT", stop);
