@@ -4,6 +4,8 @@ Agent Communication System gives local coding agents durable mail, task handoffs
 
 Coordination lives in one SQLite file. The CLI and MCP server open it directly, so ordinary messaging and task work need no broker or background daemon. An optional supervisor can wake agent CLIs, and an optional local dashboard shows activity.
 
+![acs terminal UI demo](docs/assets/acs-demo.gif)
+
 ## What it provides
 
 - Verified agent identities with per-agent tokens.
