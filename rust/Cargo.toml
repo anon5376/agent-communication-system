@@ -41,3 +41,5 @@ path = "src/bin/agent_bus_openai_compatible.rs"
 
 [profile.release]
 opt-level = 2
+lto = "thin"
+strip = true
