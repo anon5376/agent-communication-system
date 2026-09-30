@@ -1,0 +1,29 @@
+# Smithery configuration file: https://smithery.ai/docs/build/project-config
+
+startCommand:
+  type: stdio
+  configSchema:
+    # JSON Schema defining the configuration options for the MCP.
+    type: object
+    required:
+      - agentId
+    properties:
+      agentId:
+        type: string
+        description: Agent identity registered in the bus via `qagent agent add` (use `operator` for the operator-only tool).
+      busDb:
+        type: string
+        description: Path to the bus SQLite file. Defaults to ~/.agent-bus/bus.db.
+  commandFunction:
+    # A JS function that produces the CLI command based on the given config to start the MCP on stdio.
+    |-
+    (config) => ({
+      command: 'node',
+      args: ['dist/qagent.js', 'mcp'],
+      env: {
+        QAGENT_AGENT_ID: config.agentId,
+        ...(config.busDb ? { QAGENT_BUS_DB: config.busDb } : {})
+      }
+    })
+  exampleConfig:
+    agentId: claude
