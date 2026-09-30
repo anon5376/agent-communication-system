@@ -1316,15 +1316,39 @@ impl Bus {
         )
     }
 
+    /// Claims the bus can treat as dead: the lease expired, or the task has been idle
+    /// for stall_ms AND the assignee has not touched the bus in that same window. An
+    /// active worker keeps refreshing last_seen_ms, so a live claim survives both tests.
+    pub fn dead_claims(&self, stall_ms: i64) -> Result<Vec<Task>> {
+        let now = self.now();
+        let cutoff = now - stall_ms.max(0);
+        self.to_tasks(
+            "SELECT t.* FROM tasks t LEFT JOIN agents a ON a.id = t.assignee
+             WHERE t.state = 'claimed' AND (
+               (t.claim_expires_ms IS NOT NULL AND t.claim_expires_ms < ?)
+               OR (t.updated_ms < ? AND (a.last_seen_ms IS NULL OR a.last_seen_ms < ?))
+             ) ORDER BY t.id",
+            &[&now as &dyn rusqlite::ToSql, &cutoff, &cutoff],
+        )
+    }
+
     /// The task's causal chain: its events, its notes, and the mail the bus sent about it,
     /// merged into one chronological timeline — the bus is the trace.
     pub fn trace_task(&self, id: i64) -> Result<TaskTrace> {
         let task = self.get_task(id)?;
+        // Imported tasks' events are keyed by legacy_id, not the new numeric id.
+        let ids = match &task.task.legacy_id {
+            Some(legacy) => vec![id.to_string(), legacy.clone()],
+            None => vec![id.to_string()],
+        };
         let events = {
             let mut stmt = self.conn.prepare_cached(
-                "SELECT * FROM events WHERE entity = 'task' AND entity_id = ? ORDER BY seq",
+                "SELECT * FROM events WHERE entity = 'task' AND entity_id IN (SELECT value FROM json_each(?)) ORDER BY seq",
             )?;
-            let rows = stmt.query_map([id.to_string()], |row| self.to_event(row))?;
+            let rows = stmt
+                .query_map([serde_json::to_string(&ids).unwrap_or_default()], |row| {
+                    self.to_event(row)
+                })?;
             let mut out = Vec::new();
             for row in rows {
                 out.push(row?);
@@ -1363,7 +1387,19 @@ impl Bus {
                 data: None,
             });
         }
-        for message in &task.messages {
+        // Uncapped: get_task() limits messages to 1000, a trace wants the whole chain.
+        let mail = {
+            let mut stmt = self
+                .conn
+                .prepare_cached("SELECT * FROM messages WHERE task_id = ? ORDER BY seq")?;
+            let rows = stmt.query_map([id], |row| self.to_message(row))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            out
+        };
+        for message in &mail {
             timeline.push(TraceItem {
                 seq: message.seq,
                 ts_ms: message.ts_ms,
@@ -1954,39 +1990,91 @@ impl Bus {
             }
         };
         self.write(|bus| {
-            bus.reopen_expired_claims()?;
-            let task = bus.require_task(task_id)?;
-            if actor.authority != "operator" && Some(&actor.agent_id) != task.assignee.as_ref() {
+            let before = bus.require_task(task_id)?;
+            if before.state != "claimed" {
+                return Err(BusError::conflict(format!("task {} is {}, not claimed", before.id, before.state)));
+            }
+            if actor.authority != "operator" && Some(&actor.agent_id) != before.assignee.as_ref() {
                 return Err(BusError::forbidden(format!(
                     "only {} or the operator may release task {}",
-                    task.assignee.as_deref().unwrap_or("the assignee"),
-                    task.id
+                    before.assignee.as_deref().unwrap_or("the assignee"),
+                    before.id
                 )));
             }
-            if task.state != "claimed" {
+            // Snapshot first: an expired claim is reopened by this sweep, which must not
+            // count as "not claimed" (and must not be rolled back by throwing after it).
+            let claim_expired = before.claim_expires_ms.is_some_and(|expiry| expiry < bus.now());
+            bus.reopen_expired_claims()?;
+            let task = bus.require_task(task_id)?;
+            if !claim_expired && task.state != "claimed" {
                 return Err(BusError::conflict(format!("task {} is {}, not claimed", task.id, task.state)));
             }
-            let created: Option<String> = bus
-                .conn
-                .prepare_cached(
-                    "SELECT data_json FROM events WHERE entity = 'task' AND entity_id = ? AND kind = 'task_created' ORDER BY seq LIMIT 1",
-                )?
-                .query_row([task.id.to_string()], |row| row.get(0))
-                .ok();
-            let preassigned: Option<String> = created
-                .as_deref()
-                .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
-                .and_then(|data| data.get("assignee").and_then(|v| v.as_str().map(|s| s.to_string())));
             let now = bus.now();
-            bus.conn
-                .prepare_cached("UPDATE tasks SET state = 'open', assignee = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?")?
-                .execute(params![preassigned, now, task.id])?;
-            bus.conn.prepare_cached("DELETE FROM leases WHERE task_id = ?")?.execute([task.id])?;
+            if !claim_expired {
+                let created: Option<String> = bus
+                    .conn
+                    .prepare_cached(
+                        "SELECT data_json FROM events WHERE entity = 'task' AND entity_id = ? AND kind = 'task_created' ORDER BY seq LIMIT 1",
+                    )?
+                    .query_row([task.id.to_string()], |row| row.get(0))
+                    .ok();
+                let preassigned: Option<String> = created
+                    .as_deref()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+                    .and_then(|data| data.get("assignee").and_then(|v| v.as_str().map(|s| s.to_string())));
+                bus.conn
+                    .prepare_cached("UPDATE tasks SET state = 'open', assignee = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?")?
+                    .execute(params![preassigned, now, task.id])?;
+                bus.conn.prepare_cached("DELETE FROM leases WHERE task_id = ?")?.execute([task.id])?;
+            }
             bus.event(&actor.agent_id, "task_released", "task", task.id, json!({
-                "reason": text.chars().take(500).collect::<String>(), "previousAssignee": task.assignee,
+                "reason": text.chars().take(500).collect::<String>(), "previousAssignee": before.assignee,
             }))?;
             bus.touch(&actor.agent_id, Some("idle"))?;
             bus.require_task(task.id)
+        })
+    }
+
+    /// Release a claimed task back to the pool with no assignee — anyone may claim it.
+    pub fn requeue_task(
+        &self,
+        actor: &Identity,
+        task_id: i64,
+        reason: Option<&str>,
+    ) -> Result<Task> {
+        let text = {
+            let t = bounded_string(reason, "reason", limits::REASON, false)?;
+            if t.is_empty() {
+                "requeued".to_string()
+            } else {
+                t
+            }
+        };
+        self.write(|bus| {
+            let before = bus.require_task(task_id)?;
+            if before.state != "claimed" {
+                return Err(BusError::conflict(format!("task {} is {}, not claimed", before.id, before.state)));
+            }
+            if actor.authority != "operator" && Some(&actor.agent_id) != before.assignee.as_ref() {
+                return Err(BusError::forbidden(format!(
+                    "only {} or the operator may requeue task {}",
+                    before.assignee.as_deref().unwrap_or("the assignee"),
+                    before.id
+                )));
+            }
+            bus.reopen_expired_claims()?;
+            let now = bus.now();
+            bus.conn
+                .prepare_cached("UPDATE tasks SET state = 'open', assignee = NULL, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?")?
+                .execute(params![now, before.id])?;
+            bus.conn.prepare_cached("DELETE FROM leases WHERE task_id = ?")?.execute([before.id])?;
+            bus.event(&actor.agent_id, "task_released", "task", before.id, json!({
+                "reason": text.chars().take(500).collect::<String>(),
+                "previousAssignee": before.assignee,
+                "requeued": true,
+            }))?;
+            bus.touch(&actor.agent_id, Some("idle"))?;
+            bus.require_task(before.id)
         })
     }
 

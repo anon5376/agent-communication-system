@@ -589,7 +589,7 @@ fn task_command(ctx: &mut Context, sub: Option<&String>) -> Result<i32> {
                 .transpose()
                 .map_err(|_| BusError::invalid("--stall-min must be a positive number of minutes"))?
                 .unwrap_or(60.0);
-            if !(minutes > 0.0) || !minutes.is_finite() {
+            if minutes <= 0.0 || !minutes.is_finite() {
                 return Err(BusError::invalid(
                     "--stall-min must be a positive number of minutes",
                 ));
@@ -602,7 +602,7 @@ fn task_command(ctx: &mut Context, sub: Option<&String>) -> Result<i32> {
             let me = ctx.identity(false)?;
             let id = ctx.task_id(2)?;
             let reason = ctx.str_flag("reason");
-            let task = ctx.bus()?.release_task(&me, id, reason.as_deref())?;
+            let task = ctx.bus()?.requeue_task(&me, id, reason.as_deref())?;
             let out = format!("requeued task #{}", task.id);
             ctx.out(serde_json::to_value(&task)?, &out);
             Ok(0)
