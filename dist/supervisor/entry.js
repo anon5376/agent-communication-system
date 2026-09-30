@@ -140,15 +140,16 @@ export async function main(argv, context) {
                     return 1;
                 }
                 out(`supervising roster: ${agents.map((agent) => agent.id).join(", ")}\n`);
-                const results = await Promise.allSettled(agents.map((agent) => supervise({ ...shared, agentId: agent.id })));
                 let failures = 0;
-                for (let index = 0; index < results.length; index += 1) {
-                    const result = results[index];
-                    if (result.status === "rejected") {
-                        failures += 1;
-                        err(`supervisor for ${agents[index].id} exited with error: ${result.reason.message}\n`);
+                await Promise.all(agents.map(async (agent) => {
+                    try {
+                        await supervise({ ...shared, agentId: agent.id });
                     }
-                }
+                    catch (error) {
+                        failures += 1;
+                        err(`supervisor for ${agent.id} exited with error: ${error instanceof Error ? error.message : String(error)}\n`);
+                    }
+                }));
                 return failures ? 1 : 0;
             }
             if (agentId)
