@@ -79,3 +79,22 @@ test("taskSummaries, setStatus, releaseTask and failTask", (t) => {
   assert.ok(bus.inbox(alice, { peek: true }).messages.some((m) => m.subject.startsWith(`[ESCALATE #${task.id}]`)));
   assert.equal(bus.getAgent("bob")?.storedStatus, "idle");
 });
+
+test("stalledTasks surfaces idle claims, notes clear the stall, and the operator can requeue", (t) => {
+  const { bus, operator, alice, bob } = setup(t);
+  const task = bus.createTask(alice, { title: "stuck", brief: "b", to: "bob" });
+  bus.claimTask(bob, task.id);
+  assert.deepEqual(bus.stalledTasks(60_000), []);
+
+  bus.db.prepare("UPDATE tasks SET updated_ms = ? WHERE id = ?").run(Date.now() - 3_600_000, task.id);
+  assert.deepEqual(bus.stalledTasks(1_800_000).map((s) => s.id), [task.id]);
+
+  bus.noteTask(bob, task.id, "still on it");
+  assert.deepEqual(bus.stalledTasks(1_800_000), []);
+
+  bus.db.prepare("UPDATE tasks SET updated_ms = ? WHERE id = ?").run(Date.now() - 3_600_000, task.id);
+  const requeued = bus.releaseTask(operator, task.id, "auto-requeue: stalled claim");
+  assert.equal(requeued.state, "open");
+  assert.equal(requeued.assignee, "bob");
+  assert.ok(bus.events().some((event) => event.kind === "task_released" && event.entityId === String(task.id)));
+});
