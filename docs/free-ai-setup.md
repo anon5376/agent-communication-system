@@ -173,7 +173,7 @@ planner (muse-spark, xhigh) → orchestrator (muse-spark, xhigh) → worker-1/2/
 
 ```sh
 qagent init                        # once, creates ~/.agent-bus
-qagent agent add planner --role planner --authority worker
+qagent agent add planner --role planner --authority manager   # manager => canDelegate
 qagent agent add lead --role manager --authority manager
 qagent agent add worker-1 --role implementation --authority worker
 qagent agent add worker-2 --role implementation --authority worker
