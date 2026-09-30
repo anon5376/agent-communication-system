@@ -322,6 +322,170 @@ pub fn render_task(task: &TaskDetail) -> String {
     lines.join("\n")
 }
 
+fn short_time(ts_ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ts_ms)
+        .map(|dt| dt.format("%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| "-".into())
+}
+
+pub fn render_trace(trace: &crate::types::TaskTrace) -> String {
+    let task = &trace.task.task;
+    let mut lines = vec![
+        format!("Trace #{}: {}", task.id, task.title),
+        format!(
+            "  state {}  assignee {}  creator {}  round {}",
+            task.state,
+            task.assignee.as_deref().unwrap_or("-"),
+            task.creator,
+            task.round
+        ),
+    ];
+    if let Some(parent) = task.parent_id {
+        lines.push(format!("  parent #{parent}"));
+    }
+    if !trace.dependencies.is_empty() {
+        lines.push(format!(
+            "  depends on {}",
+            trace
+                .dependencies
+                .iter()
+                .map(|id| format!("#{id}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !trace.dependents.is_empty() {
+        lines.push(format!(
+            "  unblocks {}",
+            trace
+                .dependents
+                .iter()
+                .map(|id| format!("#{id}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    lines.push(String::new());
+    for item in &trace.timeline {
+        let route = item
+            .to
+            .as_ref()
+            .map(|to| format!(" -> {}", to.as_deref().unwrap_or("*")))
+            .unwrap_or_default();
+        let summary = if item.summary.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", clip(&item.summary, 100))
+        };
+        lines.push(format!(
+            "  {} {}{} {}{}",
+            short_time(item.ts_ms),
+            item.actor,
+            route,
+            item.kind,
+            summary
+        ));
+    }
+    if trace.timeline.is_empty() {
+        lines.push("  (empty: the task exists but no events, notes, or mail yet)".into());
+    }
+    lines.join("\n")
+}
+
+fn esc(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+pub fn render_trace_html(trace: &crate::types::TaskTrace) -> String {
+    let task = &trace.task.task;
+    let items = trace
+        .timeline
+        .iter()
+        .map(|item| {
+            let route = item
+                .to
+                .as_ref()
+                .map(|to| format!(" → {}", esc(to.as_deref().unwrap_or("broadcast"))))
+                .unwrap_or_default();
+            let body = item
+                .body
+                .as_ref()
+                .map(|b| format!("<pre>{}</pre>", esc(b)))
+                .unwrap_or_default();
+            format!(
+                "    <li class=\"{}\"><time>{}</time><b>{}{}</b> <span class=\"kind\">{}</span><p>{}</p>{}</li>",
+                esc(&item.kind), iso(item.ts_ms), esc(&item.actor), route, esc(&item.kind), esc(&item.summary), body
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let deps = if trace.dependencies.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " · depends on {}",
+            trace
+                .dependencies
+                .iter()
+                .map(|id| format!("#{id}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let unblock = if trace.dependents.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " · unblocks {}",
+            trace
+                .dependents
+                .iter()
+                .map(|id| format!("#{id}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let parent = task
+        .parent_id
+        .map(|p| format!(" · parent #{p}"))
+        .unwrap_or_default();
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>ACS trace #{} — {}</title>
+<style>body{{font:14px/1.5 system-ui,sans-serif;max-width:860px;margin:32px auto;padding:0 16px;color:#1a1a1a}}
+h1{{font-size:20px}}.meta{{color:#555;margin-bottom:20px}}code{{background:#f0f0f0;padding:1px 4px}}
+ol{{list-style:none;padding:0;border-left:3px solid #ddd}}li{{position:relative;padding:8px 0 8px 20px;border-bottom:1px solid #eee}}
+li::before{{content:"";position:absolute;left:-6.5px;top:14px;width:10px;height:10px;border-radius:50%;background:#999}}
+li.task_claimed::before,li.note::before{{background:#2563eb}}li.mail::before{{background:#059669}}li.task_accepted::before{{background:#16a34a}}li.task_failed::before,li.task_cancelled::before{{background:#dc2626}}
+time{{color:#888;font-size:12px;display:block}}.kind{{font-size:12px;color:#555;background:#f0f0f0;padding:1px 6px;border-radius:8px}}p{{margin:4px 0 0}}pre{{background:#f7f7f7;padding:8px;overflow-x:auto;font-size:12px;white-space:pre-wrap}}</style>
+</head><body>
+<h1>Trace #{}: {}</h1>
+<div class="meta">state <code>{}</code> · assignee <code>{}</code> · creator <code>{}</code> · round {}{}{}{}
+<br>{} items · exported {}</div>
+<ol>
+{}
+</ol>
+</body></html>"#,
+        task.id,
+        esc(&task.title),
+        task.id,
+        esc(&task.title),
+        esc(&task.state),
+        esc(task.assignee.as_deref().unwrap_or("-")),
+        esc(&task.creator),
+        task.round,
+        parent,
+        deps,
+        unblock,
+        trace.timeline.len(),
+        iso(now_ms()),
+        items
+    )
+}
+
 pub fn render_event(event: &BusEvent) -> String {
     let data = if event
         .data

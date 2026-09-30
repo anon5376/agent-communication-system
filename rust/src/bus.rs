@@ -1306,6 +1306,84 @@ impl Bus {
         self.to_tasks(&sql, &refs)
     }
 
+    /// Claimed tasks with no claim/note activity for `stall_ms` — a probably-dead claim.
+    /// `updated_ms` moves on claim and on every note, so it is the last-activity clock.
+    pub fn stalled_tasks(&self, stall_ms: i64) -> Result<Vec<Task>> {
+        let cutoff = self.now() - stall_ms.max(0);
+        self.to_tasks(
+            "SELECT * FROM tasks WHERE state = 'claimed' AND updated_ms < ? ORDER BY id",
+            &[&cutoff as &dyn rusqlite::ToSql],
+        )
+    }
+
+    /// The task's causal chain: its events, its notes, and the mail the bus sent about it,
+    /// merged into one chronological timeline — the bus is the trace.
+    pub fn trace_task(&self, id: i64) -> Result<TaskTrace> {
+        let task = self.get_task(id)?;
+        let events = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT * FROM events WHERE entity = 'task' AND entity_id = ? ORDER BY seq",
+            )?;
+            let rows = stmt.query_map([id.to_string()], |row| self.to_event(row))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            out
+        };
+        let mut timeline: Vec<TraceItem> = Vec::new();
+        for event in events {
+            timeline.push(TraceItem {
+                seq: event.seq,
+                ts_ms: event.ts_ms,
+                kind: event.kind.clone(),
+                actor: event.actor,
+                summary: event.kind.replace('_', " "),
+                body: None,
+                to: None,
+                data: Some(event.data),
+            });
+        }
+        for note in &task.notes {
+            timeline.push(TraceItem {
+                seq: note.id,
+                ts_ms: note.ts_ms,
+                kind: "note".into(),
+                actor: note.author.clone(),
+                summary: note
+                    .body
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(200)
+                    .collect(),
+                body: Some(note.body.clone()),
+                to: None,
+                data: None,
+            });
+        }
+        for message in &task.messages {
+            timeline.push(TraceItem {
+                seq: message.seq,
+                ts_ms: message.ts_ms,
+                kind: "mail".into(),
+                actor: message.sender.clone(),
+                summary: message.subject.clone(),
+                body: Some(message.body.clone()),
+                to: Some(message.recipient.clone()),
+                data: None,
+            });
+        }
+        timeline.sort_by(|a, b| a.ts_ms.cmp(&b.ts_ms).then(a.seq.cmp(&b.seq)));
+        Ok(TaskTrace {
+            dependencies: task.task.dependencies.clone(),
+            dependents: task.dependents.clone(),
+            task,
+            timeline,
+        })
+    }
+
     /// Reopen claims past their expiry. There is no sweeper process; every task write calls this first.
     fn reopen_expired_claims(&self) -> Result<()> {
         let now = self.now();

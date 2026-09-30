@@ -221,6 +221,34 @@ pub struct TaskDetail {
     pub leases: Vec<String>,
 }
 
+/// One line in a task's causal timeline: an event, a note, or task-bound mail, ordered by time.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceItem {
+    pub seq: i64,
+    pub ts_ms: i64,
+    /// Event kind, `note`, or `mail`.
+    pub kind: String,
+    pub actor: String,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// For mail: the recipient (None = broadcast).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskTrace {
+    pub task: TaskDetail,
+    pub dependencies: Vec<i64>,
+    pub dependents: Vec<i64>,
+    pub timeline: Vec<TraceItem>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BusEvent {

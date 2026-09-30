@@ -136,7 +136,9 @@ Global: --db PATH (or QAGENT_BUS_DB; default ~/.agent-bus/bus.db)  --as ID|opera
   qagent task list [--mine] [--state S]... [--all] [--limit N] | task show <N>
   qagent task claim [<N>] | task note <N> <text> | task submit <N> --summary S [--details D] [--file F]...
   qagent task review <N> --accept|--revise --feedback F | task cancel <N> [--reason R]
+  qagent task stalled [--stall-min M] | task requeue <N> [--reason R]
   qagent log [--follow] [--since SEQ] [--limit N]
+  qagent trace <task-N> [--format text|json|html] [--out FILE]   the task's causal chain
   qagent import [--jsonl P] [--qagent-state P] [--prototype P] [--dry-run] [--force]
   qagent mcp [--operator] | mcp-config | supervise <agent> [dir] | doctor | dashboard
 ";
@@ -580,8 +582,33 @@ fn task_command(ctx: &mut Context, sub: Option<&String>) -> Result<i32> {
             ctx.out(serde_json::to_value(&task)?, &out);
             Ok(0)
         }
+        Some("stalled") => {
+            let minutes = ctx
+                .str_flag("stall-min")
+                .map(|s| s.parse::<f64>())
+                .transpose()
+                .map_err(|_| BusError::invalid("--stall-min must be a positive number of minutes"))?
+                .unwrap_or(60.0);
+            if !(minutes > 0.0) || !minutes.is_finite() {
+                return Err(BusError::invalid(
+                    "--stall-min must be a positive number of minutes",
+                ));
+            }
+            let tasks = ctx.bus()?.stalled_tasks((minutes * 60_000.0) as i64)?;
+            ctx.out(serde_json::to_value(&tasks)?, &render_tasks(&tasks));
+            Ok(0)
+        }
+        Some("requeue") => {
+            let me = ctx.identity(false)?;
+            let id = ctx.task_id(2)?;
+            let reason = ctx.str_flag("reason");
+            let task = ctx.bus()?.release_task(&me, id, reason.as_deref())?;
+            let out = format!("requeued task #{}", task.id);
+            ctx.out(serde_json::to_value(&task)?, &out);
+            Ok(0)
+        }
         _ => Err(BusError::invalid(
-            "usage: qagent task add|list|show|claim|note|submit|review|cancel",
+            "usage: qagent task add|list|show|claim|note|submit|review|cancel|stalled|requeue",
         )),
     }
 }
@@ -1248,6 +1275,37 @@ fn dispatch(ctx: &mut Context) -> Result<i32> {
         Some("wait") => wait_command(ctx),
         Some("log") => log_command(ctx),
         Some("task") => task_command(ctx, sub.as_ref()),
+        Some("trace") => {
+            let id = ctx.task_id(1)?;
+            let trace = ctx.bus()?.trace_task(id)?;
+            let out_path = ctx.str_flag("out");
+            let format = ctx.str_flag("format").unwrap_or_else(|| {
+                if out_path
+                    .as_deref()
+                    .map(|p| p.ends_with(".html"))
+                    .unwrap_or(false)
+                {
+                    "html".to_string()
+                } else {
+                    "text".to_string()
+                }
+            });
+            match format.as_str() {
+                "html" => {
+                    let Some(path) = out_path else {
+                        return Err(BusError::invalid("--format html requires --out FILE"));
+                    };
+                    fs::write(&path, render_trace_html(&trace))?;
+                    ctx.out(json!({ "out": path }), &format!("wrote {path}"));
+                    Ok(0)
+                }
+                "json" | "text" => {
+                    ctx.out(serde_json::to_value(&trace)?, &render_trace(&trace));
+                    Ok(0)
+                }
+                _ => Err(BusError::invalid("--format must be text, json, or html")),
+            }
+        }
         Some("import") => {
             let explicit = ["jsonl", "qagent-state", "prototype"]
                 .iter()
