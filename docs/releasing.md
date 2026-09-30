@@ -8,6 +8,8 @@ tagged release is `v0.2.0`.
 ```sh
 npm run build && npm run test:compile && node --test dist-test/tests/*.test.js
 npm audit --audit-level=high
+npm run audit:public            # worktree has no private data
+npm run audit:public:history    # git history has no private data — required before publishing
 git diff --check
 ```
 
