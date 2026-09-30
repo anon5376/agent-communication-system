@@ -141,8 +141,6 @@ Global: --db PATH (or QAGENT_BUS_DB; default ~/.agent-bus/bus.db)  --as ID|opera
   qagent mcp [--operator] | mcp-config | supervise <agent> [dir] | doctor | dashboard
 ";
 
-const LAZY: &[&str] = &["dashboard"];
-
 /// Index of the command word: the first positional, skipping the values of flags that take one.
 fn command_position(argv: &[String]) -> Option<usize> {
     let mut index = 0;
@@ -885,6 +883,34 @@ fn mcp_config_command(ctx: &mut Context) -> Result<i32> {
     Ok(code)
 }
 
+fn dashboard_command(ctx: &mut Context) -> Result<i32> {
+    let link = ctx.parsed.positionals.get(1).map(|p| p.as_str()) == Some("link");
+    let help =
+        ctx.bool_flag("help") || ctx.parsed.positionals.get(1).map(|p| p.as_str()) == Some("help");
+    if help {
+        (ctx.io.stdout)(crate::dashboard::DASHBOARD_USAGE);
+        return Ok(0);
+    }
+    let port = match ctx
+        .str_flag("port")
+        .or_else(|| ctx.io.env.get("QAGENT_DASHBOARD_PORT").cloned())
+    {
+        Some(text) => {
+            let port: i64 = text.trim().parse().unwrap_or(-1);
+            if !(1..=65535).contains(&port) {
+                return Err(BusError::invalid(format!("invalid port: {text}")));
+            }
+            port as u16
+        }
+        None => crate::dashboard::DEFAULT_PORT,
+    };
+    if link {
+        crate::dashboard::dashboard_link(&ctx.db_path, port)
+    } else {
+        crate::dashboard::dashboard_serve(&ctx.db_path, port)
+    }
+}
+
 struct WriteCapture<'a>(&'a mut String);
 
 impl<'a> std::io::Write for WriteCapture<'a> {
@@ -1079,6 +1105,7 @@ fn dispatch(ctx: &mut Context) -> Result<i32> {
         Some("supervise") => supervise_command(ctx),
         Some("mcp") => mcp_command(ctx),
         Some("mcp-config") => mcp_config_command(ctx),
+        Some("dashboard") => dashboard_command(ctx),
         Some("fake-harness") => unreachable!("handled before dispatch"),
         Some("status") => {
             let status = ctx.bus()?.status()?;
@@ -1283,14 +1310,6 @@ pub fn run(argv: &[String], io: &mut Io) -> i32 {
     {
         (io.stdout)(USAGE);
         return 0;
-    }
-    // Lazy-module commands: announce the port boundary rather than silently doing nothing.
-    if let Some(index) = command_position(argv) {
-        let command = &argv[index];
-        if LAZY.contains(&command.as_str()) {
-            (io.stderr)(&format!("qagent: `{command}` is not implemented in the Rust port yet — use the Node qagent.\n"));
-            return 1;
-        }
     }
     let db_flag = parsed.flags.get("db").and_then(|v| match v {
         FlagValue::Str(s) => Some(s.clone()),

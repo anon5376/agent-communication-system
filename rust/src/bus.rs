@@ -167,7 +167,7 @@ pub struct Bus {
     pub conn: Connection,
     pub db_path: PathBuf,
     pub home: PathBuf,
-    clock: Box<dyn Fn() -> i64>,
+    clock: Box<dyn Fn() -> i64 + Send>,
     claim_ttl_ms: i64,
     tx_depth: Cell<u32>,
     pending_signals: RefCell<BTreeMap<String, i64>>,
@@ -192,7 +192,10 @@ impl Bus {
     }
 
     /// Test clock override.
-    pub fn with_clock(db_path: Option<&Path>, clock: impl Fn() -> i64 + 'static) -> Result<Bus> {
+    pub fn with_clock(
+        db_path: Option<&Path>,
+        clock: impl Fn() -> i64 + Send + 'static,
+    ) -> Result<Bus> {
         let mut bus = Self::open(db_path)?;
         bus.clock = Box::new(clock);
         Ok(bus)

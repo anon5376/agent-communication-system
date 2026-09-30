@@ -54,7 +54,7 @@ pub fn hash_token(token: &str) -> String {
 const B64URL: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /// base64url without padding, matching Node's Buffer.toString("base64url").
-fn base64url(bytes: &[u8]) -> String {
+pub(crate) fn base64url(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 4 / 3 + 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as u32;

@@ -9,7 +9,7 @@ either binary is fully readable — and wakeable — by the other.
 
 ```sh
 cargo build --release     # produces target/release/qagent
-cargo test                # 43 tests ported from tests/core-*.test.ts + supervisor/adapters/mcp
+cargo test                # 46 tests ported from tests/core-*.test.ts + supervisor/adapters/mcp/dashboard
 ```
 
 ## What is ported (v1)
@@ -53,6 +53,14 @@ cargo test                # 43 tests ported from tests/core-*.test.ts + supervis
   aborts a wait, drain-on-shutdown.
 - **MCP config** (`src/mcp_config.rs`): `qagent mcp-config` — Claude/Codex
   registration snippets with the same TOML escaping and env pinning rules.
+- **Dashboard** (`src/dashboard.rs` + `src/dashboard_page.rs`): `qagent
+  dashboard [serve|link]` — hand-rolled HTTP/1.1 on 127.0.0.1 with the full
+  guard set (loopback Host, same-origin writes, JSON-only bodies, CSP nonces),
+  operator-token → single-use ticket → session cookie sign-in, and SSE fan-out:
+  one `ChangeWatcher` loop publishes per-connection channel streams so a slow
+  client never stalls the loop, with `event: reset` on delta overflow. The HTML
+  and client JS ship verbatim — the browser re-renders rows with the same
+  renderers the server used for first paint.
 - **Import** (`src/import.rs`): the v1 migration — reads `bus.jsonl`, a
   `state.sqlite` legacy store, and a `prototype.db` coordinator into a v2 bus
   with per-source sha256 idempotency, `--dry-run` against an in-memory schema,
@@ -60,10 +68,10 @@ cargo test                # 43 tests ported from tests/core-*.test.ts + supervis
 
 ## Deliberately not ported (v1)
 
-`dashboard` — "not implemented in the Rust port yet" stub. Keep using the Node
-`qagent` for it; both binaries share the same `bus.db` safely. `supervise` now
-runs MCP-capable harnesses end-to-end (the `mcp` subcommand it launches is the
-Rust stdio server).
+Nothing left — every `qagent` subcommand now has a Rust implementation.
+`supervise` runs MCP-capable harnesses end-to-end (the `mcp` subcommand it
+launches is the Rust stdio server), and the dashboard serves the same HTML/JS
+the Node build serves.
 
 ## Interop
 
