@@ -2052,8 +2052,11 @@ impl Bus {
         };
         self.write(|bus| {
             let before = bus.require_task(task_id)?;
-            if before.state != "claimed" {
-                return Err(BusError::conflict(format!("task {} is {}, not claimed", before.id, before.state)));
+            if before.state != "claimed" && before.state != "open" {
+                return Err(BusError::conflict(format!(
+                    "task {} is {}, not claimed or open",
+                    before.id, before.state
+                )));
             }
             if actor.authority != "operator" && Some(&actor.agent_id) != before.assignee.as_ref() {
                 return Err(BusError::forbidden(format!(
