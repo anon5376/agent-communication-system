@@ -8,7 +8,7 @@ either binary is fully readable — and wakeable — by the other.
 ## Build and test
 
 ```sh
-cargo build --release     # produces qagent, agent-bus, and the two *-openai-compatible bins
+cargo build --release     # produces qagent, agent-bus, acs-app, and the two *-openai-compatible bins
 cargo test                # 46 tests ported from tests/core-*.test.ts + supervisor/adapters/mcp/dashboard
 ```
 
@@ -61,6 +61,10 @@ cargo test                # 46 tests ported from tests/core-*.test.ts + supervis
   client never stalls the loop, with `event: reset` on delta overflow. The HTML
   and client JS ship verbatim — the browser re-renders rows with the same
   renderers the server used for first paint.
+- **Terminal control app** (`src/app.rs` + the `acs-app` bin): a ratatui TUI —
+  live agents / open tasks / message stream panes fed by the same
+  `ChangeWatcher`, send-as-operator compose flow (`m`), task create (`t`) and
+  cancel (`x`), ~5 MB binary with no webview.
 - **OpenAI-compatible harness** (`src/openai_harness.rs` + the
   `qagent-openai-compatible` / `agent-bus-openai-compatible` bins): the generic
   chat/completions caller from `src/openai-compatible-harness.ts`, verbatim —

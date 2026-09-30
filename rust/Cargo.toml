@@ -22,6 +22,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ctrlc = "3"
 libc = "0.2"
 ureq = { version = "3.4", features = ["json"] }
+ratatui = "0.29"
+crossterm = "0.28"
 
 [[bin]]
 name = "qagent"
@@ -38,6 +40,10 @@ path = "src/bin/openai_compatible.rs"
 [[bin]]
 name = "agent-bus-openai-compatible"
 path = "src/bin/agent_bus_openai_compatible.rs"
+
+[[bin]]
+name = "acs-app"
+path = "src/bin/app.rs"
 
 [profile.release]
 opt-level = 2
