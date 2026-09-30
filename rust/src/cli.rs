@@ -141,7 +141,7 @@ Global: --db PATH (or QAGENT_BUS_DB; default ~/.agent-bus/bus.db)  --as ID|opera
   qagent mcp [--operator] | mcp-config | supervise <agent> [dir] | doctor | dashboard
 ";
 
-const LAZY: &[&str] = &["mcp", "mcp-config", "dashboard"];
+const LAZY: &[&str] = &["dashboard"];
 
 /// Index of the command word: the first positional, skipping the values of flags that take one.
 fn command_position(argv: &[String]) -> Option<usize> {
@@ -820,6 +820,83 @@ fn fake_harness_command(argv: &[String]) -> i32 {
 
 /// `qagent supervise <agent> [project-dir] [--config PATH]` — drives one agent's
 /// harness CLI against the bus until interrupted (Ctrl-C or SIGTERM).
+fn mcp_command(ctx: &mut Context) -> Result<i32> {
+    if ctx.bool_flag("help") {
+        (ctx.io.stderr)("usage: qagent mcp [--operator]\n\nStdio MCP server for one agent. Set QAGENT_AGENT_ID; the token is read from\nQAGENT_TOKEN or from the token file next to the bus database. --operator adds\nbus_agent_add and requires the operator identity (operator.token).\n");
+        return Ok(0);
+    }
+    let operator = ctx.bool_flag("operator");
+    let agent_id = crate::identity::agent_id_from_env()
+        .or_else(|| operator.then(|| crate::types::OPERATOR_ID.to_string()));
+    let Some(agent_id) = agent_id else {
+        (ctx.io.stderr)("qagent mcp: set QAGENT_AGENT_ID to the agent this server speaks for.\n");
+        return Ok(1);
+    };
+    let token = ctx
+        .io
+        .env
+        .get("QAGENT_TOKEN")
+        .or_else(|| ctx.io.env.get("AGENT_TOKEN"))
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    let env_map = ctx.io.env.clone();
+    let db_path = ctx.db_path.clone();
+    let options = crate::mcp::McpOptions {
+        agent_id,
+        token,
+        operator,
+        env: std::sync::Arc::new(move |name: &str| env_map.get(name).cloned()),
+        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    };
+    Ok(crate::mcp::serve(db_path, options))
+}
+
+fn mcp_config_command(ctx: &mut Context) -> Result<i32> {
+    let extra: Vec<String> = ctx.parsed.positionals[1..].to_vec();
+    if let Some(extra) = extra.first() {
+        return Err(BusError::invalid(format!("unknown argument: {extra}")));
+    }
+    let client = ctx.str_flag("client");
+    if let Some(client) = &client {
+        if client != "claude" && client != "codex" {
+            return Err(BusError::invalid("--client must be claude or codex"));
+        }
+    }
+    let args = crate::mcp_config::Args {
+        agent: ctx.str_flag("agent").or_else(|| ctx.str_flag("as")),
+        client,
+        operator: ctx.bool_flag("operator"),
+        name: ctx.str_flag("name"),
+        help: ctx.bool_flag("help"),
+    };
+    let env_map = ctx.io.env.clone();
+    let env = move |name: &str| env_map.get(name).cloned();
+    let mut out = String::new();
+    let mut err = String::new();
+    let code = crate::mcp_config::run(
+        args,
+        &ctx.db_path.to_string_lossy(),
+        &env,
+        &mut WriteCapture(&mut out),
+        &mut WriteCapture(&mut err),
+    );
+    (ctx.io.stdout)(&out);
+    (ctx.io.stderr)(&err);
+    Ok(code)
+}
+
+struct WriteCapture<'a>(&'a mut String);
+
+impl<'a> std::io::Write for WriteCapture<'a> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.push_str(&String::from_utf8_lossy(buf));
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn supervise_command(ctx: &mut Context) -> Result<i32> {
     let agent_id = ctx.parsed.positionals.get(1).cloned().ok_or_else(|| {
         BusError::invalid("usage: qagent supervise <agent> [project-dir] [--config PATH]")
@@ -1000,6 +1077,8 @@ fn dispatch(ctx: &mut Context) -> Result<i32> {
         }
         Some("doctor") => doctor_command(ctx),
         Some("supervise") => supervise_command(ctx),
+        Some("mcp") => mcp_command(ctx),
+        Some("mcp-config") => mcp_config_command(ctx),
         Some("fake-harness") => unreachable!("handled before dispatch"),
         Some("status") => {
             let status = ctx.bus()?.status()?;

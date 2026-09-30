@@ -9,7 +9,7 @@ either binary is fully readable — and wakeable — by the other.
 
 ```sh
 cargo build --release     # produces target/release/qagent
-cargo test                # 37 tests ported from tests/core-*.test.ts + supervisor/adapters
+cargo test                # 43 tests ported from tests/core-*.test.ts + supervisor/adapters/mcp
 ```
 
 ## What is ported (v1)
@@ -30,7 +30,7 @@ cargo test                # 37 tests ported from tests/core-*.test.ts + supervis
   files, task-event wake — and Ctrl-C → exit 130, timeout → exit 2.
 - **Full CLI** (`src/cli.rs`): `init`, `agent add|token rotate`, `send`, `inbox`,
   `ack`, `wait`, `status`, `whoami`, `log [--follow]`, `doctor`, `import`,
-  `supervise`, `fake-harness`, and
+  `supervise`, `fake-harness`, `mcp`, `mcp-config`, and
   the whole `task` family — same flags, same exit codes, same `--json` output.
 - **Config** (`src/config.rs`): full `loadConfig`/`resolveAgent`/
   `configPathFromProject`/`validateConfig` parity — providers, harnesses (with
@@ -46,6 +46,13 @@ cargo test                # 37 tests ported from tests/core-*.test.ts + supervis
   session.json accounting, exponential backoff retry.
 - **Fake harness** (`qagent fake-harness`): the `src/fake-harness.ts` test stand-in
   as a hidden subcommand — success/fail/fail-once/malformed/hang/bus-cli modes.
+- **MCP server** (`src/mcp.rs`): `qagent mcp [--operator]` — newline-delimited
+  JSON-RPC 2.0 stdio transport, all 14 agent tools + `bus_agent_add` under
+  `--operator`, per-call identity re-check, `bus_wait` on a worker thread with
+  its own connection so waits don't stall other calls, `notifications/cancelled`
+  aborts a wait, drain-on-shutdown.
+- **MCP config** (`src/mcp_config.rs`): `qagent mcp-config` — Claude/Codex
+  registration snippets with the same TOML escaping and env pinning rules.
 - **Import** (`src/import.rs`): the v1 migration — reads `bus.jsonl`, a
   `state.sqlite` legacy store, and a `prototype.db` coordinator into a v2 bus
   with per-source sha256 idempotency, `--dry-run` against an in-memory schema,
@@ -53,10 +60,10 @@ cargo test                # 37 tests ported from tests/core-*.test.ts + supervis
 
 ## Deliberately not ported (v1)
 
-`mcp`, `mcp-config`, `dashboard` — "not implemented in the Rust port yet" stubs.
-Keep using the Node `qagent` for those; both binaries share the same `bus.db`
-safely. Note `supervise` already runs managed (non-MCP) harnesses end-to-end;
-MCP-capable harnesses get the `mcp` stub error until that port lands.
+`dashboard` — "not implemented in the Rust port yet" stub. Keep using the Node
+`qagent` for it; both binaries share the same `bus.db` safely. `supervise` now
+runs MCP-capable harnesses end-to-end (the `mcp` subcommand it launches is the
+Rust stdio server).
 
 ## Interop
 

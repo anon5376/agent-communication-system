@@ -12,6 +12,8 @@ pub mod db;
 pub mod error;
 pub mod identity;
 pub mod import;
+pub mod mcp;
+pub mod mcp_config;
 pub mod render;
 pub mod supervisor;
 pub mod types;
