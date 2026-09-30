@@ -64,10 +64,13 @@ After `install.sh`, the TUI starts from anywhere with `acs` (or `acs --db /path/
   client never stalls the loop, with `event: reset` on delta overflow. The HTML
   and client JS ship verbatim — the browser re-renders rows with the same
   renderers the server used for first paint.
-- **Terminal control app** (`src/app.rs` + the `acs-app` bin): a ratatui TUI —
-  live agents / open tasks / message stream panes fed by the same
-  `ChangeWatcher`, send-as-operator compose flow (`m`), task create (`t`) and
-  cancel (`x`), ~5 MB binary with no webview.
+- **Terminal control app** (`src/app.rs` + the `acs`/`acs-app` bins): a ratatui
+  TUI for non-technical operators — first run auto-creates the bus and shows a
+  help card (`?` anytime); live agents / tasks / message panes fed by the same
+  `ChangeWatcher`; send via a pick-a-recipient popup (`m`), create tasks (`t`),
+  add agents (`a`), read any item (`enter`), cancel with confirmation (`x`),
+  click to focus a pane, scroll to select. ~5 MB binary, no webview; install it
+  globally with `./install.sh`.
 - **OpenAI-compatible harness** (`src/openai_harness.rs` + the
   `qagent-openai-compatible` / `agent-bus-openai-compatible` bins): the generic
   chat/completions caller from `src/openai-compatible-harness.ts`, verbatim —
