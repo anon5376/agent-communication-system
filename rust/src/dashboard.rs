@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,6 +30,11 @@ const LOOP_TIMEOUT_MS: u64 = 24 * 60 * 60_000;
 const FAST_POLL_MS: u64 = 25;
 const MAX_DELTA_EVENTS: i64 = 1000;
 const MAX_STREAMS: usize = 32;
+/// Bound on handler threads: each accepted socket spawns one before any auth
+/// check, so a flood of slow headers would otherwise stack threads for the full
+/// header timeout. Far above what a browser needs (a handful of requests plus
+/// one SSE stream).
+const MAX_CONNECTIONS: usize = 128;
 const MAX_BODY_BYTES: usize = 512 * 1024;
 const SESSION_COOKIE: &str = "qagent_dash";
 const DEFAULT_TICKET_TTL_MS: i64 = 5 * 60_000;
@@ -923,17 +928,25 @@ pub fn start_dashboard(options: DashboardOptions) -> Result<Dashboard> {
     let shutdown_loop = shutdown.clone();
     let bus_path = options.db_path.clone();
     let _safety = safety_ms;
+    let active = Arc::new(AtomicUsize::new(0));
     std::thread::spawn(move || {
         let _ = listener.set_nonblocking(true);
         while !shutdown_loop.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        drop(stream);
+                        continue;
+                    }
                     let hub = hub_loop.clone();
                     let sessions = sessions_loop.clone();
                     let stats = stats_loop.clone();
                     let bus_path = bus_path.clone();
+                    let active = active.clone();
                     std::thread::spawn(move || {
                         handle_connection(stream, &bus_path, hub, sessions, stats, port);
+                        active.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {

@@ -8,7 +8,7 @@ either binary is fully readable — and wakeable — by the other.
 ## Build and test
 
 ```sh
-cargo build --release     # produces target/release/qagent
+cargo build --release     # produces qagent, agent-bus, and the two *-openai-compatible bins
 cargo test                # 46 tests ported from tests/core-*.test.ts + supervisor/adapters/mcp/dashboard
 ```
 
@@ -61,6 +61,10 @@ cargo test                # 46 tests ported from tests/core-*.test.ts + supervis
   client never stalls the loop, with `event: reset` on delta overflow. The HTML
   and client JS ship verbatim — the browser re-renders rows with the same
   renderers the server used for first paint.
+- **OpenAI-compatible harness** (`src/openai_harness.rs` + the
+  `qagent-openai-compatible` / `agent-bus-openai-compatible` bins): the generic
+  chat/completions caller from `src/openai-compatible-harness.ts`, verbatim —
+  same flag parser, same env-pinned auth header, same normalized result JSON.
 - **Import** (`src/import.rs`): the v1 migration — reads `bus.jsonl`, a
   `state.sqlite` legacy store, and a `prototype.db` coordinator into a v2 bus
   with per-source sha256 idempotency, `--dry-run` against an in-memory schema,

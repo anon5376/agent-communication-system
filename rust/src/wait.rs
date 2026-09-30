@@ -83,24 +83,33 @@ pub fn wait_for_mail(
     let mut since = bus.write(|bus| {
         let now = bus.now();
         bus.conn
-            .prepare_cached("UPDATE agents SET status = 'waiting', wait_until_ms = ? WHERE id = ?")?
-            .execute(rusqlite::params![now + timeout.as_millis() as i64, me])?;
+            .prepare_cached("UPDATE agents SET status = 'waiting', wait_until_ms = ?, last_seen_ms = ? WHERE id = ?")?
+            .execute(rusqlite::params![
+                now + timeout.as_millis() as i64,
+                now,
+                me
+            ])?;
         bus.event(
             me,
             "agent_waiting",
             "agent",
             me,
-            json!({ "waitUntilMs": now + timeout.as_millis() as i64 }),
+            json!({ "until": now + timeout.as_millis() as i64 }),
         )?;
         bus.latest_seq()
     })?;
-    let deadline = Instant::now() + timeout;
     let mut status = "none".to_string();
     let mut messages = vec![];
     let mut events = vec![];
+    let pending = bus.inbox(actor, true, None)?;
+    if !pending.messages.is_empty() {
+        status = "mail".into();
+        messages = pending.messages;
+    }
+    let deadline = Instant::now() + timeout;
     let mut seq = since;
     let mut last_error: Option<crate::error::BusError> = None;
-    loop {
+    while status == "none" {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() || stop.load(std::sync::atomic::Ordering::SeqCst) {
             break;
@@ -132,14 +141,15 @@ pub fn wait_for_mail(
         // Somebody else's event arrived; keep waiting.
         since = seq;
     }
-    // The idle status update runs regardless of outcome — the waiter is gone,
-    // which is exactly what the reader cares about.
+    // The idle status update runs regardless of outcome — the waiter is gone.
+    // Guarded on 'waiting' like the TS original: another command may have marked
+    // this agent working while the wait was running.
     let _ = bus.write(|bus| {
         let now = bus.now();
         bus.conn
-            .prepare_cached("UPDATE agents SET status = 'idle', wait_until_ms = NULL, last_seen_ms = ? WHERE id = ?")?
+            .prepare_cached("UPDATE agents SET status = 'idle', wait_until_ms = NULL, last_seen_ms = ? WHERE id = ? AND status = 'waiting'")?
             .execute(rusqlite::params![now, me])?;
-        bus.event(me, "agent_idle", "agent", me, json!({}))?;
+        bus.event(me, "agent_idle", "agent", me, json!({ "reason": status }))?;
         Ok(())
     });
     if let Some(error) = last_error {

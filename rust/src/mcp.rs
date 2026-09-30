@@ -235,6 +235,9 @@ impl McpServer {
         let waits = self.waits.clone();
         let stop_for_worker = stop.clone();
 
+        // Hold the map lock across spawn + insert: a worker that finishes
+        // immediately must see its slot present when it removes itself.
+        let mut map = self.waits.lock().unwrap();
         let key_for_worker = key.clone();
         let handle = std::thread::spawn(move || {
             let reply = wait_reply(
@@ -249,10 +252,8 @@ impl McpServer {
             waits.lock().unwrap().remove(&key_for_worker);
             let _ = tx.send(reply);
         });
-        self.waits
-            .lock()
-            .unwrap()
-            .insert(key, WaitSlot { stop, handle });
+        map.insert(key, WaitSlot { stop, handle });
+        drop(map);
     }
 
     fn call_tool(&self, identity: &Identity, name: &str, args: &Value) -> Result<String> {

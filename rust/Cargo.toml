@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Rust port of the agent-communication-system bus and CLI (qagent)"
 license = "MIT"
+autobins = false
 
 [lib]
 name = "acs"
@@ -20,10 +21,23 @@ notify = "6"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ctrlc = "3"
 libc = "0.2"
+ureq = { version = "3.4", features = ["json"] }
 
 [[bin]]
 name = "qagent"
-path = "src/main.rs"
+path = "src/bin/qagent.rs"
+
+[[bin]]
+name = "agent-bus"
+path = "src/bin/agent_bus.rs"
+
+[[bin]]
+name = "qagent-openai-compatible"
+path = "src/bin/openai_compatible.rs"
+
+[[bin]]
+name = "agent-bus-openai-compatible"
+path = "src/bin/agent_bus_openai_compatible.rs"
 
 [profile.release]
 opt-level = 2
