@@ -10,7 +10,7 @@ startCommand:
     properties:
       agentId:
         type: string
-        description: Agent identity registered in the bus via `qagent agent add` (use `operator` for the operator-only tool).
+        description: Agent identity registered in the bus via `qagent agent add`. The operator-only tool requires `qagent mcp --operator` instead.
       busDb:
         type: string
         description: Path to the bus SQLite file. Defaults to ~/.agent-bus/bus.db.

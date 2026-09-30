@@ -26,7 +26,7 @@
       "environmentVariables": [
         {
           "name": "QAGENT_AGENT_ID",
-          "description": "Agent identity registered in the bus via `qagent agent add` (or `operator` for the operator-only tool). The agent's token file must already exist under the bus home.",
+          "description": "Agent identity registered in the bus via `qagent agent add`. The agent's token file must already exist under the bus home.",
           "isRequired": true
         },
         {
