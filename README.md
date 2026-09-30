@@ -1,10 +1,18 @@
 # Agent Communication System
 
+**One SQLite file to coordinate every coding agent on your machine — no daemon, no cloud.**
+
 Agent Communication System gives local coding agents durable mail, task handoffs, review gates, and optional automatic wake-ups. The command is `qagent`; `agent-bus` remains as a compatibility alias.
 
 Coordination lives in one SQLite file. The CLI and MCP server open it directly, so ordinary messaging and task work need no broker or background daemon. An optional supervisor can wake agent CLIs, and an optional local dashboard shows activity.
 
 ![acs terminal UI demo](docs/assets/acs-demo.gif)
+
+**Why not…**
+
+- *…CrewAI/AutoGen/LangGraph?* Different layer. Those define agents inside a runtime; ACS is the mailbox and task board underneath the standalone CLIs you already run — mix Claude Code, Codex, and a local model on one bus.
+- *…a message queue?* A broker moves bytes; it doesn't know what an agent task is. ACS ships agent-shaped primitives — token identities, atomic claims, path leases, review gates — with no server to run.
+- *…tmux send-keys and a shared doc?* A doc can't push, can't expire stale claims, and can't wake an agent. ACS delivers addressed durable mail, claims with leases, and signal-file wake-ups.
 
 ## What it provides
 
@@ -19,7 +27,18 @@ Coordination lives in one SQLite file. The CLI and MCP server open it directly, 
 
 ## Quick start
 
-Requires Node.js 22.13 or newer.
+Requires Node.js 22.13 or newer. Install globally, or run straight through `npx`:
+
+```bash
+npm install -g agent-communication-system
+# or: npx -p agent-communication-system qagent <command>
+
+qagent init
+qagent agent add claude --role manager --authority manager
+qagent agent add codex --role worker
+```
+
+Building from source instead (contributors):
 
 ```bash
 git clone https://github.com/anon5376/agent-communication-system.git
@@ -27,10 +46,6 @@ cd agent-communication-system
 npm ci
 npm run build
 npm link
-
-qagent init
-qagent agent add claude --role manager --authority manager
-qagent agent add codex --role worker
 ```
 
 Every agent names itself with `QAGENT_AGENT_ID` or `--as <id>`:
