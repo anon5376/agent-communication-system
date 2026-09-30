@@ -173,7 +173,89 @@ enum Mode {
     ConfirmCancel,
     Detail,
     Help,
+    Setup,
 }
+
+/// First-run team presets. `role` drives task routing — a task created with
+/// `--role worker-hard` is only claimable by the hard worker. `manager`
+/// authority is reserved for the lead so it can coordinate.
+struct Preset {
+    id: &'static str,
+    role: &'static str,
+    authority: &'static str,
+    blurb: &'static str,
+    charter: &'static str,
+}
+
+const PLANNER_CHARTER: &str = "\
+You are the planner on this agent bus. Your job is to turn goals into tasks.
+
+- When the operator or lead sends you work, break it into concrete tasks.
+- Create each with `qagent task add <title> --brief <details> --role <role>`.
+- Route deep or complex work with --role worker-hard, small quick work with
+  --role worker-easy, and coordination with --role orchestrator.
+- Never implement yourself — plan, then hand off. Report back to the
+  operator with `qagent send operator <subject> <body>`.";
+
+const LEAD_CHARTER: &str = "\
+You are the lead (orchestrator) on this agent bus. Your job is to keep work moving.
+
+- Watch the task list (`qagent task list`) and your inbox (`qagent inbox`,
+  or block on `qagent wait`).
+- Route unassigned tasks to the right worker: `qagent task add` again with
+  --role worker-hard / worker-easy or --to <agent>.
+- When a worker submits, review it: `qagent task review <id> --accept` or
+  --revise --feedback <what to fix>.
+- If a request needs planning, hand it to the planner. Keep the operator
+  posted with `qagent send operator <subject> <body>`.";
+
+const WORKER_HARD_CHARTER: &str = "\
+You are the heavy worker on this agent bus — the deep, complex tasks are yours.
+
+- Claim work with `qagent task claim` (tasks with role worker-hard match you).
+- Post progress as you go: `qagent task note <id> <what you found or did>`.
+- Finish with `qagent task submit <id> --summary <what changed>`.
+- Blocked? Message the lead (`qagent send lead <subject> <details>`) and
+  release the task so it isn't held: `qagent task release` via the lead.";
+
+const WORKER_EASY_CHARTER: &str = "\
+You are the fast worker on this agent bus — the small, quick tasks are yours.
+
+- Claim work with `qagent task claim` (tasks with role worker-easy match you).
+- Finish fast: `qagent task submit <id> --summary <what changed>`.
+- If a task turns out bigger than it looked, message the lead
+  (`qagent send lead <subject> <details>`) to hand it up instead of stalling.";
+
+const PRESETS: &[Preset] = &[
+    Preset {
+        id: "planner",
+        role: "planner",
+        authority: "worker",
+        blurb: "turns goals into concrete tasks",
+        charter: PLANNER_CHARTER,
+    },
+    Preset {
+        id: "lead",
+        role: "orchestrator",
+        authority: "manager",
+        blurb: "assigns tasks to workers, reviews results",
+        charter: LEAD_CHARTER,
+    },
+    Preset {
+        id: "worker-hard",
+        role: "worker-hard",
+        authority: "worker",
+        blurb: "takes the big, complex tasks",
+        charter: WORKER_HARD_CHARTER,
+    },
+    Preset {
+        id: "worker-easy",
+        role: "worker-easy",
+        authority: "worker",
+        blurb: "takes the small, quick tasks",
+        charter: WORKER_EASY_CHARTER,
+    },
+];
 
 struct App {
     bus: Bus,
@@ -193,6 +275,8 @@ struct App {
     agent_role: String,
     detail_title: String,
     detail: String,
+    setup_sel: usize,
+    setup_on: Vec<bool>,
     flash: String,
     flash_until: Instant,
     areas: Cell<[Rect; 3]>,
@@ -291,6 +375,68 @@ impl App {
         Ok(())
     }
 
+    fn apply_presets(&mut self) {
+        let Ok(ident) = self.identity() else {
+            self.flash("Couldn't sign in as operator".to_string());
+            return;
+        };
+        let mut made: Vec<&str> = Vec::new();
+        let mut skipped: Vec<&str> = Vec::new();
+        for (i, p) in PRESETS.iter().enumerate() {
+            if !self.setup_on.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            match self.bus.add_agent(
+                &ident,
+                p.id,
+                Some(p.role),
+                None,
+                None,
+                None,
+                Some(p.authority),
+            ) {
+                Ok((agent, _)) => {
+                    let dir = self.bus.home.join("charters");
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = std::fs::write(dir.join(format!("{}.md", p.id)), p.charter);
+                    let _ = self.bus.send(
+                        &ident,
+                        SendInput {
+                            to: agent.id.clone(),
+                            subject: Some(format!("Your role on the bus: {}", p.id)),
+                            body: p.charter.to_string(),
+                            msg_type: None,
+                            thread: None,
+                            task_id: None,
+                            refs: None,
+                            requires_ack: false,
+                        },
+                    );
+                    made.push(p.id);
+                }
+                Err(_) => skipped.push(p.id),
+            }
+        }
+        let _ = self.refresh();
+        if made.is_empty() && skipped.is_empty() {
+            self.flash("Nothing selected — pick with space, or press s to skip".to_string());
+            return;
+        }
+        let mut msg = if made.is_empty() {
+            String::new()
+        } else {
+            format!("Team ready: {}.", made.join(", "))
+        };
+        if !skipped.is_empty() {
+            msg.push_str(&format!(" Already existed: {}.", skipped.join(", ")));
+        }
+        if !made.is_empty() {
+            msg.push_str(" Their first message explains each role.");
+        }
+        self.flash(msg);
+        self.mode = Mode::Navigate;
+    }
+
     fn move_selection(&mut self, delta: i64) {
         let i = self.pane.index();
         let len = match i {
@@ -343,8 +489,47 @@ fn render(f: &mut ratatui::Frame, app: &App) {
         Mode::ConfirmCancel => render_cancel_popup(f, app),
         Mode::Help => render_help(f),
         Mode::Detail => render_detail(f, app),
+        Mode::Setup => render_setup(f, app),
         _ => {}
     }
+}
+
+fn render_setup(f: &mut ratatui::Frame, app: &App) {
+    let area = centered_rect(64, 17, f.area());
+    f.render_widget(Clear, area);
+    let mut lines = vec![
+        Line::from("Pick the agents you want. Each one is created on the bus"),
+        Line::from("with a starter prompt waiting in its inbox."),
+        Line::from(""),
+    ];
+    for (i, p) in PRESETS.iter().enumerate() {
+        let checked = app.setup_on.get(i).copied().unwrap_or(false);
+        let marker = if checked { "[x]" } else { "[ ]" };
+        let style = if i == app.setup_sel {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {marker} {:<12}", p.id), style),
+            Span::styled(
+                format!(" {}", p.blurb),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  space toggle · ↑↓ move · enter create team · s skip",
+        Style::default().fg(Color::DarkGray),
+    )));
+    let p = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Set up your team ")
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+    f.render_widget(p, area);
 }
 
 fn focused(app: &App, pane: Pane) -> Style {
@@ -396,12 +581,11 @@ fn render_agents(f: &mut ratatui::Frame, app: &App, area: Rect) {
             };
             ListItem::new(Line::from(vec![
                 Span::styled(dot, style),
-                Span::raw(format!(" {:<12.12}", a.id)),
+                Span::raw(format!(" {:<11.11}", a.id)),
                 Span::styled(
-                    format!("{:<10.10}", a.role),
+                    format!("{:<13.13}", a.role),
                     Style::default().fg(Color::Magenta),
                 ),
-                Span::styled(format!("{:<9.9}", state_label(state)), style),
                 Span::styled(
                     ago(a.last_seen_ms, now),
                     Style::default().fg(Color::DarkGray),
@@ -562,7 +746,7 @@ fn render_input(f: &mut ratatui::Frame, app: &App, area: Rect) {
             ),
             app.agent_role.clone(),
         ),
-        Mode::ConfirmCancel | Mode::Detail | Mode::Help | Mode::Navigate => {
+        Mode::ConfirmCancel | Mode::Detail | Mode::Help | Mode::Setup | Mode::Navigate => {
             (" ".to_string(), String::new())
         }
     };
@@ -609,7 +793,7 @@ fn render_hints(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let hint = match app.mode {
         Mode::Navigate => match app.pane {
             Pane::Agents => {
-                "m send · a add agent · t new task · ↑↓/wheel move · tab/click pane · ? help · q quit"
+                "enter view · m send · a add agent · t new task · ↑↓/wheel · tab/click · ? help · q quit"
             }
             Pane::Tasks => {
                 "enter view · x cancel · t new task · m send · ↑↓/wheel move · ? help · q quit"
@@ -627,6 +811,7 @@ fn render_hints(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Mode::ConfirmCancel => "y cancel the task · n/esc keep it",
         Mode::Detail => "esc/enter close",
         Mode::Help => "press any key to close",
+        Mode::Setup => "space toggle · ↑↓ move · enter create team · s skip",
     };
     let p = Paragraph::new(format!(" {hint}")).style(Style::default().fg(Color::DarkGray));
     f.render_widget(p, area);
@@ -792,7 +977,26 @@ fn open_detail(app: &mut App) {
                 app.mode = Mode::Detail;
             }
         }
-        Pane::Agents => {}
+        Pane::Agents => {
+            if let Some(a) = app
+                .state
+                .agents
+                .get(app.sel[0].min(app.state.agents.len().saturating_sub(1)))
+            {
+                let row = (
+                    a.id.clone(),
+                    a.role.clone(),
+                    state_label(agent_state(a, now_ms())),
+                    ago(a.last_seen_ms, now_ms()),
+                );
+                app.detail_title = format!("Agent {}", row.0);
+                app.detail = format!(
+                    "Name:      {}\nRole:      {}\nStatus:    {}\nLast seen: {}",
+                    row.0, row.1, row.2, row.3,
+                );
+                app.mode = Mode::Detail;
+            }
+        }
     }
 }
 
@@ -857,6 +1061,25 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         Mode::Help | Mode::Detail => {
             app.mode = Mode::Navigate;
         }
+        Mode::Setup => match key.code {
+            KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Esc => {
+                app.mode = Mode::Navigate;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.setup_sel = app.setup_sel.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.setup_sel = (app.setup_sel + 1).min(PRESETS.len() - 1);
+            }
+            KeyCode::Char(' ') => {
+                let on = app.setup_on.get_mut(app.setup_sel);
+                if let Some(on) = on {
+                    *on = !*on;
+                }
+            }
+            KeyCode::Enter => app.apply_presets(),
+            _ => {}
+        },
         Mode::ConfirmCancel => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 app.mode = Mode::Navigate;
@@ -966,9 +1189,9 @@ pub fn run(db_path: &std::path::Path, stop: Option<Arc<AtomicBool>>) -> Result<i
         bus,
         watcher,
         pane: Pane::Agents,
-        // Show the help card on the very first run.
+        // First run: walk through team setup instead of dropping to an empty screen.
         mode: if fresh.is_some() {
-            Mode::Help
+            Mode::Setup
         } else {
             Mode::Navigate
         },
@@ -982,8 +1205,10 @@ pub fn run(db_path: &std::path::Path, stop: Option<Arc<AtomicBool>>) -> Result<i
         agent_role: String::new(),
         detail_title: String::new(),
         detail: String::new(),
+        setup_sel: 0,
+        setup_on: PRESETS.iter().map(|_| true).collect(),
         flash: if fresh.is_some() {
-            "Set up a new bus for you — press any key to start".to_string()
+            "Created a new bus for you".to_string()
         } else {
             String::new()
         },
