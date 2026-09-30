@@ -10,7 +10,7 @@ noted inline.
 |---|---|
 | Name | `qagent` — Agent Communication System |
 | Repo URL | `https://github.com/anon5376/agent-communication-system` |
-| Author | `anon5376` · `https://github.com/anon5376` · `anon5376@proton.me` |
+| Author | `anon5376` · `https://github.com/anon5376` · `anon5376@users.noreply.github.com` (swap in any monitored address for contact-email fields) |
 | License | MIT |
 | Tagline (~100 chars) | `Local-first mail + task queue for coding agents — one SQLite file, no daemon.` |
 | One-liner (≤200 chars) | `Local-first coordination bus for coding agents: durable agent-to-agent mail, task queues with claims and review gates, shared state in one SQLite file — no daemon, no cloud. Stdio MCP server + CLI.` |
@@ -106,7 +106,7 @@ Form at `https://mcpservers.org/submit`:
 - Short Description: the one-liner above
 - Link: `https://github.com/anon5376/agent-communication-system`
 - Category: `Development` (backup pick: `Communication`)
-- Contact Email: `anon5376@proton.me`
+- Contact Email: a monitored address (`anon5376@users.noreply.github.com` placeholder — substitute the real contact at submit time)
 
 Free listing, or $39 premium (faster review, badge, dofollow link).
 
