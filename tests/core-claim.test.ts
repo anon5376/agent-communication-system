@@ -21,6 +21,9 @@ interface ChildResult { code: number | null; stdout: string; stderr: string }
 
 function run(args: string[], env: NodeJS.ProcessEnv, onLine?: (line: string) => void): { done: Promise<ChildResult>; release: () => void } {
   const child = spawn(process.execPath, args, { env, stdio: ["pipe", "pipe", "pipe"] });
+  // A child that never reads stdin may exit before release() writes; that EPIPE is expected,
+  // not a suite failure.
+  child.stdin.on("error", () => {});
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
