@@ -2,9 +2,12 @@
   "name": "agent-communication-system",
   "version": "0.2.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Local agent communication and task coordination over one SQLite file, with a CLI, MCP server, optional supervisor, and dashboard.",
-  "engines": {"node": ">=22.13"},
+  "engines": {
+    "node": ">=22.13"
+  },
   "bin": {
     "qagent": "./dist/qagent.js",
     "agent-bus": "./dist/qagent.js",
@@ -31,5 +34,6 @@
   "devDependencies": {
     "@types/node": "^22.9.0",
     "typescript": "^5.6.3"
-  }
+  },
+  "license": "MIT"
 }
