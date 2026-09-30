@@ -26,6 +26,11 @@ jobs:
       - run: npm audit --audit-level=high
       - run: npm run audit:public
       - run: npm test
+      # Cross-implementation smoke: the Rust and TypeScript qagent binaries must
+      # share one bus.db — mail, task claims and wait wake-ups cross over.
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --manifest-path rust/Cargo.toml
+      - run: node scripts/v2-interop-smoke.mjs
 
   rust-test:
     name: Rust port tests
