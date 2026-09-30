@@ -119,7 +119,8 @@ export async function main(argv, context) {
         }
         if (commandName(context) === "doctor")
             return doctor(positionals, config, context, out);
-        const [agentId, dir] = positionals;
+        const agentId = roster ? undefined : positionals[0];
+        const dir = roster ? positionals[0] : positionals[1];
         if (!roster && !agentId) {
             err(USAGE);
             return 1;
@@ -139,10 +140,19 @@ export async function main(argv, context) {
                     return 1;
                 }
                 out(`supervising roster: ${agents.map((agent) => agent.id).join(", ")}\n`);
-                await Promise.all(agents.map((agent) => supervise({ ...shared, agentId: agent.id })));
-                return 0;
+                const results = await Promise.allSettled(agents.map((agent) => supervise({ ...shared, agentId: agent.id })));
+                let failures = 0;
+                for (let index = 0; index < results.length; index += 1) {
+                    const result = results[index];
+                    if (result.status === "rejected") {
+                        failures += 1;
+                        err(`supervisor for ${agents[index].id} exited with error: ${result.reason.message}\n`);
+                    }
+                }
+                return failures ? 1 : 0;
             }
-            await supervise({ ...shared, agentId });
+            if (agentId)
+                await supervise({ ...shared, agentId });
         }
         finally {
             process.off("SIGINT", stop);
