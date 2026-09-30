@@ -135,3 +135,21 @@ test("release and requeue work on expired claims, and deadClaims needs a dead wo
   assert.equal(secondRequeued.state, "open");
   assert.equal(secondRequeued.assignee, null);
 });
+
+test("traceTask merges events, notes and task mail into one causal timeline", (t) => {
+  const { bus, alice, bob } = setup(t);
+  const upstream = bus.createTask(alice, { title: "upstream", brief: "b" });
+  const task = bus.createTask(alice, { title: "downstream", brief: "b", to: "bob", dependencies: [upstream.id] });
+  bus.noteTask(bob, task.id, "waiting on upstream");
+  const trace = bus.traceTask(task.id);
+
+  assert.deepEqual(trace.dependencies, [upstream.id]);
+  assert.deepEqual(bus.traceTask(upstream.id).dependents, [task.id]);
+  const kinds = trace.timeline.map((item) => item.kind);
+  assert.ok(kinds.includes("task_created"));
+  assert.ok(kinds.includes("note"));
+  assert.ok(kinds.includes("mail")); // the [TASK #N] creation mail to bob
+  for (let index = 1; index < trace.timeline.length; index += 1) {
+    assert.ok(trace.timeline[index].tsMs >= trace.timeline[index - 1].tsMs, "timeline is chronological");
+  }
+});
