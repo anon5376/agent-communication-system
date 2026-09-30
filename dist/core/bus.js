@@ -596,6 +596,20 @@ export class Bus {
         return this.db.prepare("SELECT * FROM tasks WHERE state = 'claimed' AND updated_ms < ? ORDER BY id").all(cutoff).map((row) => this.toTask(row));
     }
     /**
+     * Claims the bus can treat as dead: the lease expired, or the task has been idle
+     * for stallMs AND the assignee has not touched the bus in that same window. An
+     * active worker keeps refreshing last_seen_ms, so a live claim survives both tests.
+     */
+    deadClaims(stallMs) {
+        const now = this.now();
+        const cutoff = now - Math.max(0, stallMs);
+        return this.db.prepare(`SELECT t.* FROM tasks t LEFT JOIN agents a ON a.id = t.assignee
+       WHERE t.state = 'claimed' AND (
+         (t.claim_expires_ms IS NOT NULL AND t.claim_expires_ms < ?)
+         OR (t.updated_ms < ? AND (a.last_seen_ms IS NULL OR a.last_seen_ms < ?))
+       ) ORDER BY t.id`).all(now, cutoff, cutoff).map((row) => this.toTask(row));
+    }
+    /**
      * The task's causal chain: its events, its notes, and the mail the bus sent about it,
      * merged into one chronological timeline — the bus is the trace.
      */
@@ -883,20 +897,46 @@ export class Bus {
     releaseTask(actor, taskId, reason) {
         const text = boundedString(reason, "reason", LIMITS.reason) || "released";
         return this.write(() => {
+            const before = this.requireTask(taskId);
+            if (before.state !== "claimed")
+                throw new BusError("conflict", `task ${before.id} is ${before.state}, not claimed`);
+            if (actor.authority !== "operator" && actor.agentId !== before.assignee)
+                throw new BusError("forbidden", `only ${before.assignee ?? "the assignee"} or the operator may release task ${before.id}`);
+            // Snapshot first: an expired claim is reopened by this sweep, which must not
+            // count as "not claimed" (and must not be rolled back by throwing after it).
+            const claimExpired = before.claimExpiresMs !== null && before.claimExpiresMs < this.now();
             this.reopenExpiredClaims();
             const task = this.requireTask(taskId);
-            if (actor.authority !== "operator" && actor.agentId !== task.assignee)
-                throw new BusError("forbidden", `only ${task.assignee ?? "the assignee"} or the operator may release task ${task.id}`);
-            if (task.state !== "claimed")
+            if (!claimExpired && task.state !== "claimed")
                 throw new BusError("conflict", `task ${task.id} is ${task.state}, not claimed`);
-            const created = this.db.prepare("SELECT data_json FROM events WHERE entity = 'task' AND entity_id = ? AND kind = 'task_created' ORDER BY seq LIMIT 1").get(String(task.id));
-            const preassigned = json(created?.data_json, {}).assignee ?? null;
             const now = this.now();
-            this.db.prepare("UPDATE tasks SET state = 'open', assignee = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(preassigned, now, task.id);
-            this.db.prepare("DELETE FROM leases WHERE task_id = ?").run(task.id);
-            this.event(actor.agentId, "task_released", "task", task.id, { reason: text.slice(0, 500), previousAssignee: task.assignee });
+            if (!claimExpired) {
+                const created = this.db.prepare("SELECT data_json FROM events WHERE entity = 'task' AND entity_id = ? AND kind = 'task_created' ORDER BY seq LIMIT 1").get(String(task.id));
+                const preassigned = json(created?.data_json, {}).assignee ?? null;
+                this.db.prepare("UPDATE tasks SET state = 'open', assignee = ?, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(preassigned, now, task.id);
+                this.db.prepare("DELETE FROM leases WHERE task_id = ?").run(task.id);
+            }
+            this.event(actor.agentId, "task_released", "task", task.id, { reason: text.slice(0, 500), previousAssignee: before.assignee });
             this.touch(actor.agentId, "idle");
             return this.requireTask(task.id);
+        });
+    }
+    /** Release a claimed task back to the pool with no assignee — anyone may claim it. */
+    requeueTask(actor, taskId, reason) {
+        const text = boundedString(reason, "reason", LIMITS.reason) || "requeued";
+        return this.write(() => {
+            const before = this.requireTask(taskId);
+            if (before.state !== "claimed")
+                throw new BusError("conflict", `task ${before.id} is ${before.state}, not claimed`);
+            if (actor.authority !== "operator" && actor.agentId !== before.assignee)
+                throw new BusError("forbidden", `only ${before.assignee ?? "the assignee"} or the operator may requeue task ${before.id}`);
+            this.reopenExpiredClaims();
+            const now = this.now();
+            this.db.prepare("UPDATE tasks SET state = 'open', assignee = NULL, claim_expires_ms = NULL, updated_ms = ? WHERE id = ?").run(now, before.id);
+            this.db.prepare("DELETE FROM leases WHERE task_id = ?").run(before.id);
+            this.event(actor.agentId, "task_released", "task", before.id, { reason: text.slice(0, 500), previousAssignee: before.assignee, requeued: true });
+            this.touch(actor.agentId, "idle");
+            return this.requireTask(before.id);
         });
     }
     /**

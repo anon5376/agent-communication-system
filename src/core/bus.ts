@@ -664,6 +664,23 @@ export class Bus {
   }
 
   /**
+   * Claims the bus can treat as dead: the lease expired, or the task has been idle
+   * for stallMs AND the assignee has not touched the bus in that same window. An
+   * active worker keeps refreshing last_seen_ms, so a live claim survives both tests.
+   */
+  deadClaims(stallMs: number): Task[] {
+    const now = this.now();
+    const cutoff = now - Math.max(0, stallMs);
+    return (this.db.prepare(
+      `SELECT t.* FROM tasks t LEFT JOIN agents a ON a.id = t.assignee
+       WHERE t.state = 'claimed' AND (
+         (t.claim_expires_ms IS NOT NULL AND t.claim_expires_ms < ?)
+         OR (t.updated_ms < ? AND (a.last_seen_ms IS NULL OR a.last_seen_ms < ?))
+       ) ORDER BY t.id`,
+    ).all(now, cutoff, cutoff) as Row[]).map((row) => this.toTask(row));
+  }
+
+  /**
    * The task's causal chain: its events, its notes, and the mail the bus sent about it,
    * merged into one chronological timeline — the bus is the trace.
    */
