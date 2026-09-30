@@ -4,6 +4,7 @@
 //! TypeScript implementation in `src/` — a bus.db opened here is interchangeable
 //! with one opened by `qagent` on Node.
 
+pub mod adapters;
 pub mod bus;
 pub mod cli;
 pub mod config;
@@ -12,6 +13,7 @@ pub mod error;
 pub mod identity;
 pub mod import;
 pub mod render;
+pub mod supervisor;
 pub mod types;
 pub mod wait;
 pub mod watcher;

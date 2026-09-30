@@ -9,6 +9,7 @@ dependencies = [
  "chrono",
  "ctrlc",
  "dirs",
+ "libc",
  "notify",
  "rand",
  "rusqlite",

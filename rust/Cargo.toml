@@ -19,6 +19,7 @@ dirs = "5"
 notify = "6"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ctrlc = "3"
+libc = "0.2"
 
 [[bin]]
 name = "qagent"

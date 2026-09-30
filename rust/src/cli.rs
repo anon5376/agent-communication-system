@@ -141,7 +141,7 @@ Global: --db PATH (or QAGENT_BUS_DB; default ~/.agent-bus/bus.db)  --as ID|opera
   qagent mcp [--operator] | mcp-config | supervise <agent> [dir] | doctor | dashboard
 ";
 
-const LAZY: &[&str] = &["mcp", "mcp-config", "supervise", "dashboard"];
+const LAZY: &[&str] = &["mcp", "mcp-config", "dashboard"];
 
 /// Index of the command word: the first positional, skipping the values of flags that take one.
 fn command_position(argv: &[String]) -> Option<usize> {
@@ -621,6 +621,238 @@ fn on_path(command: &str) -> bool {
     })
 }
 
+/// `qagent fake-harness --mode <m> --agent <a> --prompt <p> [--session <s>]` —
+/// port of src/fake-harness.ts: the deterministic stand-in vendor CLI used by
+/// supervisor tests and the `fake` adapter.
+fn fake_harness_command(argv: &[String]) -> i32 {
+    let arg = |name: &str| -> String {
+        argv.iter()
+            .position(|a| a == name)
+            .and_then(|i| argv.get(i + 1))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mode = {
+        let m = arg("--mode");
+        if m.is_empty() {
+            "success".to_string()
+        } else {
+            m
+        }
+    };
+    let agent = {
+        let a = arg("--agent");
+        if a.is_empty() {
+            "fake".to_string()
+        } else {
+            a
+        }
+    };
+    let prompt = arg("--prompt");
+    let existing_session = arg("--session");
+    let state_file = std::env::var("FAKE_HARNESS_STATE")
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    if mode == "malformed" {
+        println!("this is deliberately malformed provider output");
+        return 0;
+    }
+    if mode == "fail" {
+        eprintln!("deterministic fake harness failure");
+        return 23;
+    }
+    if mode == "fail-once" {
+        let mut seen = false;
+        if let Some(state_file) = &state_file {
+            seen = fs::read_to_string(state_file)
+                .map(|s| s.trim() == "failed")
+                .unwrap_or(false);
+            if !seen {
+                let _ = fs::write(state_file, "failed");
+            }
+        }
+        if !seen {
+            eprintln!("deterministic first-attempt failure");
+            return 24;
+        }
+    }
+    if mode == "hang-inner" {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+    }
+    if mode == "hang" {
+        // A grandchild in the same process group; only a process-group kill clears both.
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("qagent"));
+        let grandchild = std::process::Command::new(exe)
+            .args(["fake-harness", "--mode", "hang-inner"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Some(state_file) = &state_file {
+            let grandchild_pid = grandchild.as_ref().map(|c| c.id()).unwrap_or(0);
+            let _ = fs::write(
+                state_file,
+                json!({ "pid": std::process::id(), "grandchild": grandchild_pid }).to_string(),
+            );
+        }
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+    }
+
+    let bus_task = if mode == "bus-cli" {
+        let raw = match std::env::var("QAGENT_MCP_COMMAND") {
+            Ok(raw) if !raw.is_empty() => raw,
+            _ => {
+                eprintln!("bus-cli mode needs QAGENT_MCP_COMMAND");
+                return 25;
+            }
+        };
+        let launch: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("bus-cli mode needs valid QAGENT_MCP_COMMAND JSON");
+                return 25;
+            }
+        };
+        let command = launch["command"].as_str().unwrap_or("").to_string();
+        let mut base: Vec<String> = launch["args"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if base.last().map(|s| s.as_str()) == Some("mcp") {
+            base.pop();
+        }
+        let mut env: HashMap<String, String> = std::env::vars().collect();
+        if let Some(extra) = launch["env"].as_object() {
+            for (k, v) in extra {
+                if let Some(v) = v.as_str() {
+                    env.insert(k.clone(), v.to_string());
+                }
+            }
+        }
+        let qagent = |args: &[&str]| -> serde_json::Value {
+            let mut full: Vec<String> = base.clone();
+            full.extend(args.iter().map(|s| s.to_string()));
+            full.push("--json".to_string());
+            match std::process::Command::new(&command)
+                .args(&full)
+                .envs(&env)
+                .output()
+            {
+                Ok(out) if out.status.success() => {
+                    serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap_or(json!({}))
+                }
+                Ok(out) => {
+                    eprintln!(
+                        "qagent {} failed ({:?}): {}",
+                        args.join(" "),
+                        out.status.code(),
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                    std::process::exit(26);
+                }
+                Err(error) => {
+                    eprintln!("qagent {} failed to spawn: {error}", args.join(" "));
+                    std::process::exit(26);
+                }
+            }
+        };
+        let wanted = {
+            let marker = "[TASK #";
+            prompt.find(marker).map(|pos| {
+                let rest = &prompt[pos + marker.len()..];
+                let end = rest
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(rest.len());
+                rest[..end].to_string()
+            })
+        };
+        let claimed = if let Some(wanted) = &wanted {
+            qagent(&["task", "claim", wanted])
+        } else {
+            qagent(&["task", "claim"])
+        };
+        let id = claimed["id"]
+            .as_i64()
+            .map(|i| i.to_string())
+            .unwrap_or_default();
+        qagent(&[
+            "task",
+            "note",
+            &id,
+            &format!("fake {agent} started task #{id}"),
+        ]);
+        qagent(&[
+            "task",
+            "submit",
+            &id,
+            "--summary",
+            &format!("fake {agent} submitted task #{id} through qagent"),
+        ]);
+        id.parse::<i64>().ok()
+    } else {
+        None
+    };
+
+    let input_tokens = (prompt.len() as f64 / 4.0).ceil().max(1.0) as i64;
+    let output_tokens = 24i64;
+    let mut out = json!({
+        "sessionId": if existing_session.is_empty() { format!("fake-{agent}-session") } else { existing_session },
+        "result": format!("fake {agent} completed the assigned work"),
+        "usage": { "inputTokens": input_tokens, "outputTokens": output_tokens, "totalTokens": input_tokens + output_tokens, "costUSD": 0 },
+        "changedFiles": [],
+        "validation": [{ "passed": true, "summary": "deterministic fake harness completed" }],
+    });
+    if let Some(id) = bus_task {
+        out["busTask"] = json!(id);
+    }
+    println!("{}", out);
+    0
+}
+
+/// `qagent supervise <agent> [project-dir] [--config PATH]` — drives one agent's
+/// harness CLI against the bus until interrupted (Ctrl-C or SIGTERM).
+fn supervise_command(ctx: &mut Context) -> Result<i32> {
+    let agent_id = ctx.parsed.positionals.get(1).cloned().ok_or_else(|| {
+        BusError::invalid("usage: qagent supervise <agent> [project-dir] [--config PATH]")
+    })?;
+    let dir = ctx
+        .parsed
+        .positionals
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| ".".to_string());
+    let config_flag = ctx.str_flag("config").map(PathBuf::from);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = Arc::clone(&stop);
+        let _ = ctrlc::set_handler(move || {
+            stop.store(true, Ordering::SeqCst);
+        });
+    }
+    crate::supervisor::supervise(crate::supervisor::SuperviseOptions {
+        agent_id,
+        workdir: dir,
+        db_path: ctx.db_path.clone(),
+        config_path: config_flag,
+        stop,
+        wait_ms: None,
+        fake_harness_path: None,
+        qagent_bin: None,
+        log: None,
+    })?;
+    Ok(0)
+}
+
 /// `qagent doctor [agent] [project-dir] [--config PATH]` — read-only checks.
 /// Never runs a harness binary; it only looks for it on PATH.
 fn doctor_command(ctx: &mut Context) -> Result<i32> {
@@ -767,6 +999,8 @@ fn dispatch(ctx: &mut Context) -> Result<i32> {
             Ok(0)
         }
         Some("doctor") => doctor_command(ctx),
+        Some("supervise") => supervise_command(ctx),
+        Some("fake-harness") => unreachable!("handled before dispatch"),
         Some("status") => {
             let status = ctx.bus()?.status()?;
             ctx.out(serde_json::to_value(&status)?, &render_status(&status));
@@ -952,6 +1186,11 @@ fn dispatch(ctx: &mut Context) -> Result<i32> {
 }
 
 pub fn run(argv: &[String], io: &mut Io) -> i32 {
+    if let Some(index) = command_position(argv) {
+        if argv[index] == "fake-harness" {
+            return fake_harness_command(&argv[index + 1..]);
+        }
+    }
     let parsed = match parse_args(argv) {
         Ok(parsed) => parsed,
         Err(error) => {

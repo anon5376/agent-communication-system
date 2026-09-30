@@ -9,7 +9,7 @@ either binary is fully readable — and wakeable — by the other.
 
 ```sh
 cargo build --release     # produces target/release/qagent
-cargo test                # 25 tests ported from tests/core-*.test.ts
+cargo test                # 37 tests ported from tests/core-*.test.ts + supervisor/adapters
 ```
 
 ## What is ported (v1)
@@ -29,11 +29,23 @@ cargo test                # 25 tests ported from tests/core-*.test.ts
   path, `agent_waiting`/`agent_idle` events, `<home>/inbox/<agent>.seq` signal
   files, task-event wake — and Ctrl-C → exit 130, timeout → exit 2.
 - **Full CLI** (`src/cli.rs`): `init`, `agent add|token rotate`, `send`, `inbox`,
-  `ack`, `wait`, `status`, `whoami`, `log [--follow]`, `doctor`, `import`, and
+  `ack`, `wait`, `status`, `whoami`, `log [--follow]`, `doctor`, `import`,
+  `supervise`, `fake-harness`, and
   the whole `task` family — same flags, same exit codes, same `--json` output.
-- **Config** (`src/config.rs`): the `loadConfig`/`resolveAgent`/
-  `configPathFromProject` slice that `doctor` uses (env override, then the
-  project-local `.qagent/`/`.agent-bus/` config, then a package default).
+- **Config** (`src/config.rs`): full `loadConfig`/`resolveAgent`/
+  `configPathFromProject`/`validateConfig` parity — providers, harnesses (with
+  feature sets), models (with capabilities + exactModel), agents (permissions,
+  resumeSessionId, harnessOptions), roles, routing, constraints.
+- **Adapters** (`src/adapters.rs`): all 10 harness adapters verbatim — claude,
+  codex, kimi, gemini, cursor, grok, opencode, hermes, fake, and the `command`
+  escape hatch — arg building, MCP launch lines, prepare hooks, and output
+  normalization.
+- **Supervisor** (`src/supervisor.rs`): `qagent supervise` — provider-key env
+  sanitization, pid-file lock, wait->claim->brief->run->fail/submit loop,
+  process-group spawn with SIGTERM->SIGKILL timeout, head+tail output cap,
+  session.json accounting, exponential backoff retry.
+- **Fake harness** (`qagent fake-harness`): the `src/fake-harness.ts` test stand-in
+  as a hidden subcommand — success/fail/fail-once/malformed/hang/bus-cli modes.
 - **Import** (`src/import.rs`): the v1 migration — reads `bus.jsonl`, a
   `state.sqlite` legacy store, and a `prototype.db` coordinator into a v2 bus
   with per-source sha256 idempotency, `--dry-run` against an in-memory schema,
@@ -41,9 +53,10 @@ cargo test                # 25 tests ported from tests/core-*.test.ts
 
 ## Deliberately not ported (v1)
 
-`mcp`, `mcp-config`, `supervise`, `dashboard` — these print a
-"not implemented in the Rust port yet" stub. Keep using the Node `qagent` for
-those; both binaries can share the same `bus.db` safely.
+`mcp`, `mcp-config`, `dashboard` — "not implemented in the Rust port yet" stubs.
+Keep using the Node `qagent` for those; both binaries share the same `bus.db`
+safely. Note `supervise` already runs managed (non-MCP) harnesses end-to-end;
+MCP-capable harnesses get the `mcp` stub error until that port lands.
 
 ## Interop
 
