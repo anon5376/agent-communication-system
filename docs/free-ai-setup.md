@@ -91,8 +91,9 @@ Then a model entry per free model you want on the bus:
   "enabled": true,
   "capabilities": {
     "contextTokens": 128000, "costClass": "low",
-    "coding": 0.7, "reasoning": 0.7, "toolUse": 0.7, "reliability": 0.65,
-    "speed": 0.8, "tokenEfficiency": 0.9
+    "coding": 0.7, "reasoning": 0.7, "planning": 0.65, "debugging": 0.7,
+    "research": 0.6, "toolUse": 0.7, "speed": 0.8, "tokenEfficiency": 0.9,
+    "reliability": 0.65, "autonomy": 0.7
   }
 }
 ```
@@ -129,8 +130,9 @@ Two ways in:
   "enabled": true,
   "capabilities": {
     "contextTokens": 32768, "costClass": "local",
-    "coding": 0.5, "reasoning": 0.45, "toolUse": 0.5, "reliability": 0.6,
-    "speed": 0.5, "tokenEfficiency": 1.0
+    "coding": 0.5, "reasoning": 0.45, "planning": 0.4, "debugging": 0.5,
+    "research": 0.4, "toolUse": 0.5, "speed": 0.5, "tokenEfficiency": 1.0,
+    "reliability": 0.6, "autonomy": 0.5
   }
 }
 ```
@@ -157,30 +159,131 @@ endpoint at it directly.
 
 ## Putting a free team on the bus
 
-Agents are roles + a model. A sensible all-free team (edit `agent-bus.config.json`
-in your bus dir, `~/.agent-bus/` by default, or the project config):
+Two layers to set up: **bus identities** (created with `qagent agent add`, which
+writes each agent's token) and **config entries** in `agent-bus.config.json`
+telling the supervisor which harness/model each identity runs.
+
+### Recommended preset — all-free OpenCode team
+
+```
+planner (muse-spark, xhigh) → orchestrator (muse-spark, xhigh) → worker-1/2/3 (mimo-flash)
+```
+
+1. Register the identities:
+
+```sh
+qagent init                        # once, creates ~/.agent-bus
+qagent agent add planner --role planner --authority worker
+qagent agent add lead --role manager --authority manager
+qagent agent add worker-1 --role implementation --authority worker
+qagent agent add worker-2 --role implementation --authority worker
+qagent agent add worker-3 --role implementation --authority worker
+```
+
+2. Add the model entries (capabilities are required — every score must be
+   present, `0`–`1`):
 
 ```json
-"agents": {
-  "planner":  { "id": "planner",  "model": "muse-spark-free", "role": "planner",        "authority": "worker",  "enabled": true },
-  "lead":     { "id": "lead",     "model": "gemini-free",     "role": "manager",        "authority": "manager", "enabled": true },
-  "coder-1":  { "id": "coder-1",  "model": "mimo-flash-free", "role": "implementation", "authority": "worker",  "enabled": true },
-  "coder-2":  { "id": "coder-2",  "model": "mimo-flash-free", "role": "implementation", "authority": "worker",  "enabled": true },
-  "scout":    { "id": "scout",    "model": "gemini-free",     "role": "research",       "authority": "worker",  "enabled": true },
-  "reviewer": { "id": "reviewer", "model": "gemini-free",     "role": "reviewer",       "authority": "worker",  "enabled": true }
+"models": {
+  "muse-spark-free": {
+    "id": "muse-spark-free",
+    "provider": "opencode",
+    "harness": "opencode",
+    "family": "muse",
+    "exactModel": "opencode/muse-spark-1.3-contributor-free",
+    "enabled": true,
+    "capabilities": {
+      "contextTokens": 128000, "costClass": "low",
+      "coding": 0.8, "reasoning": 0.85, "planning": 0.85, "debugging": 0.75,
+      "research": 0.75, "toolUse": 0.8, "speed": 0.6, "tokenEfficiency": 0.8,
+      "reliability": 0.75, "autonomy": 0.8
+    }
+  },
+  "mimo-flash-free": {
+    "id": "mimo-flash-free",
+    "provider": "opencode",
+    "harness": "opencode",
+    "family": "mimo",
+    "exactModel": "opencode/mimo-v2.6-flash-free",
+    "enabled": true,
+    "capabilities": {
+      "contextTokens": 128000, "costClass": "low",
+      "coding": 0.7, "reasoning": 0.7, "planning": 0.65, "debugging": 0.7,
+      "research": 0.6, "toolUse": 0.7, "speed": 0.8, "tokenEfficiency": 0.9,
+      "reliability": 0.65, "autonomy": 0.7
+    }
+  }
 }
 ```
 
-Rules of thumb: give **planner/manager/reviewer** the strongest free brain you
-have (Gemini free tier or `muse-spark-1.3-contributor-free`), give
-**implementation** your bulk workers (`mimo-*-free`), and let **cheap-worker**
-eat Ollama or Groq calls. Mix `family` values across reviewers and workers —
-independent review requires a different model family.
+3. Add the agents — `harnessOptions.variant: "xhigh"` selects the high-effort
+   reasoning variant on the muse-spark agents:
+
+```json
+"agents": {
+  "planner": {
+    "id": "planner", "model": "muse-spark-free", "role": "planner",
+    "authority": "worker", "description": "Plans and decomposes objectives.",
+    "enabled": true, "autoStart": true,
+    "harnessOptions": { "variant": "xhigh" },
+    "permissions": {
+      "canDelegate": true, "canReview": false, "filesystem": "read",
+      "shell": true, "network": true, "maxDelegationDepth": 2
+    }
+  },
+  "lead": {
+    "id": "lead", "model": "muse-spark-free", "role": "manager",
+    "authority": "manager", "description": "Orchestrates the team: assigns work and gates reviews.",
+    "enabled": true, "autoStart": true,
+    "harnessOptions": { "variant": "xhigh" },
+    "permissions": {
+      "canDelegate": true, "canReview": true, "filesystem": "write",
+      "shell": true, "network": true, "maxDelegationDepth": 4
+    }
+  },
+  "worker-1": {
+    "id": "worker-1", "model": "mimo-flash-free", "role": "implementation",
+    "authority": "worker", "description": "Implementation worker.",
+    "enabled": true, "autoStart": true,
+    "permissions": {
+      "canDelegate": false, "canReview": false, "filesystem": "write",
+      "shell": true, "network": true, "maxDelegationDepth": 0
+    }
+  },
+  "worker-2": {
+    "id": "worker-2", "model": "mimo-flash-free", "role": "implementation",
+    "authority": "worker", "description": "Implementation worker.",
+    "enabled": true, "autoStart": true,
+    "permissions": {
+      "canDelegate": false, "canReview": false, "filesystem": "write",
+      "shell": true, "network": true, "maxDelegationDepth": 0
+    }
+  },
+  "worker-3": {
+    "id": "worker-3", "model": "mimo-flash-free", "role": "implementation",
+    "authority": "worker", "description": "Implementation worker.",
+    "enabled": true, "autoStart": true,
+    "permissions": {
+      "canDelegate": false, "canReview": false, "filesystem": "write",
+      "shell": true, "network": true, "maxDelegationDepth": 0
+    }
+  }
+}
+```
+
+Flow: you send a goal to `planner` → it mails `lead` a task graph → `lead`
+assigns tasks to the `worker-*` pool → workers claim, implement, and submit →
+`lead` reviews and releases. If `variant: "xhigh"` is rejected by your OpenCode
+version, drop it or run `opencode models --verbose` to see the variant names
+your catalog exposes.
+
+Optional upgrades: add a `reviewer` agent on a **different model family** than
+the workers (independent review requires it — e.g. `gemini-free`), and a
+`cheap-worker` on Ollama/Groq for lookups and summaries.
 
 Then:
 
 ```sh
-qagent init                       # once, creates ~/.agent-bus
 qagent doctor                     # verifies every harness/login is reachable
 qagent supervise planner .        # one supervisor per agent (a terminal/tab each)
 # or, on newer versions: qagent supervise --roster .
