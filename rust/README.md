@@ -8,9 +8,12 @@ either binary is fully readable — and wakeable — by the other.
 ## Build and test
 
 ```sh
-cargo build --release     # produces qagent, agent-bus, acs-app, and the two *-openai-compatible bins
+cargo build --release     # produces qagent, agent-bus, acs-app/acs, and the two *-openai-compatible bins
 cargo test                # 46 tests ported from tests/core-*.test.ts + supervisor/adapters/mcp/dashboard
+./install.sh              # builds `acs` and installs it globally (→ /usr/local/bin or ~/.local/bin)
 ```
+
+After `install.sh`, the TUI starts from anywhere with `acs` (or `acs --db /path/to/bus.db`).
 
 ## What is ported (v1)
 
