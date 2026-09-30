@@ -338,12 +338,12 @@ async function dispatch(ctx: Context): Promise<number> {
       if (format === "html") {
         const out = ctx.str("out");
         if (!out) throw new BusError("invalid", "--format html requires --out FILE");
-        writeFileSync(out, renderTraceHtml(trace));
+        writeFileSync(out, renderTraceHtml(trace), { mode: 0o600 });
         ctx.out({ out }, `wrote ${out}`);
         return 0;
       }
       if (format === "json") {
-        ctx.out(trace, renderTrace(trace));
+        console.log(JSON.stringify(trace, null, 2));
         return 0;
       }
       if (format !== "text") throw new BusError("invalid", "--format must be text, json, or html");

@@ -601,7 +601,9 @@ export class Bus {
      */
     traceTask(id) {
         const task = this.getTask(id);
-        const events = this.db.prepare("SELECT * FROM events WHERE entity = 'task' AND entity_id = ? ORDER BY seq").all(String(id)).map((row) => this.toEvent(row));
+        // Imported tasks' events are keyed by legacy_id, not the new numeric id.
+        const ids = task.legacyId !== null ? [String(id), task.legacyId] : [String(id)];
+        const events = this.db.prepare("SELECT * FROM events WHERE entity = 'task' AND entity_id IN (SELECT value FROM json_each(?)) ORDER BY seq").all(JSON.stringify(ids)).map((row) => this.toEvent(row));
         const timeline = [];
         for (const event of events) {
             timeline.push({ seq: event.seq, tsMs: event.tsMs, kind: event.kind, actor: event.actor, summary: event.kind.replaceAll("_", " "), data: event.data });
@@ -609,7 +611,9 @@ export class Bus {
         for (const note of task.notes) {
             timeline.push({ seq: note.id, tsMs: note.tsMs, kind: "note", actor: note.author, summary: note.body.split("\n", 1)[0].slice(0, 200), body: note.body });
         }
-        for (const message of task.messages) {
+        // Uncapped: getTask() limits messages to 1000, a trace wants the whole chain.
+        const mail = this.db.prepare("SELECT * FROM messages WHERE task_id = ? ORDER BY seq").all(id).map((row) => this.toMessage(row));
+        for (const message of mail) {
             timeline.push({ seq: message.seq, tsMs: message.tsMs, kind: "mail", actor: message.sender, to: message.recipient, summary: message.subject, body: message.body });
         }
         timeline.sort((a, b) => a.tsMs - b.tsMs || a.seq - b.seq);
