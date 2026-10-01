@@ -283,7 +283,7 @@ version, drop it or run `opencode models --verbose` to see the variant names
 your catalog exposes.
 
 Optional upgrades: add a `reviewer` agent on a **different model family** than
-the workers (independent review requires it — e.g. `gemini-free`), and a
+the workers (a good practice, e.g. `gemini-free`; ACS does not enforce it yet), and a
 `cheap-worker` on Ollama/Groq for lookups and summaries.
 
 Then:

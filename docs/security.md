@@ -51,3 +51,4 @@ Titles, briefs, message bodies, notes, reference lists and changed-file lists ha
 - `bus.db` and its WAL hold message bodies, task briefs and results in plain text. Logs under `~/.agent-bus/logs/` may contain project content. Protect the directory accordingly.
 - A sandboxed agent may be unable to write `~/.agent-bus`. MCP servers usually run outside the harness sandbox, but a `qagent` call from inside one may be refused; check with the harness you use.
 - No task artifact or commit is signed.
+- The review gate stops self-acceptance by identity, not by model family: `reviewTask` in `src/core/bus.ts` refuses the assignee as reviewer, but a reviewer on the same model family as the worker passes, and the operator can override the gate.

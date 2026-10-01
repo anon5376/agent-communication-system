@@ -1,5 +1,7 @@
 # ACS positioning research: what users complain about, and how a local-first bus wins
 
+> **Status note (2026-10-01).** This is a positioning draft; some of its recommendations have since shipped in the unreleased `main` (see `CHANGELOG.md`, `[Unreleased]`): stalled-task detection and requeue, `qagent trace`, `supervise --roster`, registry manifests (`server.json`, `glama.json`, `smithery.yaml`), and per-task git worktrees. Not shipped: prebuilt `acs` binaries, standards interop (A2A/ACP), and a family-aware review rule. The other items were not re-checked. Quoted issue threads and blog posts were not re-checked. The Hermes Agent comparison is in `docs/competitive-analysis.md`.
+
 ## TL;DR
 
 The loudest complaints about CrewAI / AutoGen / LangGraph are not about model quality — they're about **silent failures, debugging opacity, dependency hell, cloud-coupled observability, and duct-taped agent messaging**. ACS already owns the architectural answer to most of these (durable SQLite bus, token identity, claims/leases, signal-file wakeups). The biggest wins are surfacing failure visibility, turning the bus into a free trace store, and shipping the Rust single binary as the front door. Positioning line: **"Agents churn; the bus endures. ACS is not another framework — it's the durable, inspectable layer under whatever CLIs you already run."**
@@ -60,7 +62,7 @@ The loudest complaints about CrewAI / AutoGen / LangGraph are not about model qu
 **How:** `qagent supervise --roster <file>` (or `--all`) runs N agent CLIs under one supervisor, each woken by its signal file when mail/tasks arrive — replacing the tmux window-list registry with the bus. Then write the comparison docs/landing section: "tmux send-keys → durable wakeup. Window list → verified roster. Pane scraping → inbox/ack/review." Target r/LocalLLaMA and Claude-Code power users explicitly; this is the highest-conversion audience.
 
 ### 5. Headline the review gates — human-in-the-loop without checkpoint YAML
-**Why:** LangGraph sells HITL but it requires configuring a persistence backend and checkpointing; CrewAI bolts it on. ACS already has independent review built into the task lifecycle — most users don't know because it's buried in the guide.
+**Why:** LangGraph sells HITL but it requires configuring a persistence backend and checkpointing; CrewAI bolts it on. ACS already has review built into the task lifecycle (the assignee cannot accept its own work; the operator can override), so most users don't know because it's buried in the guide.
 **Effort:** S
 **How:** Promote review gates to a top-level README feature with a 30-second demo (`qagent task submit` → `qagent review` → approve/reject with notes routed back to the worker). Dashboard: one-click approve/request-changes on submitted work, diff/task brief side by side. Position: "review is a first-class state, not a node you wire in."
 
