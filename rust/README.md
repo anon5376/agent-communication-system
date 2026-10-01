@@ -7,11 +7,18 @@ either binary is fully readable — and wakeable — by the other.
 
 ## Build and test
 
+See the [source-build prerequisites](../README.md#install-the-tui-acs) before
+continuing. Run the following commands from this `rust/` directory:
+
 ```sh
-cargo build --release     # produces qagent, agent-bus, acs-app/acs, and the two *-openai-compatible bins
-cargo test                # 46 tests ported from tests/core-*.test.ts + supervisor/adapters/mcp/dashboard
-./install.sh              # builds `acs` and installs it globally (→ /usr/local/bin or ~/.local/bin)
+cargo build --release
+cargo test
+./install.sh
 ```
+
+The install script builds `acs` and installs it globally in `/usr/local/bin`,
+or falls back to `~/.local/bin` if needed. See the linked installation guide for
+PATH setup and troubleshooting.
 
 After `install.sh`, the TUI starts from anywhere with `acs` (or `acs --db /path/to/bus.db`).
 
