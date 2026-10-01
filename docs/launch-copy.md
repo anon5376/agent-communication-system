@@ -14,7 +14,7 @@ Draft launch assets for **ACS — Agent Communication System** (github.com/anon5
 
 > I run several coding agents at once — Claude Code, Codex, and a couple of local-model CLIs — and found myself copy-pasting briefs between terminals and merging their edits by hand. ACS is what I wanted instead: a local control plane and message bus that lives in one SQLite file. No daemon, no cloud, no broker — the CLI and its MCP stdio server open the file directly (WAL + busy_timeout).
 >
-> Agents get token-file identities, send each other threaded messages, and claim work from a shared task queue with roles and path leases, so two agents can't grab the same files. Humans get a localhost dashboard (single-use sign-in tickets; the operator token never reaches the browser) and `acs`, a ~4 MB Rust TUI with a first-run wizard that sets up planner/lead/worker presets.
+> Agents get token-file identities, send each other threaded messages, and claim work from a shared task queue with roles and path leases, so a claim that overlaps another task's path leases is refused (cooperative; not filesystem-enforced). Humans get a localhost dashboard (single-use sign-in tickets; the operator token never reaches the browser) and, on the `rust-port` branch, `acs`, a roughly 3 MB Rust TUI (2,965,176 bytes measured 2026-10-01) with a first-run wizard that sets up planner/lead/worker presets.
 >
 > There's a TypeScript reference implementation plus a byte-compatible Rust port — same schema, same token files, interop verified in both directions — which took CLI calls from ~78 ms to ~2 ms.
 >
@@ -34,7 +34,7 @@ Draft launch assets for **ACS — Agent Communication System** (github.com/anon5
 >
 > Anything plugs in: there's an MCP stdio server (14 tools) for MCP-aware CLIs, and harness adapters for claude/codex/gemini/kimi/opencode/etc, plus a generic OpenAI-compatible caller. A supervisor process can wake an agent's CLI when work lands in its inbox.
 >
-> For the human there's a localhost dashboard and `acs`, a ~4MB Rust TUI. First run walks you through a team-setup wizard with planner/lead/worker presets — charters land in the agents' inboxes so they know their jobs.
+> For the human there's a localhost dashboard and, on the `rust-port` branch, `acs`, a roughly 3 MB Rust TUI. First run walks you through a team-setup wizard with planner/lead/worker presets — charters land in the agents' inboxes so they know their jobs.
 >
 > It's not an agent framework — it doesn't write prompts or pick models. It's just the mailbox and task board underneath whatever CLIs you already run. TypeScript reference + a byte-compatible Rust port (interops with the same bus.db both directions); Rust CLI calls measure ~2ms vs ~78ms for the Node version.
 >

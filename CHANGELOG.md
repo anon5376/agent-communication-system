@@ -38,7 +38,8 @@ All notable changes to the Agent Communication System. Format follows
   router lookups, cheaper idle waits, narrower auto-claim candidate reads.
 - **npm packaging** — `private` removed, `files` whitelist (~129 KB tarball),
   `publishConfig`, `prepack` build, `repository` and `mcpName` metadata;
-  `npm install -g` / `npx` now lead the README install section.
+  the README install section is written for the post-publish state; until the
+  first publish it leads with clone, `npm ci`, `npm run build`, `npm link`.
 
 ### Fixed
 
@@ -47,6 +48,15 @@ All notable changes to the Agent Communication System. Format follows
   swept. Worktree cleanup (`task worktree --remove`, `prune`) now works after
   the task's project directory is deleted; if the whole repository is gone the
   orphaned checkout is deleted with `--force`.
+- README and docs no longer claim what the code does not back: the install
+  section leads with clone-and-build (the package is not on npm yet), review is
+  described as "by someone other than the assignee" (the gate does not check
+  model family), the `acs` TUI is labelled as the `rust-port` branch's, the
+  adapter list matches `ADAPTERS`, and the competitive analysis now includes
+  Hermes Agent. `npm run audit:public` also runs `scripts/check-readme-claims.mjs`.
+- `tests/wait-notify.test.ts` no longer fails on one slow wake-up under load:
+  the `bus_wait` test holds the median of five rounds to the bound, the signal-file test
+  asserts against the poll interval, and a fake-clock test pins the poll bound.
 - Expired claims can be released and requeued; a batch of expired claims
   requeues correctly after the mid-batch expiry sweep; the auto-requeue
   sweep no longer eats live claims.
@@ -57,7 +67,7 @@ All notable changes to the Agent Communication System. Format follows
 
 ## [0.2.0] — 2026-09-30
 
-First public release.
+Tagged on GitHub as `v0.2.0`; not yet published to npm.
 
 ### Added
 
