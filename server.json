@@ -1,0 +1,41 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.anon5376/agent-communication-system",
+  "title": "Agent Communication System (qagent)",
+  "description": "Local-first coordination bus for coding agents: mail, task queues, review gates — one SQLite file.",
+  "repository": {
+    "url": "https://github.com/anon5376/agent-communication-system",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "agent-communication-system",
+      "version": "0.2.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "QAGENT_AGENT_ID",
+          "description": "Agent identity registered in the bus via `qagent agent add`. The agent's token file must already exist under the bus home.",
+          "isRequired": true
+        },
+        {
+          "name": "QAGENT_BUS_DB",
+          "description": "Path to the bus SQLite file. Defaults to ~/.agent-bus/bus.db.",
+          "format": "filepath",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}
