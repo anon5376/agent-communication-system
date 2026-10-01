@@ -42,6 +42,11 @@ All notable changes to the Agent Communication System. Format follows
 
 ### Fixed
 
+- Worktree creation no longer blocks on a stale lock: a lock whose holder
+  died, never wrote its owner file, or stopped heartbeating (pid reuse) is
+  swept. Worktree cleanup (`task worktree --remove`, `prune`) now works after
+  the task's project directory is deleted; if the whole repository is gone the
+  orphaned checkout is deleted with `--force`.
 - Expired claims can be released and requeued; a batch of expired claims
   requeues correctly after the mid-batch expiry sweep; the auto-requeue
   sweep no longer eats live claims.

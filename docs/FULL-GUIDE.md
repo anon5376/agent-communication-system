@@ -256,7 +256,7 @@ Things to know:
 
 - The project directory must be tracked in git (committed), or the checkout would not contain it; otherwise the command fails with a clear error. With an explicit task number, `claim --worktree` checks the repository before claiming; a bare `claim --worktree` (or the MCP tool) keeps the claim and reports "no worktree" if the checkout cannot be made.
 - Only the task's assignee or the operator may open or remove its worktree; `--force` and `prune --force` are operator-only.
-- Removal refuses uncommitted or untracked changes unless `--force`. Gitignored files (build output, `.env`) are deleted with the directory either way.
+- Removal refuses uncommitted or untracked changes unless `--force`. Cleanup still works if the task's project directory has since been deleted; if the whole repository is gone, the leftover checkout cannot be inspected, so deleting it takes `--force`. Gitignored files (build output, `.env`) are deleted with the directory either way.
 - Files harness adapters write into the working directory (`.cursor/mcp.json`, `opencode.json`, `.agent-bus/`, `.qagent/`) are added to the repository's `.git/info/exclude`, so they do not make a checkout dirty. That file is local and shared by all worktrees of the repository.
 - The Rust port does not implement worktrees: it ignores `"isolation": "worktree"` and has no `--worktree` flag or `task worktree` command. The bus database is unchanged, so the two builds still share one bus.
 

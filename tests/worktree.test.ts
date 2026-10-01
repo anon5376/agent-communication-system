@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Bus } from "../src/core/bus.js";
@@ -223,4 +223,93 @@ test("only the assignee or the operator may open or remove a task's worktree; --
   assert.notEqual(run(["--as", "w1", "task", "worktree", String(task.id), "--remove", "--force"]).status, 0);
   assert.equal(run(["--as", "w1", "task", "worktree", String(task.id), "--remove"]).status, 0);
   assert.notEqual(run(["--as", "w1", "task", "worktree", "prune", "--force"]).status, 0);
+});
+
+/** The lock directory worktree creation uses for this task's repository. */
+function lockDirFor(f: { home: string; repo: string; bus: Bus }, task: { id: number; createdMs: number }): string {
+  return join(dirname(taskWorktreePath(f.bus.home, realpathSync(f.repo), task)), ".lock");
+}
+
+function backdate(path: string, seconds: number): void {
+  const when = new Date(Date.now() - seconds * 1000);
+  utimesSync(path, when, when);
+}
+
+const within = <T>(label: string, ms: number, work: Promise<T>): Promise<T> =>
+  Promise.race([work, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${label}: still blocked after ${ms} ms`)), ms))]);
+
+test("a lock left by a holder that died before writing its owner file is swept", async (t) => {
+  const f = fixture(t);
+  const task = f.bus.createTask(f.operator, { title: "first", project: f.repo });
+  await ensureTaskWorktree(task, f.bus.home);
+  const lock = lockDirFor(f, task);
+  mkdirSync(lock);
+  backdate(lock, 120);
+  const next = f.bus.createTask(f.operator, { title: "second", project: f.repo });
+  assert.equal((await within("no-owner lock", 10_000, ensureTaskWorktree(next, f.bus.home))).created, true);
+  assert.ok(!existsSync(lock));
+});
+
+test("a lock whose owner process is dead is swept at once, even while fresh", async (t) => {
+  const f = fixture(t);
+  const task = f.bus.createTask(f.operator, { title: "first", project: f.repo });
+  await ensureTaskWorktree(task, f.bus.home);
+  const gone = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" });
+  const lock = lockDirFor(f, task);
+  mkdirSync(lock);
+  writeFileSync(join(lock, "owner"), `${gone.stdout.trim()}:deadbeef\n`);
+  const next = f.bus.createTask(f.operator, { title: "second", project: f.repo });
+  assert.equal((await within("dead-owner lock", 10_000, ensureTaskWorktree(next, f.bus.home))).created, true);
+});
+
+test("a lock owned by a live pid that stopped heartbeating (pid reuse) is swept; a fresh one is respected", async (t) => {
+  const f = fixture(t);
+  const task = f.bus.createTask(f.operator, { title: "first", project: f.repo });
+  await ensureTaskWorktree(task, f.bus.home);
+  const lock = lockDirFor(f, task);
+  mkdirSync(lock);
+  writeFileSync(join(lock, "owner"), `${process.pid}:someone-else\n`);
+
+  // Fresh heartbeat: the contender must wait, not steal.
+  const next = f.bus.createTask(f.operator, { title: "second", project: f.repo });
+  let finished = false;
+  const pending = ensureTaskWorktree(next, f.bus.home).then((tree) => { finished = true; return tree; });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.equal(finished, false, "took a lock whose owner is alive and heartbeating");
+
+  // The heartbeat stops: now it is stale.
+  backdate(lock, 120);
+  assert.equal((await within("stale heartbeat", 10_000, pending)).created, true);
+});
+
+test("cleanup works after the task's project directory was deleted", async (t) => {
+  const f = fixture(t);
+  const sub = join(f.repo, "pkg2");
+  mkdirSync(sub);
+  writeFileSync(join(sub, "b.txt"), "y\n");
+  git(f.repo, ["add", "."]);
+  git(f.repo, ["commit", "-q", "-m", "pkg2"]);
+  const task = f.bus.createTask(f.operator, { title: "gone dir", project: sub });
+  const wt = await ensureTaskWorktree(task, f.bus.home);
+  rmSync(sub, { recursive: true, force: true });
+  assert.equal((await removeTaskWorktree(task, f.bus.home)).removed, true);
+  assert.ok(!existsSync(wt.path));
+  assert.ok(!git(f.repo, ["worktree", "list"]).includes(wt.path));
+});
+
+test("cleanup after the whole repository was deleted needs --force, then removes the orphan; prune reports it", async (t) => {
+  const f = fixture(t);
+  const task = f.bus.createTask(f.operator, { title: "gone repo", project: f.repo });
+  const wt = await ensureTaskWorktree(task, f.bus.home);
+  f.bus.cancelTask(f.operator, task.id, "repo deleted");
+  rmSync(f.repo, { recursive: true, force: true });
+
+  await assert.rejects(removeTaskWorktree(task, f.bus.home), /repository .* is gone.*--force/);
+  const kept = await pruneTaskWorktrees(f.bus);
+  assert.deepEqual(kept.map((r) => [r.taskId, r.removed]), [[task.id, false]]);
+  assert.match(kept[0].reason, /is gone/);
+  assert.ok(existsSync(wt.path));
+
+  assert.equal((await removeTaskWorktree(task, f.bus.home, { force: true })).removed, true);
+  assert.ok(!existsSync(wt.path));
 });
