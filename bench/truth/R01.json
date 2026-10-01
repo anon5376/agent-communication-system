@@ -1,0 +1,209 @@
+{
+  "id": "R01",
+  "reconciled": false,
+  "derivedBy": "node derive-R01.mjs <copy of repo at 4d4cf5a9f4ca0e819dfc9b97d6610cc05fbf1893 with node_modules symlinked> --verbose (TypeScript 5 LanguageService.findReferences per property; read = not isWriteAccess, not the declaration, under src/, outside validateConfig body src/config.ts:215-273), then hand-verified with grep -rnw <field> src for all 25 unread fields and reading of src/provider-catalog.ts, src/router.ts, src/core/import.ts, src/mcp/render.ts, src/core/identity.ts",
+  "question": "Among the fields of the interfaces BusConstraints, AgentPermissions, AgentDefinition, RolePolicy and HarnessFeatureSet declared in src/config.ts, which are never read (type-aware, non-write reference to that exact property of that exact type) anywhere under src/ outside the body of validateConfig?",
+  "items": [
+    {
+      "id": "HarnessFeatureSet.headless",
+      "aliases": [
+        "features.headless",
+        "harness.features.headless"
+      ],
+      "evidence": "src/config.ts:51"
+    },
+    {
+      "id": "HarnessFeatureSet.resume",
+      "aliases": [
+        "features.resume",
+        "harness.features.resume"
+      ],
+      "evidence": "src/config.ts:52"
+    },
+    {
+      "id": "HarnessFeatureSet.structuredOutput",
+      "aliases": [
+        "features.structuredOutput",
+        "harness.features.structuredOutput"
+      ],
+      "evidence": "src/config.ts:54"
+    },
+    {
+      "id": "HarnessFeatureSet.streaming",
+      "aliases": [
+        "features.streaming",
+        "harness.features.streaming"
+      ],
+      "evidence": "src/config.ts:55"
+    },
+    {
+      "id": "HarnessFeatureSet.cancellation",
+      "aliases": [
+        "features.cancellation",
+        "harness.features.cancellation"
+      ],
+      "evidence": "src/config.ts:56"
+    },
+    {
+      "id": "HarnessFeatureSet.modelSelection",
+      "aliases": [
+        "features.modelSelection",
+        "harness.features.modelSelection"
+      ],
+      "evidence": "src/config.ts:57"
+    },
+    {
+      "id": "HarnessFeatureSet.reasoningControl",
+      "aliases": [
+        "features.reasoningControl",
+        "harness.features.reasoningControl"
+      ],
+      "evidence": "src/config.ts:58"
+    },
+    {
+      "id": "HarnessFeatureSet.usageReporting",
+      "aliases": [
+        "features.usageReporting",
+        "harness.features.usageReporting"
+      ],
+      "evidence": "src/config.ts:59"
+    },
+    {
+      "id": "AgentPermissions.canDelegate",
+      "aliases": [
+        "permissions.canDelegate",
+        "agent.permissions.canDelegate"
+      ],
+      "evidence": "src/config.ts:89"
+    },
+    {
+      "id": "AgentPermissions.maxDelegationDepth",
+      "aliases": [
+        "permissions.maxDelegationDepth",
+        "agent.permissions.maxDelegationDepth"
+      ],
+      "evidence": "src/config.ts:94"
+    },
+    {
+      "id": "AgentPermissions.allowedPaths",
+      "aliases": [
+        "permissions.allowedPaths",
+        "agent.permissions.allowedPaths"
+      ],
+      "evidence": "src/config.ts:95"
+    },
+    {
+      "id": "AgentPermissions.allowedChildAgentIds",
+      "aliases": [
+        "permissions.allowedChildAgentIds",
+        "agent.permissions.allowedChildAgentIds"
+      ],
+      "evidence": "src/config.ts:97"
+    },
+    {
+      "id": "AgentDefinition.authority",
+      "aliases": [
+        "agent.authority",
+        "agents.authority"
+      ],
+      "evidence": "src/config.ts:104"
+    },
+    {
+      "id": "AgentDefinition.description",
+      "aliases": [
+        "agent.description",
+        "agents.description"
+      ],
+      "evidence": "src/config.ts:105"
+    },
+    {
+      "id": "RolePolicy.id",
+      "aliases": [
+        "role.id",
+        "roles.id"
+      ],
+      "evidence": "src/config.ts:116"
+    },
+    {
+      "id": "RolePolicy.description",
+      "aliases": [
+        "role.description",
+        "roles.description"
+      ],
+      "evidence": "src/config.ts:117"
+    },
+    {
+      "id": "RolePolicy.exactModels",
+      "aliases": [
+        "role.exactModels",
+        "roles.exactModels"
+      ],
+      "evidence": "src/config.ts:121"
+    },
+    {
+      "id": "BusConstraints.maxDelegationDepth",
+      "aliases": [
+        "constraints.maxDelegationDepth",
+        "config.constraints.maxDelegationDepth"
+      ],
+      "evidence": "src/config.ts:144"
+    },
+    {
+      "id": "BusConstraints.maxConcurrentTasks",
+      "aliases": [
+        "constraints.maxConcurrentTasks",
+        "config.constraints.maxConcurrentTasks"
+      ],
+      "evidence": "src/config.ts:145"
+    },
+    {
+      "id": "BusConstraints.maxRetries",
+      "aliases": [
+        "constraints.maxRetries",
+        "config.constraints.maxRetries"
+      ],
+      "evidence": "src/config.ts:146"
+    },
+    {
+      "id": "BusConstraints.defaultWriteScopes",
+      "aliases": [
+        "constraints.defaultWriteScopes",
+        "config.constraints.defaultWriteScopes"
+      ],
+      "evidence": "src/config.ts:150"
+    },
+    {
+      "id": "BusConstraints.optionalTokenBudget",
+      "aliases": [
+        "constraints.optionalTokenBudget",
+        "config.constraints.optionalTokenBudget"
+      ],
+      "evidence": "src/config.ts:153"
+    },
+    {
+      "id": "BusConstraints.optionalApiCostBudgetUSD",
+      "aliases": [
+        "constraints.optionalApiCostBudgetUSD",
+        "config.constraints.optionalApiCostBudgetUSD"
+      ],
+      "evidence": "src/config.ts:154"
+    },
+    {
+      "id": "BusConstraints.enrollmentTtlSeconds",
+      "aliases": [
+        "constraints.enrollmentTtlSeconds",
+        "config.constraints.enrollmentTtlSeconds"
+      ],
+      "evidence": "src/config.ts:155"
+    },
+    {
+      "id": "BusConstraints.independentReviewComplexity",
+      "aliases": [
+        "constraints.independentReviewComplexity",
+        "config.constraints.independentReviewComplexity"
+      ],
+      "evidence": "src/config.ts:156"
+    }
+  ],
+  "notes": "Commit 4d4cf5a9f4ca0e819dfc9b97d6610cc05fbf1893. 25 of 51 fields unread. Included although read INSIDE validateConfig only: HarnessFeatureSet.resume (config.ts:256), AgentPermissions.maxDelegationDepth (config.ts:248), RolePolicy.id (config.ts:240), BusConstraints.maxDelegationDepth/maxConcurrentTasks/maxRetries (config.ts:268-270). Writes that do not count as reads: object literals in src/provider-catalog.ts (FULL_FEATURES/BASIC_FEATURES 40-61, per-entry feature overrides like { ...BASIC_FEATURES, resume: true }, default roles 296-302, default constraints 309-322). Excluded (they ARE read outside validateConfig): AgentDefinition.model is read only in resolveAgent (config.ts:290), which is outside validateConfig, so it is read; AgentDefinition.autoStart is written in validateConfig (245) but read in src/supervisor/entry.ts:80; BusConstraints.isolation read at supervisor.ts:401; HarnessFeatureSet.mcp read at adapters.ts:205 and supervisor.ts:185; AgentPermissions.canReview/filesystem/shell/network read in router.ts 155-189. False friends that are NOT reads of these types: Permissions.canDelegate in src/core/identity.ts:17 and its use at src/mcp/render.ts:18 (type Permissions, not AgentPermissions); identity authority (core/identity.ts, cli/main.ts me.authority) is Identity.authority not AgentDefinition.authority; agent.description at src/core/import.ts:243 is a parsed legacy JSON Row; task.maxRetries (core/bus.ts, core/types.ts) is Task.maxRetries; zod .optional()/description strings in src/mcp/server.ts. Not counted as per-field reads: the object spread { ...agent } in resolveAgent (config.ts:293) and whole-object copy features: entry.features (provider-catalog.ts:349). A grader may accept an answer that treats the spread as reading every AgentDefinition field only if it argues it explicitly; the canonical answer does not."
+}

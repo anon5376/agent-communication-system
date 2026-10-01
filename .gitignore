@@ -12,3 +12,4 @@ gui/AgentBus.app/
 scripts/devin-cloud-bridge.mjs
 *.log
 .DS_Store
+bench-runs/

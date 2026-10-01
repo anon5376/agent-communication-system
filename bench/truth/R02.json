@@ -1,0 +1,210 @@
+{
+  "id": "R02",
+  "reconciled": false,
+  "derivedBy": "node derive-R02.mjs <copy of TS repo at 4d4cf5a9f4ca0e819dfc9b97d6610cc05fbf1893 with node_modules symlinked> <git worktree of origin/rust-port = c6df26b3ec0235e38404b33b382c1fa824ba12a5>; regex /\\b(FROM|JOIN|INTO|UPDATE|TABLE|REFERENCES)\\s+agents\\b/i over every TS string/template literal (TypeScript AST) and every Rust string/raw-string literal (small lexer), mapped to the enclosing named function; then hand-verified by reading each hit, the enclosing method headers (src/core/bus.ts class Bus, rust/src/bus.rs impl Bus at 176), openSource/openTarget in import code, and grep for dynamically built table names (grep -rnE \"(FROM|INTO|UPDATE|JOIN|TABLE)\\s+(\\$\\{|\\{\\})\" found none).",
+  "question": "Which functions execute SQL against the bus database agents table (SELECT/INSERT/UPDATE/DELETE, including JOINs and subqueries that read it), in TypeScript under src/ at 4d4cf5a9 and in Rust under rust/src/ at origin/rust-port?",
+  "items": [
+    {
+      "id": "src/core/bus.ts:touch",
+      "aliases": [
+        "src/core/bus.ts:Bus.touch",
+        "src/core/bus.ts::touch",
+        "src/core/bus.ts:Bus::touch"
+      ],
+      "evidence": "src/core/bus.ts:170"
+    },
+    {
+      "id": "src/core/bus.ts:init",
+      "aliases": [
+        "src/core/bus.ts:Bus.init",
+        "src/core/bus.ts::init",
+        "src/core/bus.ts:Bus::init"
+      ],
+      "evidence": "src/core/bus.ts:207"
+    },
+    {
+      "id": "src/core/bus.ts:addAgent",
+      "aliases": [
+        "src/core/bus.ts:Bus.addAgent",
+        "src/core/bus.ts::addAgent",
+        "src/core/bus.ts:Bus::addAgent"
+      ],
+      "evidence": "src/core/bus.ts:249"
+    },
+    {
+      "id": "src/core/bus.ts:agentRow",
+      "aliases": [
+        "src/core/bus.ts:Bus.agentRow",
+        "src/core/bus.ts::agentRow",
+        "src/core/bus.ts:Bus::agentRow"
+      ],
+      "evidence": "src/core/bus.ts:281"
+    },
+    {
+      "id": "src/core/bus.ts:getAgent",
+      "aliases": [
+        "src/core/bus.ts:Bus.getAgent",
+        "src/core/bus.ts::getAgent",
+        "src/core/bus.ts:Bus::getAgent"
+      ],
+      "evidence": "src/core/bus.ts:311"
+    },
+    {
+      "id": "src/core/bus.ts:listAgents",
+      "aliases": [
+        "src/core/bus.ts:Bus.listAgents",
+        "src/core/bus.ts::listAgents",
+        "src/core/bus.ts:Bus::listAgents"
+      ],
+      "evidence": "src/core/bus.ts:321"
+    },
+    {
+      "id": "src/core/bus.ts:agentSummaries",
+      "aliases": [
+        "src/core/bus.ts:Bus.agentSummaries",
+        "src/core/bus.ts::agentSummaries",
+        "src/core/bus.ts:Bus::agentSummaries"
+      ],
+      "evidence": "src/core/bus.ts:331"
+    },
+    {
+      "id": "src/core/bus.ts:insertMessage",
+      "aliases": [
+        "src/core/bus.ts:Bus.insertMessage",
+        "src/core/bus.ts::insertMessage",
+        "src/core/bus.ts:Bus::insertMessage"
+      ],
+      "evidence": "src/core/bus.ts:375"
+    },
+    {
+      "id": "src/core/bus.ts:waitForMail",
+      "aliases": [
+        "src/core/bus.ts:Bus.waitForMail",
+        "src/core/bus.ts::waitForMail",
+        "src/core/bus.ts:Bus::waitForMail"
+      ],
+      "evidence": "src/core/bus.ts:527"
+    },
+    {
+      "id": "src/core/bus.ts:deadClaims",
+      "aliases": [
+        "src/core/bus.ts:Bus.deadClaims",
+        "src/core/bus.ts::deadClaims",
+        "src/core/bus.ts:Bus::deadClaims"
+      ],
+      "evidence": "src/core/bus.ts:732"
+    },
+    {
+      "id": "src/core/import.ts:runImport",
+      "aliases": [
+        "src/core/import.ts::runImport"
+      ],
+      "evidence": "src/core/import.ts:410"
+    },
+    {
+      "id": "rust/src/bus.rs:init",
+      "aliases": [
+        "rust/src/bus.rs:Bus.init",
+        "rust/src/bus.rs::init",
+        "rust/src/bus.rs:Bus::init"
+      ],
+      "evidence": "rust/src/bus.rs:290"
+    },
+    {
+      "id": "rust/src/bus.rs:add_agent",
+      "aliases": [
+        "rust/src/bus.rs:Bus.add_agent",
+        "rust/src/bus.rs::add_agent",
+        "rust/src/bus.rs:Bus::add_agent"
+      ],
+      "evidence": "rust/src/bus.rs:377"
+    },
+    {
+      "id": "rust/src/bus.rs:agent_exists",
+      "aliases": [
+        "rust/src/bus.rs:Bus.agent_exists",
+        "rust/src/bus.rs::agent_exists",
+        "rust/src/bus.rs:Bus::agent_exists"
+      ],
+      "evidence": "rust/src/bus.rs:430"
+    },
+    {
+      "id": "rust/src/bus.rs:agent_role",
+      "aliases": [
+        "rust/src/bus.rs:Bus.agent_role",
+        "rust/src/bus.rs::agent_role",
+        "rust/src/bus.rs:Bus::agent_role"
+      ],
+      "evidence": "rust/src/bus.rs:437"
+    },
+    {
+      "id": "rust/src/bus.rs:touch",
+      "aliases": [
+        "rust/src/bus.rs:Bus.touch",
+        "rust/src/bus.rs::touch",
+        "rust/src/bus.rs:Bus::touch"
+      ],
+      "evidence": "rust/src/bus.rs:484"
+    },
+    {
+      "id": "rust/src/bus.rs:get_agent",
+      "aliases": [
+        "rust/src/bus.rs:Bus.get_agent",
+        "rust/src/bus.rs::get_agent",
+        "rust/src/bus.rs:Bus::get_agent"
+      ],
+      "evidence": "rust/src/bus.rs:527"
+    },
+    {
+      "id": "rust/src/bus.rs:list_agents",
+      "aliases": [
+        "rust/src/bus.rs:Bus.list_agents",
+        "rust/src/bus.rs::list_agents",
+        "rust/src/bus.rs:Bus::list_agents"
+      ],
+      "evidence": "rust/src/bus.rs:539"
+    },
+    {
+      "id": "rust/src/bus.rs:agent_summaries",
+      "aliases": [
+        "rust/src/bus.rs:Bus.agent_summaries",
+        "rust/src/bus.rs::agent_summaries",
+        "rust/src/bus.rs:Bus::agent_summaries"
+      ],
+      "evidence": "rust/src/bus.rs:562"
+    },
+    {
+      "id": "rust/src/bus.rs:insert_message",
+      "aliases": [
+        "rust/src/bus.rs:Bus.insert_message",
+        "rust/src/bus.rs::insert_message",
+        "rust/src/bus.rs:Bus::insert_message"
+      ],
+      "evidence": "rust/src/bus.rs:656"
+    },
+    {
+      "id": "rust/src/bus.rs:dead_claims",
+      "aliases": [
+        "rust/src/bus.rs:Bus.dead_claims",
+        "rust/src/bus.rs::dead_claims",
+        "rust/src/bus.rs:Bus::dead_claims"
+      ],
+      "evidence": "rust/src/bus.rs:1326"
+    },
+    {
+      "id": "rust/src/import.rs:run_import",
+      "aliases": [
+        "rust/src/import.rs::run_import"
+      ],
+      "evidence": "rust/src/import.rs:1208"
+    },
+    {
+      "id": "rust/src/wait.rs:wait_for_mail",
+      "aliases": [
+        "rust/src/wait.rs::wait_for_mail"
+      ],
+      "evidence": "rust/src/wait.rs:62"
+    }
+  ],
+  "notes": "Read/write classification: src/core/bus.ts:touch=write; src/core/bus.ts:init=write; src/core/bus.ts:addAgent=write; src/core/bus.ts:agentRow=read; src/core/bus.ts:getAgent=read; src/core/bus.ts:listAgents=read; src/core/bus.ts:agentSummaries=read; src/core/bus.ts:insertMessage=read; src/core/bus.ts:waitForMail=write; src/core/bus.ts:deadClaims=read; src/core/import.ts:runImport=read+write; rust/src/bus.rs:init=write; rust/src/bus.rs:add_agent=write; rust/src/bus.rs:agent_exists=read; rust/src/bus.rs:agent_role=read; rust/src/bus.rs:touch=write; rust/src/bus.rs:get_agent=read; rust/src/bus.rs:list_agents=read; rust/src/bus.rs:agent_summaries=read; rust/src/bus.rs:insert_message=read; rust/src/bus.rs:dead_claims=read; rust/src/import.rs:run_import=read+write; rust/src/wait.rs:wait_for_mail=write. TS 11 functions, Rust 12 (Rust splits the TS agentRow use into agent_exists + agent_role; TS has no counterpart named agentExists). Line evidence is the SQL text inside each function; waitForMail/wait_for_mail, touch, addAgent/add_agent and runImport/run_import each have several statements (bus.ts 170,173; 249,254; 527,535,560; import.ts 410,419,425,528; bus.rs 484,489; 377,382; import.rs 1208,1244,1262,1559; wait.rs 62,86,150). runImport/run_import reads agents via INSERT INTO cursors ... SELECT id FROM agents and EXISTS (SELECT 1 FROM agents) and writes via INSERT OR IGNORE / UPDATE. Deliberately EXCLUDED: (1) the schema SQL (src/core/db.ts:15, rust/src/db.rs:15, including the REFERENCES agents(id) foreign key); (2) loadQagentState/loadPrototype (src/core/import.ts:235,314; rust/src/import.rs:562,868 load_qagent_state/load_prototype): they SELECT from an agents table, but in a legacy SOURCE database opened read-only via openSource/open_source (qagent state.sqlite, Python prototype.db), not the bus agents table; an answer that lists them should be marked as including a different table, not credited; (3) functions that only consume rows (toAgent, whoami, setStatus, identify, dashboard state builders) because they execute no SQL on agents themselves; (4) tests/ and rust/tests/. No DELETE FROM agents exists in either codebase; no table name is built dynamically. agentSummaries/agent_summaries build the IN (...) placeholder list dynamically but the table name is literal."
+}

@@ -1,0 +1,26 @@
+{
+  "series": "series-1",
+  "base_sha": "4d4cf5a9f4ca0e819dfc9b97d6610cc05fbf1893",
+  "repo": "https://github.com/anon5376/agent-communication-system.git",
+  "seed": 20261001,
+  "isolation": "worktree",
+  "stuckThresholdMin": 10,
+  "audit": { "sample": 8 },
+  "budgets": {
+    "endurance": { "runUsd": 60, "wallMinutes": 600 },
+    "mini": { "runUsd": 12, "wallMinutes": 150 },
+    "taskMinutes": 45
+  },
+  "roster": [
+    { "id": "mgr", "role": "manager", "authority": "manager", "provider": "anthropic", "family": "claude" },
+    { "id": "impl-a", "role": "implementation", "authority": "worker", "provider": "anthropic", "family": "claude" },
+    { "id": "res-a", "role": "research", "authority": "worker", "provider": "anthropic", "family": "claude" },
+    { "id": "impl-b", "role": "implementation", "authority": "worker", "provider": "openai", "family": "gpt" },
+    { "id": "res-b", "role": "research", "authority": "worker", "provider": "openai", "family": "gpt" },
+    { "id": "rev-a", "role": "reviewer", "authority": "worker", "provider": "anthropic", "family": "claude" },
+    { "id": "rev-b", "role": "reviewer", "authority": "worker", "provider": "openai", "family": "gpt" }
+  ],
+  "arms": {
+    "baseline": { "description": "ACS as shipped: the review gate blocks only assignee == reviewer; the manager reviews what it created." }
+  }
+}

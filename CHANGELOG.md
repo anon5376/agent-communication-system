@@ -8,6 +8,14 @@ All notable changes to the Agent Communication System. Format follows
 
 ### Added
 
+- **Benchmark runner** (`bench/`) — runs a fixed task set (14 implementation
+  tasks with frozen validators, 6 research tasks with frozen truth) against a
+  roster on a fresh bus and clone, and reports acceptance, first-round
+  acceptance, defect escape, cross-family review, stuck time, human touches,
+  cost and coordination overhead per arm. `node bench/run.mjs baseline --mini`
+  starts a real run (see `bench/README.md`); `--fake` runs the same scoring
+  and reporting on the fake harness, which CI does. No new dependencies; the
+  fake harness now handles `[TASK #n]` mail and can submit scripted reports.
 - **Numbered schema migrations** — the bus schema now lives in ordered files
   under `schema/` (`001-baseline.sql` is the exact schema of 0.2.0) and
   `meta.schema_version` is the highest applied number. Pending migrations run

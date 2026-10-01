@@ -1,0 +1,12 @@
+{
+  "tasks": {
+    "I01": { "verdicts": ["accept"], "validator": "pass" },
+    "I03": { "verdicts": ["revise", "accept"], "validator": "pass" },
+    "I05": { "verdicts": ["accept"], "validator": "fail" },
+    "I10": { "verdicts": ["revise", "revise", "revise"], "validator": "fail" },
+    "I12": { "verdicts": ["accept"], "validator": "pass" },
+    "R01": { "verdicts": ["accept"] },
+    "R02": { "verdicts": ["accept"] },
+    "R05": { "verdicts": ["accept"] }
+  }
+}
