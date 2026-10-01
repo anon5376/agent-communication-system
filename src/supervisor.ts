@@ -14,7 +14,7 @@ import { AdapterContext, HarnessInvocation, McpCommand, getHarnessAdapter } from
 import { BusConfig, ResolvedAgent, configPathFromProject, loadConfig, resolveAgent } from "./config.js";
 import { Bus } from "./core/bus.js";
 import type { Identity } from "./core/identity.js";
-import { BusError, DEFAULT_WAIT_SEC, Message, Task } from "./core/types.js";
+import { BusError, DEFAULT_WAIT_SEC, Message, OPERATOR_ID, Task } from "./core/types.js";
 
 /** First non-empty environment variable among `names` (new name first, old name second). */
 function envValue(...names: string[]): string | undefined {
@@ -125,6 +125,8 @@ export interface SuperviseOptions {
   waitMs?: number;
   /** The qagent bin the CLI's MCP entry runs (`node <bin> mcp`). */
   qagentBin?: string;
+  /** When set, each loop iteration requeues dead claims (expired, or idle this long with the assignee silent on the bus that long). Operator token required. */
+  autoRequeueMs?: number;
   fakeHarnessPath?: string;
   log?: (line: string) => void;
 }
@@ -311,12 +313,31 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
     const mcpCommand = mcpCommandFor(me.agentId, bus.dbPath, qagentBin);
     const blockSec = agent.harnessDefinition.id === "claude" ? "900" : "240";
     const waitMs = options.waitMs ?? DEFAULT_WAIT_SEC * 1000;
+    let sweeper: Identity | null = null;
+    let sweeperTried = false;
+    const sweepStalled = () => {
+      if (!options.autoRequeueMs) return;
+      if (!sweeperTried) {
+        sweeperTried = true;
+        try { sweeper = bus.identify(OPERATOR_ID); } catch { log("auto-requeue off: no operator token on this bus"); }
+      }
+      if (!sweeper) return;
+      for (const task of bus.deadClaims(options.autoRequeueMs)) {
+        try {
+          bus.requeueTask(sweeper, task.id, `auto-requeue: claim idle beyond ${Math.round(options.autoRequeueMs / 60_000)} min`);
+          log(`auto-requeued stalled task #${task.id} (was claimed by ${task.assignee ?? "nobody"})`);
+        } catch (error) {
+          log(`auto-requeue of task #${task.id} failed: ${(error as Error).message}`);
+        }
+      }
+    };
     let consecutiveFailures = 0;
     log(`supervising ${agent.id} via ${agent.harnessDefinition.id} in ${workdir} (bus ${bus.dbPath}${managed ? ", supervisor-managed tasks" : ""})`);
 
     while (!options.signal?.aborted) {
       const waited = await bus.waitForMail(me, { timeoutMs: waitMs, signal: options.signal });
       if (options.signal?.aborted) break;
+      sweepStalled();
       if (waited.status === "timeout") continue;
 
       // Consume what the wait saw, so the next wait does not deliver it again.

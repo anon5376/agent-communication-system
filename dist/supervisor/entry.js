@@ -10,12 +10,13 @@ import { Bus } from "../core/bus.js";
 import { operatorTokenPath, readTokenFile } from "../core/identity.js";
 import { BusError } from "../core/types.js";
 import { supervise } from "../supervisor.js";
-const USAGE = `usage: qagent supervise <agent> [project-dir] [--config PATH]
+const USAGE = `usage: qagent supervise <agent> [project-dir] [--config PATH] [--auto-requeue-min M]
        qagent doctor [agent] [project-dir] [--config PATH]
 `;
 function split(argv) {
     const positionals = [];
     let config;
+    let autoRequeueMin;
     let help = false;
     for (let index = 0; index < argv.length; index += 1) {
         const arg = argv[index];
@@ -25,6 +26,10 @@ function split(argv) {
             config = argv[index += 1];
         else if (arg.startsWith("--config="))
             config = arg.slice("--config=".length);
+        else if (arg === "--auto-requeue-min")
+            autoRequeueMin = Number(argv[index += 1]);
+        else if (arg.startsWith("--auto-requeue-min="))
+            autoRequeueMin = Number(arg.slice("--auto-requeue-min=".length));
         else if (arg === "--db")
             index += 1; // already resolved by the CLI into context.dbPath
         else if (arg.startsWith("--db="))
@@ -34,7 +39,10 @@ function split(argv) {
         else
             positionals.push(arg);
     }
-    return { positionals, config, help };
+    if (autoRequeueMin !== undefined && (!Number.isFinite(autoRequeueMin) || autoRequeueMin <= 0)) {
+        throw new BusError("invalid", "--auto-requeue-min must be a positive number of minutes");
+    }
+    return { positionals, config, autoRequeueMin, help };
 }
 function commandName(context) {
     return context.command === "doctor" ? "doctor" : "supervise";
@@ -100,7 +108,7 @@ export async function main(argv, context) {
     const out = context.stdout ?? ((text) => { process.stdout.write(text); });
     const err = context.stderr ?? ((text) => { process.stderr.write(text); });
     try {
-        const { positionals, config, help } = split(argv);
+        const { positionals, config, autoRequeueMin, help } = split(argv);
         if (help) {
             out(USAGE);
             return 0;
@@ -117,7 +125,7 @@ export async function main(argv, context) {
         process.once("SIGINT", stop);
         process.once("SIGTERM", stop);
         try {
-            await supervise({ agentId, workdir: resolve(dir ?? process.cwd()), dbPath: context.dbPath, configPath: config, signal: controller.signal });
+            await supervise({ agentId, workdir: resolve(dir ?? process.cwd()), dbPath: context.dbPath, configPath: config, autoRequeueMs: autoRequeueMin !== undefined ? autoRequeueMin * 60_000 : undefined, signal: controller.signal });
         }
         finally {
             process.off("SIGINT", stop);

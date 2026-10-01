@@ -80,6 +80,7 @@ Global: --db PATH (or QAGENT_BUS_DB; default ~/.agent-bus/bus.db)  --as ID|opera
   qagent task list [--mine] [--state S]... [--all] [--limit N] | task show <N>
   qagent task claim [<N>] | task note <N> <text> | task submit <N> --summary S [--details D] [--file F]...
   qagent task review <N> --accept|--revise --feedback F | task cancel <N> [--reason R]
+  qagent task stalled [--stall-min M] | task requeue <N> [--reason R]
   qagent log [--follow] [--since SEQ] [--limit N]
   qagent import [--jsonl P] [--qagent-state P] [--prototype P] [--dry-run] [--force]
   qagent mcp [--operator] | mcp-config | supervise <agent> [dir] | doctor | dashboard
@@ -419,8 +420,21 @@ async function taskCommand(ctx, sub) {
             ctx.out(task, `cancelled task #${task.id}`);
             return 0;
         }
+        case "stalled": {
+            const minutes = Number(ctx.str("stall-min") ?? "60");
+            if (!Number.isFinite(minutes) || minutes <= 0)
+                throw new BusError("invalid", "--stall-min must be a positive number of minutes");
+            const tasks = bus.stalledTasks(minutes * 60_000);
+            ctx.out(tasks, renderTasks(tasks));
+            return 0;
+        }
+        case "requeue": {
+            const task = bus.requeueTask(ctx.identity(), ctx.taskId(2), ctx.str("reason"));
+            ctx.out(task, `requeued task #${task.id}`);
+            return 0;
+        }
         default:
-            throw new BusError("invalid", "usage: qagent task add|list|show|claim|note|submit|review|cancel");
+            throw new BusError("invalid", "usage: qagent task add|list|show|claim|note|submit|review|cancel|stalled|requeue");
     }
 }
 export async function main(argv, io = defaultIo) {
