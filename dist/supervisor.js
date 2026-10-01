@@ -14,6 +14,7 @@ import { getHarnessAdapter } from "./adapters.js";
 import { configPathFromProject, loadConfig, resolveAgent } from "./config.js";
 import { Bus } from "./core/bus.js";
 import { BusError, DEFAULT_WAIT_SEC, OPERATOR_ID } from "./core/types.js";
+import { ensureTaskWorktree } from "./worktree.js";
 /** First non-empty environment variable among `names` (new name first, old name second). */
 function envValue(...names) {
     for (const name of names) {
@@ -377,12 +378,38 @@ export async function supervise(options) {
             }
             if (!messages.length && !tasks.length)
                 continue;
+            // isolation "worktree": a turn about exactly one task runs in that task's checkout.
+            // CLI sessions are tied to their directory, so such a turn starts a fresh session.
+            let worktree = null;
+            const focus = new Set([...taskIds, ...tasks.map((task) => task.id)]);
+            if (config.constraints.isolation === "worktree" && focus.size === 1) {
+                const [focusId] = focus;
+                if (pinnedSessionId) {
+                    log(`task #${focusId}: worktree isolation skipped, ${agent.id} pins session ${pinnedSessionId}`);
+                }
+                else {
+                    try {
+                        const task = bus.getTask(focusId);
+                        if (task.project)
+                            worktree = ensureTaskWorktree(task, home);
+                    }
+                    catch (error) {
+                        log(`task #${focusId}: worktree unavailable, running in ${workdir}: ${error.message}`);
+                    }
+                }
+            }
+            const turnDir = worktree?.workdir ?? workdir;
+            if (worktree)
+                log(`task #${worktree.taskId}: running in worktree ${worktree.workdir} (branch ${worktree.branch})`);
+            let prompt = buildBrief(agent, messages, tasks, managed);
+            if (worktree)
+                prompt += `\nWork only in the git worktree ${worktree.workdir} on branch ${worktree.branch}; commit your changes there.`;
             const context = {
                 agent,
-                prompt: buildBrief(agent, messages, tasks, managed),
-                sessionId: session.sessionId,
+                prompt,
+                sessionId: worktree ? null : session.sessionId,
                 pinnedSessionId,
-                workdir,
+                workdir: turnDir,
                 mcpServerPath: qagentBin,
                 fakeHarnessPath: options.fakeHarnessPath ?? DEFAULT_FAKE_HARNESS,
                 busEnvironment: { QAGENT_AGENT_ID: me.agentId, QAGENT_BUS_DB: bus.dbPath, QAGENT_BLOCK_SEC: blockSec, AGENT_BUS_BLOCK_SEC: blockSec },
@@ -393,7 +420,7 @@ export async function supervise(options) {
             bus.setStatus(me, "working");
             let processResult;
             try {
-                processResult = await runHarnessProcess(invocation, agent, workdir, (pid) => { childPid = pid; });
+                processResult = await runHarnessProcess(invocation, agent, turnDir, (pid) => { childPid = pid; });
             }
             finally {
                 childPid = null;
@@ -414,7 +441,7 @@ export async function supervise(options) {
             session.latencyMs += processResult.durationMs;
             if (pinnedSessionId)
                 session.sessionId = pinnedSessionId;
-            else if (normalized.sessionId)
+            else if (normalized.sessionId && !worktree)
                 session.sessionId = normalized.sessionId;
             writeFileSync(sessionPath, JSON.stringify(session, null, 2));
             const reportIds = new Set([...taskIds, ...tasks.map((task) => task.id)]);

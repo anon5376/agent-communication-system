@@ -12,6 +12,7 @@ import { agentIdFromEnv } from "../core/identity.js";
 import { defaultImportSources, runImport } from "../core/import.js";
 import { waitForMail, waitSeconds } from "../notify/wait.js";
 import { BusError, OPERATOR_ID } from "../core/types.js";
+import { ensureTaskWorktree, pruneTaskWorktrees, removeTaskWorktree } from "../worktree.js";
 import { renderAgents, renderEvent, renderImport, renderMessages, renderStatus, renderTask, renderTasks, renderTrace, renderTraceHtml } from "./format.js";
 const defaultIo = {
     stdout: (text) => { process.stdout.write(text); },
@@ -19,7 +20,7 @@ const defaultIo = {
     readStdin: () => readFileSync(0, "utf8"),
     env: process.env,
 };
-const BOOLEAN_FLAGS = new Set(["json", "peek", "all", "mine", "ack", "accept", "revise", "dry-run", "force", "follow", "operator", "open", "help"]);
+const BOOLEAN_FLAGS = new Set(["json", "peek", "all", "mine", "ack", "accept", "revise", "dry-run", "force", "follow", "operator", "open", "help", "worktree", "remove"]);
 const REPEATED_FLAGS = new Set(["dep", "scope", "state", "file"]);
 export function parseArgs(argv) {
     const positionals = [];
@@ -78,9 +79,10 @@ Global: --db PATH (or QAGENT_BUS_DB; default ~/.agent-bus/bus.db)  --as ID|opera
   qagent task add <title> [--brief B|-] [--to ID] [--reviewer ID] [--role R] [--priority P]
                   [--acceptance A] [--parent N] [--dep N]... [--scope PATH]... [--project DIR]
   qagent task list [--mine] [--state S]... [--all] [--limit N] | task show <N>
-  qagent task claim [<N>] | task note <N> <text> | task submit <N> --summary S [--details D] [--file F]...
+  qagent task claim [<N>] [--worktree] | task note <N> <text> | task submit <N> --summary S [--details D] [--file F]...
   qagent task review <N> --accept|--revise --feedback F | task cancel <N> [--reason R]
   qagent task stalled [--stall-min M] | task requeue <N> [--reason R]
+  qagent task worktree <N> [--remove [--force]] | task worktree prune [--force]   per-task git checkout
   qagent log [--follow] [--since SEQ] [--limit N]
   qagent trace <task-N> [--format text|json|html] [--out FILE]   the task's causal chain
   qagent import [--jsonl P] [--qagent-state P] [--prototype P] [--dry-run] [--force]
@@ -409,7 +411,12 @@ async function taskCommand(ctx, sub) {
             const me = ctx.identity();
             const id = ctx.parsed.positionals[2] === undefined ? null : ctx.taskId(2);
             const task = bus.claimTask(me, id);
-            ctx.out(task, `claimed task #${task.id}: ${task.title}`);
+            if (ctx.flag("worktree") !== true) {
+                ctx.out(task, `claimed task #${task.id}: ${task.title}`);
+                return 0;
+            }
+            const worktree = ensureTaskWorktree(task, bus.home);
+            ctx.out({ ...task, worktree }, `claimed task #${task.id}: ${task.title}\nworktree ${worktree.workdir} (branch ${worktree.branch})`);
             return 0;
         }
         case "note": {
@@ -455,8 +462,25 @@ async function taskCommand(ctx, sub) {
             ctx.out(task, `requeued task #${task.id}`);
             return 0;
         }
+        case "worktree": {
+            if (ctx.parsed.positionals[2] === "prune") {
+                const results = pruneTaskWorktrees(bus, { force: ctx.flag("force") === true });
+                const text = results.map((r) => `#${r.taskId} ${r.removed ? "removed" : "kept"}: ${r.reason}`).join("\n");
+                ctx.out(results, text || "(no task worktrees)");
+                return 0;
+            }
+            const task = bus.getTask(ctx.taskId(2));
+            if (ctx.flag("remove") === true) {
+                const result = removeTaskWorktree(task, bus.home, { force: ctx.flag("force") === true });
+                ctx.out(result, result.removed ? `removed worktree ${result.path} (branch ${result.branch} kept)` : `no worktree for task #${task.id}`);
+                return 0;
+            }
+            const worktree = ensureTaskWorktree(task, bus.home);
+            ctx.out(worktree, `${worktree.workdir} (branch ${worktree.branch}${worktree.created ? ", created" : ""})`);
+            return 0;
+        }
         default:
-            throw new BusError("invalid", "usage: qagent task add|list|show|claim|note|submit|review|cancel|stalled|requeue");
+            throw new BusError("invalid", "usage: qagent task add|list|show|claim|note|submit|review|cancel|stalled|requeue|worktree");
     }
 }
 export async function main(argv, io = defaultIo) {

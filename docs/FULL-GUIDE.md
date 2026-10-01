@@ -239,6 +239,19 @@ A claim normally expires after two hours. Adding a note renews it. When tasks de
 
 Path leases coordinate cooperative agents. They do not enforce filesystem permissions. Use separate worktrees or the harness sandbox when you need a stronger boundary.
 
+### Isolate a task in its own git worktree
+
+When the task's project is inside a git repository, an agent can work in a private checkout instead of the shared one:
+
+```bash
+qagent --as coder task claim 12 --worktree      # claims, then prints the worktree path
+qagent task worktree 12                         # find or create it later
+qagent task worktree 12 --remove [--force]      # delete the checkout; the branch stays
+qagent task worktree prune [--force]            # remove checkouts of accepted, failed and cancelled tasks
+```
+
+Each task gets branch `qagent/task-<N>`, created from the repository's current `HEAD`, in a checkout under `~/.agent-bus/worktrees/`. Agents commit there; the reviewer or manager merges the branch. Releasing and re-claiming a task reuses the same branch. Removal refuses a checkout with uncommitted changes unless `--force` is given. Through MCP, call `bus_task_claim` with `worktree: true`.
+
 ### Submit real evidence
 
 ```bash
@@ -346,6 +359,8 @@ qagent supervise coder /workspace/project
 ```
 
 `supervise --roster` runs every enabled agent in the config from one foreground process (one supervisor loop each, same signals). `--auto-requeue-min M` additionally requeues claims that sit idle longer than M minutes (uses the operator token on the machine), and `qagent task stalled`/`qagent task requeue` do the same by hand. `qagent trace <N>` prints a task's full causal chain — its events, notes and bus mail in order — with `--format json` or `--format html --out FILE` for export.
+
+With `"isolation": "worktree"` under `constraints` in the config, a turn about exactly one task whose project is a git repository runs in that task's worktree (see "Isolate a task in its own git worktree"). Such turns start a fresh CLI session, because CLI sessions are tied to their directory; an agent with a pinned `resumeSessionId` keeps running in the project directory.
 
 `doctor` performs read-only checks for the identity, token, CLI, project, and configuration. `supervise` stays in the foreground until interrupted.
 

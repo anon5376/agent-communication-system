@@ -110,6 +110,8 @@ export function validateConfig(value) {
         throw new Error("maxConcurrentTasks must be >= 1");
     if (config.constraints.maxRetries < 0)
         throw new Error("maxRetries must be >= 0");
+    if (!["path-locks", "worktree", "none"].includes(config.constraints.isolation))
+        throw new Error("isolation must be path-locks, worktree or none");
     return config;
 }
 export function loadConfig(path = envValue("QAGENT_CONFIG", "AGENT_BUS_CONFIG") ?? DEFAULT_CONFIG_PATH) {
