@@ -3,64 +3,11 @@
  * Pragmas and the transaction helper are ported from store.ts:43-138.
  */
 import { DatabaseSync } from "node:sqlite";
-import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-export const SCHEMA_VERSION = "1";
+import { fileURLToPath } from "node:url";
 export const BUSY_TIMEOUT_MS = 5000;
-export const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS agents (
-  id TEXT PRIMARY KEY CHECK (id <> '' AND id NOT GLOB '*[^A-Za-z0-9._-]*'),
-  role TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', harness TEXT NOT NULL DEFAULT '',
-  parent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
-  status TEXT NOT NULL DEFAULT 'offline',
-  wait_until_ms INTEGER, last_seen_ms INTEGER, created_ms INTEGER NOT NULL, meta_json TEXT NOT NULL DEFAULT '{}');
-CREATE TABLE IF NOT EXISTS identities (
-  agent_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
-  authority TEXT NOT NULL CHECK (authority IN ('operator','manager','worker')),
-  permissions_json TEXT NOT NULL, created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS messages (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, ts_ms INTEGER NOT NULL,
-  sender TEXT NOT NULL, recipient TEXT,
-  type TEXT NOT NULL DEFAULT 'info', subject TEXT NOT NULL DEFAULT '', body TEXT NOT NULL,
-  thread TEXT NOT NULL DEFAULT '', task_id INTEGER, refs_json TEXT NOT NULL DEFAULT '[]',
-  requires_ack INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'v2');
-CREATE INDEX IF NOT EXISTS messages_inbox ON messages(recipient, seq);
-CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread, seq);
-CREATE INDEX IF NOT EXISTS messages_task ON messages(task_id, seq);
-CREATE TABLE IF NOT EXISTS cursors (agent_id TEXT PRIMARY KEY, last_seq INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS acks (seq INTEGER NOT NULL, agent_id TEXT NOT NULL, ack_ms INTEGER NOT NULL, PRIMARY KEY (seq, agent_id));
-CREATE TABLE IF NOT EXISTS tasks (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, legacy_id TEXT UNIQUE, project TEXT,
-  parent_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
-  title TEXT NOT NULL, brief TEXT NOT NULL DEFAULT '', acceptance TEXT NOT NULL DEFAULT '',
-  role TEXT NOT NULL DEFAULT '', priority TEXT NOT NULL DEFAULT 'normal',
-  state TEXT NOT NULL CHECK (state IN ('open','blocked','claimed','submitted','changes_requested',
-                                        'accepted','failed','cancelled')),
-  creator TEXT NOT NULL, assignee TEXT, reviewer TEXT,
-  path_scopes_json TEXT NOT NULL DEFAULT '[]', refs_json TEXT NOT NULL DEFAULT '[]',
-  result_json TEXT, review_json TEXT, round INTEGER NOT NULL DEFAULT 1,
-  attempts INTEGER NOT NULL DEFAULT 0, max_retries INTEGER NOT NULL DEFAULT 2,
-  claim_expires_ms INTEGER, created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS tasks_board ON tasks(state, assignee, updated_ms);
-CREATE INDEX IF NOT EXISTS tasks_parent ON tasks(parent_id);
-CREATE INDEX IF NOT EXISTS tasks_project ON tasks(project, state);
-CREATE TABLE IF NOT EXISTS task_deps (task_id INTEGER NOT NULL, depends_on INTEGER NOT NULL, PRIMARY KEY (task_id, depends_on));
-CREATE INDEX IF NOT EXISTS task_deps_rev ON task_deps(depends_on);
-CREATE TABLE IF NOT EXISTS task_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, author TEXT NOT NULL,
-  ts_ms INTEGER NOT NULL, body TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS task_notes_task ON task_notes(task_id);
-CREATE TABLE IF NOT EXISTS leases (project TEXT NOT NULL, path TEXT NOT NULL, task_id INTEGER NOT NULL,
-  created_ms INTEGER NOT NULL, PRIMARY KEY (task_id, path));
-CREATE INDEX IF NOT EXISTS leases_project ON leases(project, path);
-CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER NOT NULL, actor TEXT NOT NULL,
-  kind TEXT NOT NULL, entity TEXT NOT NULL, entity_id TEXT NOT NULL, data_json TEXT NOT NULL DEFAULT '{}',
-  source TEXT NOT NULL DEFAULT 'v2');
-CREATE INDEX IF NOT EXISTS events_entity ON events(entity, entity_id, seq);
-CREATE TABLE IF NOT EXISTS usage (agent_id TEXT NOT NULL, day TEXT NOT NULL, turns INTEGER, input_tokens INTEGER,
-  output_tokens INTEGER, cost_usd REAL, latency_ms INTEGER, PRIMARY KEY (agent_id, day));
-`;
 function envValue(env, ...names) {
     for (const name of names) {
         const value = env[name];
@@ -85,17 +32,92 @@ export function resolveDbPath(flag, env = process.env) {
 export function homeFor(dbPath) {
     return dirname(resolve(dbPath));
 }
-function schemaReady(db) {
+/** Raised when the database was written by a newer binary than this one; nothing is written. */
+export class SchemaVersionError extends Error {
+    found;
+    known;
+    constructor(found, known, path) {
+        super(`bus database ${path} is at schema version ${found}, but this qagent only knows up to ${known}: upgrade qagent (it will not write to a newer schema)`);
+        this.found = found;
+        this.known = known;
+        this.name = "SchemaVersionError";
+    }
+}
+/**
+ * Ordered `schema/NNN-name.sql` files at the repo root, shared with the Rust port. Migrations are
+ * additive only: new tables, or nullable/defaulted columns. Never drop or rename.
+ */
+export function loadMigrations(dir = schemaDirectory()) {
+    const migrations = readdirSync(dir)
+        .filter((file) => /^\d{3}-[\w-]+\.sql$/.test(file))
+        .sort()
+        .map((file) => ({ version: Number(file.slice(0, 3)), name: file.slice(4, -4), sql: readFileSync(join(dir, file), "utf8") }));
+    migrations.forEach((migration, index) => {
+        if (migration.version !== index + 1)
+            throw new Error(`schema migrations in ${dir} must be numbered 001, 002, ... without gaps (found ${migration.version} at position ${index + 1})`);
+    });
+    if (migrations.length === 0)
+        throw new Error(`no schema migrations found in ${dir}`);
+    return migrations;
+}
+/** dist/core, dist-test/src/core and src/core all sit below the directory that holds schema/. */
+function schemaDirectory() {
+    let dir = dirname(fileURLToPath(import.meta.url));
+    for (;;) {
+        const candidate = join(dir, "schema");
+        if (existsSync(join(candidate, "001-baseline.sql")))
+            return candidate;
+        const parent = dirname(dir);
+        if (parent === dir)
+            throw new Error("schema/ directory not found next to the qagent installation");
+        dir = parent;
+    }
+}
+let defaultMigrations;
+/** Highest schema version this binary knows. */
+export function latestSchemaVersion() {
+    defaultMigrations ??= loadMigrations();
+    return defaultMigrations.length;
+}
+/** The version marker: 0 for an empty database, otherwise the highest applied migration. */
+export function currentSchemaVersion(db) {
     const table = db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'meta'").get();
     if (!table)
-        return false;
+        return 0;
     const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
-    return row?.value === SCHEMA_VERSION;
+    if (!row)
+        return 0;
+    const version = Number(row.value);
+    if (!/^\d+$/.test(row.value) || !Number.isSafeInteger(version))
+        throw new Error(`bus database has an unreadable schema_version: ${JSON.stringify(row.value)}`);
+    return version;
+}
+/**
+ * Bring the database up to the newest migration in one BEGIN IMMEDIATE transaction. The version is
+ * re-read inside the transaction so concurrent first opens apply each migration once. A database
+ * newer than the migrations is refused, never rewritten.
+ */
+export function migrate(db, path = "", migrations = (defaultMigrations ??= loadMigrations())) {
+    const known = migrations.length;
+    const found = currentSchemaVersion(db);
+    if (found > known)
+        throw new SchemaVersionError(found, known, path);
+    if (found === known)
+        return;
+    transaction(db, () => {
+        const start = currentSchemaVersion(db);
+        if (start > known)
+            throw new SchemaVersionError(start, known, path);
+        for (const migration of migrations.slice(start)) {
+            db.exec(migration.sql);
+            setMeta(db, "schema_version", String(migration.version));
+        }
+    });
 }
 /**
  * Open the bus. The busy timeout is set before anything else so concurrent first
- * opens wait for each other. The schema is only written when it is missing, so an
- * ordinary open performs no write at all.
+ * opens wait for each other. The schema is only written when it is missing or behind, so an
+ * ordinary open performs no write at all. A newer schema throws SchemaVersionError.
  */
 export function openDatabase(path, options = {}) {
     if (options.readOnly) {
@@ -126,13 +148,7 @@ export function openDatabase(path, options = {}) {
     if (String(mode.journal_mode).toLowerCase() !== "wal")
         db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA foreign_keys = ON");
-    if (!schemaReady(db)) {
-        transaction(db, () => {
-            db.exec(SCHEMA_SQL);
-            db.prepare("INSERT INTO meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-                .run(SCHEMA_VERSION);
-        });
-    }
+    migrate(db, path);
     return db;
 }
 /** One BEGIN IMMEDIATE transaction. Nested calls join the outer transaction. */
