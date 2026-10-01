@@ -43,6 +43,11 @@ All notable changes to the Agent Communication System. Format follows
 
 ### Fixed
 
+- Worktree creation no longer blocks on a stale lock: a lock whose holder
+  died, never wrote its owner file, or stopped heartbeating (pid reuse) is
+  swept. Worktree cleanup (`task worktree --remove`, `prune`) now works after
+  the task's project directory is deleted; if the whole repository is gone the
+  orphaned checkout is deleted with `--force`.
 - README and docs no longer claim what the code does not back: the install
   section leads with clone-and-build (the package is not on npm yet), review is
   described as "by someone other than the assignee" (the gate does not check
