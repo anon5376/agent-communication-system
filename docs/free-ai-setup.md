@@ -108,8 +108,13 @@ On an ~8 GB machine stick to ≤7–8B models.
 
 ```sh
 curl -fsSL https://ollama.com/install.sh | sh     # macOS: brew install ollama
-ollama pull qwen2.5-coder:7b                      # ~4.7 GB; good small coder
+ollama pull qwen3:8b                              # ~5.2 GB; tool-calling coder
 ```
+
+Pick a **tool-calling** model — the agent drives ACS's qagent tools over MCP,
+so tool calls must be native. Verified: `qwen2.5-coder:7b` fails here (it
+prints `{"name": "read", ...}` as plain text instead of calling the tool);
+`qwen3`, `llama3.1`, and `mistral-nemo` support real tool calls in Ollama.
 
 Two ways in:
 
@@ -126,7 +131,7 @@ Two ways in:
   "provider": "ollama",
   "harness": "opencode",
   "family": "qwen",
-  "exactModel": "ollama/qwen2.5-coder:7b",
+  "exactModel": "ollama/qwen3:8b",
   "enabled": true,
   "capabilities": {
     "contextTokens": 32768, "costClass": "local",
@@ -223,7 +228,7 @@ qagent agent add worker-3 --role implementation --authority worker
 "agents": {
   "planner": {
     "id": "planner", "model": "muse-spark-free", "role": "planner",
-    "authority": "worker", "description": "Plans and decomposes objectives.",
+    "authority": "manager", "description": "Plans and decomposes objectives.",
     "enabled": true, "autoStart": true,
     "harnessOptions": { "variant": "xhigh" },
     "permissions": {
@@ -288,6 +293,27 @@ qagent doctor                     # verifies every harness/login is reachable
 qagent supervise planner .        # one supervisor per agent (a terminal/tab each)
 # or, on newer versions: qagent supervise --roster .
 ```
+
+### Watching the team — T3 Code (recommended front-end)
+
+Running `qagent supervise` per agent means juggling terminal tabs. For a
+friendlier surface, use **[T3 Code](https://t3.codes)** (`pingdotgg/t3code`)
+— a free, open-source control surface for the agent CLIs you already have:
+every agent thread lives in one GUI (desktop app, web app, and iOS/Android),
+so you can watch all the OpenCode conversations at a glance, switch models
+mid-thread, and one-button open a PR from a thread's branch. It drives the
+same OpenCode install — no extra subscription on top of the free models.
+
+```sh
+brew install --cask t3-code     # macOS
+winget install T3Tools.T3Code   # Windows
+yay -S t3code-bin               # Linux (AUR) — or grab a release from GitHub
+```
+
+Prerequisite per its docs: have at least one provider authenticated — for
+this preset that's `opencode auth login` (the same Zen account from Option 2,
+$0). Use it alongside ACS: the bus coordinates agents durably, T3 Code is
+where you watch and steer the threads.
 
 With the Rust build, `acs` opens the TUI — its first-run wizard can create this
 team for you and drops per-agent charters into their inboxes.
