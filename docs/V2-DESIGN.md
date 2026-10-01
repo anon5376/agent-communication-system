@@ -174,7 +174,7 @@ bus_task_create { title: string, brief: string, to?: string, parent_id?: number,
                   priority?: "low"|"normal"|"high"|"urgent" }
 bus_task_list   { mine?: boolean /* default true */, state?: string[], include_closed?: boolean, limit?: number }
 bus_task_get    { task_id: number }
-bus_task_claim  { task_id?: number }   // omitted: oldest open task assigned to me or unassigned for my role
+bus_task_claim  { task_id?: number }   // omitted: most urgent open task assigned to me or unassigned for my role
 bus_task_note   { task_id: number, note: string }
 bus_task_submit { task_id: number, summary: string, details?: string, changed_files?: string[],
                   artifacts?: Ref[], validation?: {passed:boolean, summary:string, command?:string}[] }

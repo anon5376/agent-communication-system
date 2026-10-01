@@ -8,8 +8,11 @@ function stripAnsi(value) {
 function jsonLines(stdout) {
     const rows = [];
     for (const line of stdout.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("{"))
+            continue; // mixed prose lines are common and never parse
         try {
-            const parsed = JSON.parse(line.trim());
+            const parsed = JSON.parse(trimmed);
             if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
                 rows.push(parsed);
         }

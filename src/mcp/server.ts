@@ -197,7 +197,7 @@ export function createBusServer(bus: Bus, options: ServerOptions): BusMcpServer 
   }, async (input) => run(() => renderTask(bus.getTask(input.task_id))));
 
   server.registerTool("bus_task_claim", {
-    description: "Claim a task. Without task_id, takes the oldest open task assigned to you, or unassigned for your role. Claims expire after two hours without a note or submit.",
+    description: "Claim a task. Without task_id, takes the most urgent open task assigned to you, or unassigned for your role. Claims expire after two hours without a note or submit.",
     inputSchema: { task_id: z.number().int().positive().optional() },
   }, async (input) => run((identity) => {
     const task = bus.claimTask(identity, input.task_id ?? null);

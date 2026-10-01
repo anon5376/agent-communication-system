@@ -54,7 +54,26 @@ export function runHarnessProcess(invocation, agent, workdir, onSpawn) {
             detached: process.platform !== "win32",
         });
         onSpawn?.(child.pid ?? null);
-        let output = "";
+        // Chunked with head+tail caps: a 60-minute run can log more than memory justifies.
+        // Parsers need the head (session/thread ids are announced at turn start) and the tail
+        // (the result line); the middle is expendable.
+        const MAX_HEAD_BYTES = 256 * 1024;
+        const MAX_TAIL_BYTES = 8 * 1024 * 1024;
+        const head = [];
+        const tail = [];
+        let headBytes = 0;
+        let tailBytes = 0;
+        const capture = (data) => {
+            if (headBytes < MAX_HEAD_BYTES) {
+                head.push(data);
+                headBytes += data.length;
+                return;
+            }
+            tail.push(data);
+            tailBytes += data.length;
+            while (tailBytes > MAX_TAIL_BYTES && tail.length > 1)
+                tailBytes -= tail.shift().length;
+        };
         let settled = false;
         let timedOut = false;
         const finish = (code) => {
@@ -63,7 +82,7 @@ export function runHarnessProcess(invocation, agent, workdir, onSpawn) {
             settled = true;
             clearTimeout(timer);
             onSpawn?.(null);
-            resolve({ code, output, durationMs: Date.now() - started, timedOut });
+            resolve({ code, output: Buffer.concat([...head, ...tail]).toString("utf8"), durationMs: Date.now() - started, timedOut });
         };
         const timer = setTimeout(() => {
             timedOut = true;
@@ -90,15 +109,15 @@ export function runHarnessProcess(invocation, agent, workdir, onSpawn) {
             }, 3_000).unref();
         }, invocation.timeoutMs);
         child.stdout.on("data", (data) => {
-            output += data.toString();
+            capture(data);
             process.stdout.write(data);
         });
         child.stderr.on("data", (data) => {
-            output += data.toString();
+            capture(data);
             process.stderr.write(data);
         });
         child.on("error", (error) => {
-            output += `\nspawn error: ${error.message}`;
+            capture(Buffer.from(`\nspawn error: ${error.message}`));
             finish(-1);
         });
         child.on("close", (code) => finish(code ?? -1));

@@ -2,7 +2,7 @@
  * One SQLite file in WAL mode, opened directly by every process.
  * Pragmas and the transaction helper are ported from store.ts:43-138.
  */
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -148,26 +148,43 @@ export function transaction<T>(db: DatabaseSync, fn: () => T): T {
   }
 }
 
+/** Constant SQL prepared once per connection instead of on every call. Entries die with the connection. */
+const statements = new WeakMap<DatabaseSync, Map<string, StatementSync>>();
+
+export function prepared(db: DatabaseSync, sql: string): StatementSync {
+  let perDb = statements.get(db);
+  if (!perDb) {
+    perDb = new Map();
+    statements.set(db, perDb);
+  }
+  let statement = perDb.get(sql);
+  if (!statement) {
+    statement = db.prepare(sql);
+    perDb.set(sql, statement);
+  }
+  return statement;
+}
+
 export function getMeta(db: DatabaseSync, key: string): string | null {
-  const row = db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined;
+  const row = prepared(db, "SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined;
   return row?.value ?? null;
 }
 
 export function setMeta(db: DatabaseSync, key: string, value: string): void {
-  db.prepare("INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
+  prepared(db, "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }
 
 export function appendEvent(
   db: DatabaseSync,
   event: { tsMs: number; actor: string; kind: string; entity: string; entityId: string | number; data?: unknown; source?: string },
 ): number {
-  const result = db.prepare(`
+  const result = prepared(db, `
     INSERT INTO events(ts_ms, actor, kind, entity, entity_id, data_json, source) VALUES(?, ?, ?, ?, ?, ?, ?)
   `).run(event.tsMs, event.actor, event.kind, event.entity, String(event.entityId), JSON.stringify(event.data ?? {}), event.source ?? "v2");
   return Number(result.lastInsertRowid);
 }
 
 export function latestEventSeq(db: DatabaseSync): number {
-  const row = db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events").get() as { seq: number };
+  const row = prepared(db, "SELECT COALESCE(MAX(seq), 0) AS seq FROM events").get() as { seq: number };
   return Number(row.seq);
 }

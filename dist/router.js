@@ -43,17 +43,15 @@ function requirementWeights(config, role, complexity) {
     weights.tokenEfficiency += (1 - c) * 0.45;
     return weights;
 }
-function telemetryFor(agentId, telemetry) {
-    return telemetry.find((item) => item.agentId === agentId);
+/** First entry per agent id, matching the old linear find() semantics. */
+function indexByAgent(items) {
+    const map = new Map();
+    for (const item of items)
+        if (!map.has(item.agentId))
+            map.set(item.agentId, item);
+    return map;
 }
-function availabilityFor(agentId, availability) {
-    return availability.find((item) => item.agentId === agentId) ?? {
-        agentId,
-        status: "unregistered",
-        openTasks: 0,
-    };
-}
-function scoreCandidate(config, agent, task, role, telemetry, availability) {
+function scoreCandidate(config, agent, task, role, weights, normalizedComplexity, telemetry, availability) {
     const policy = config.roles[role];
     const caps = agent.modelDefinition.capabilities;
     const reasons = [];
@@ -114,7 +112,6 @@ function scoreCandidate(config, agent, task, role, telemetry, availability) {
     if ((task.network || policy.requireNetwork) && !agent.permissions.network)
         rejectedBy.push("task needs network permission");
     const required = policy.minimumCapability ?? 0;
-    const weights = requirementWeights(config, role, task.complexity);
     let weightedFit = 0;
     let totalWeight = 0;
     let largestGap = 0;
@@ -131,13 +128,13 @@ function scoreCandidate(config, agent, task, role, telemetry, availability) {
         rejectedBy.push(`capability fit ${capabilityFit.toFixed(2)} below role minimum ${required.toFixed(2)}`);
     }
     components.capability = capabilityFit;
-    const c = normalizedComplexity(task.complexity);
+    const c = normalizedComplexity;
     components.speed = caps.speed * (1 - c * 0.7);
     components.tokenEfficiency = caps.tokenEfficiency * (1 - c * 0.35);
     components.reliability = caps.reliability * (0.65 + c * 0.35);
     components.subscription = agent.providerDefinition.subscriptionBacked ? 1 : 0;
     components.cost = COST_SCORE[caps.costClass] ?? 0.4;
-    const observed = telemetryFor(agent.id, telemetry);
+    const observed = telemetry.get(agent.id);
     if (observed && observed.taskCount > 0) {
         components.observedSuccess = clamp(observed.acceptedCount / observed.taskCount - observed.failedCount / Math.max(1, observed.taskCount) * 0.35);
         components.observedLatency = observed.averageLatencyMs > 0
@@ -151,7 +148,7 @@ function scoreCandidate(config, agent, task, role, telemetry, availability) {
         reasons.push("no task-history evidence; using configured capability profile");
     }
     components.familyDiversity = task.implementationFamily && task.implementationFamily !== agent.modelDefinition.family ? 1 : 0;
-    const live = availabilityFor(agent.id, availability);
+    const live = availability.get(agent.id) ?? { agentId: agent.id, status: "unregistered", openTasks: 0 };
     components.availability = live.status === "idle" || live.status === "waiting"
         ? 1
         : live.status === "working"
@@ -220,12 +217,16 @@ function rolesToTry(config, requestedRole) {
 }
 export function routeTask(config, task, telemetry = [], availability = []) {
     const agents = enabledAgents(config);
+    const telemetryByAgent = indexByAgent(telemetry);
+    const availabilityByAgent = indexByAgent(availability);
+    const complexity = normalizedComplexity(task.complexity);
     let finalCandidates = [];
     let usedRole = task.role;
     let selected;
     for (const role of rolesToTry(config, task.role)) {
+        const weights = requirementWeights(config, role, task.complexity);
         const candidates = agents
-            .map((agent) => scoreCandidate(config, agent, task, role, telemetry, availability))
+            .map((agent) => scoreCandidate(config, agent, task, role, weights, complexity, telemetryByAgent, availabilityByAgent))
             .sort((a, b) => b.score - a.score || a.agentId.localeCompare(b.agentId));
         finalCandidates = candidates;
         selected = candidates.find((candidate) => candidate.eligible);

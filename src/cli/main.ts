@@ -240,7 +240,8 @@ async function logCommand(ctx: Context): Promise<number> {
     if (print() === 0 && !ctx.json) ctx.io.stdout("(no events)\n");
     return 0;
   }
-  const watcher = new ChangeWatcher(bus.db, bus.dbPath, { maxPollMs: 250 });
+  // fs.watch wakes promptly; the data_version poll is a missed-event fallback at ~1 read/s idle.
+  const watcher = new ChangeWatcher(bus.db, bus.dbPath, { maxPollMs: 1000 });
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.once("SIGINT", stop);

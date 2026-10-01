@@ -10,6 +10,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { prepared } from "./db.js";
 import { Authority, BusError, OPERATOR_ID } from "./types.js";
 
 export interface Permissions {
@@ -107,7 +108,7 @@ export function agentIdFromEnv(env: NodeJS.ProcessEnv = process.env): string | n
 }
 
 function rowFor(db: DatabaseSync, agentId: string): IdentityRow | undefined {
-  return db.prepare("SELECT * FROM identities WHERE agent_id = ?").get(agentId) as IdentityRow | undefined;
+  return prepared(db, "SELECT * FROM identities WHERE agent_id = ?").get(agentId) as IdentityRow | undefined;
 }
 
 function parsePermissions(json: string, authority: Authority): Permissions {
@@ -138,7 +139,7 @@ export function resolveIdentity(db: DatabaseSync, home: string, agentId: string)
 /** Resolve an identity from a token value (used when a caller holds the token in memory). */
 export function identityForToken(db: DatabaseSync, agentId: string, token: string): Identity {
   const tokenHash = hashToken(token);
-  const row = db.prepare("SELECT * FROM identities WHERE token_hash = ?").get(tokenHash) as IdentityRow | undefined;
+  const row = prepared(db, "SELECT * FROM identities WHERE token_hash = ?").get(tokenHash) as IdentityRow | undefined;
   if (!row) throw new BusError("unauthorized", `token for ${agentId} is not registered (rotate it with \`qagent token rotate ${agentId}\`)`);
   if (row.agent_id !== agentId) throw new BusError("unauthorized", `token does not belong to ${agentId}`);
   if (agentId === OPERATOR_ID && row.authority !== "operator") throw new BusError("unauthorized", "operator identity is not an operator");
@@ -157,7 +158,7 @@ export function requireOperator(identity: Identity, action: string): void {
 export function storeNewToken(db: DatabaseSync, agentId: string, authority: Authority, nowMs: number, permissions?: Permissions): string {
   const token = createBearerToken();
   const existing = rowFor(db, agentId);
-  db.prepare(`
+  prepared(db, `
     INSERT INTO identities(agent_id, token_hash, authority, permissions_json, created_ms, updated_ms)
     VALUES(?, ?, ?, ?, ?, ?)
     ON CONFLICT(agent_id) DO UPDATE SET token_hash = excluded.token_hash, authority = excluded.authority,
@@ -168,7 +169,7 @@ export function storeNewToken(db: DatabaseSync, agentId: string, authority: Auth
 
 /** Register an existing token file's hash for `agentId` (used by init to adopt operator.token). */
 export function adoptToken(db: DatabaseSync, agentId: string, authority: Authority, token: string, nowMs: number): void {
-  db.prepare(`
+  prepared(db, `
     INSERT INTO identities(agent_id, token_hash, authority, permissions_json, created_ms, updated_ms)
     VALUES(?, ?, ?, ?, ?, ?)
     ON CONFLICT(agent_id) DO UPDATE SET token_hash = excluded.token_hash, authority = excluded.authority, updated_ms = excluded.updated_ms
