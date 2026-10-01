@@ -86,8 +86,8 @@ test("bus_wait returns within 500 ms of a send from the CLI", async (t) => {
   const { dbPath, preload, bus } = setup(t);
   const bob = await startServer(t, dbPath, preload, "bob");
   const latencies: number[] = [];
-  // Three rounds always run for correctness. A single slow round on a loaded machine is noise, so up to two more
-  // run until one meets the bound; consistently slow rounds still fail.
+  // One slow round on a loaded machine is noise; a wake-up path that is usually slow is a regression. So the
+  // median of five rounds is held to the bound, not each round.
   for (let round = 1; round <= 5; round += 1) {
     const waiting = bob.client.callTool({ name: "bus_wait", arguments: { timeout_sec: 60 } }, undefined, LONG).then((result) => ({ result, at: Date.now() }));
     await until(() => bus.getAgent("bob")?.storedStatus === "waiting");
@@ -98,10 +98,10 @@ test("bus_wait returns within 500 ms of a send from the CLI", async (t) => {
     assert.match(text(result), new RegExp(`alice -> bob \\[info\\]\\n  ping ${round}`));
     latencies.push(at - sent.tsMs);
     assert.equal(bus.unreadCount("bob"), 0, "the delivered mail is marked read");
-    if (round >= 3 && Math.min(...latencies) < WAKE_BOUND_MS) break;
   }
   t.diagnostic(`bus_wait latency ms (reply received - message written): ${latencies.join(", ")}`);
-  assert.ok(Math.min(...latencies) < WAKE_BOUND_MS, `best of ${latencies.length} rounds was ${Math.min(...latencies)} ms (all: ${latencies.join(", ")})`);
+  const median = [...latencies].sort((x, y) => x - y)[2];
+  assert.ok(median < WAKE_BOUND_MS, `median latency ${median} ms (all: ${latencies.join(", ")})`);
 });
 
 test("bus_wait times out cleanly and the server keeps serving", async (t) => {
@@ -188,7 +188,7 @@ test("a poll-only watcher notices another connection's write within one poll int
   const watcher = new ChangeWatcher(bus.db, dbPath, { fsWatch: false, minPollMs, maxPollMs });
   t.after(() => watcher.close());
   const before = watcher.currentSeq();
-  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
   const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
   const seen: { seq: number | null } = { seq: null };

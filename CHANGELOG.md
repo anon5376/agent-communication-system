@@ -50,7 +50,7 @@ All notable changes to the Agent Communication System. Format follows
   adapter list matches `ADAPTERS`, and the competitive analysis now includes
   Hermes Agent. `npm run audit:public` also runs `scripts/check-readme-claims.mjs`.
 - `tests/wait-notify.test.ts` no longer fails on one slow wake-up under load:
-  the `bus_wait` test takes the best of up to five rounds, the signal-file test
+  the `bus_wait` test holds the median of five rounds to the bound, the signal-file test
   asserts against the poll interval, and a fake-clock test pins the poll bound.
 - Expired claims can be released and requeued; a batch of expired claims
   requeues correctly after the mid-batch expiry sweep; the auto-requeue

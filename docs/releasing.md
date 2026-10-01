@@ -32,6 +32,8 @@ npm publish        # private:false, access public (set by publishConfig)
 npx -y agent-communication-system@latest --help   # smoke the published artifact (works only after the first publish)
 ```
 
+After the first publish, rewrite the README Quick start to lead with `npm install -g`, drop the "After the first npm release" paragraph, and set `ACS_CHECK_NPM=1` for the `audit:public` step in CI; `scripts/check-readme-claims.mjs` otherwise keeps failing on the npm command.
+
 ## 4. Tag + GitHub release
 
 ```sh

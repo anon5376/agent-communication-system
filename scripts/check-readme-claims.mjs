@@ -5,9 +5,10 @@
 //  - a harness adapter list that differs from ADAPTERS in src/adapters.ts.
 
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = resolve(process.cwd());
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const readme = readFileSync(resolve(ROOT, "README.md"), "utf8");
 const adaptersSource = readFileSync(resolve(ROOT, "src/adapters.ts"), "utf8");
 const problems = [];

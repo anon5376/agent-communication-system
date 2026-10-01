@@ -473,7 +473,7 @@ Written against `main` at `4d4cf5a` and `rust-port` at `c6df26b`, read from the 
 
 | Feature | TypeScript (`main`) | Rust (`rust-port`) |
 |---|---|---|
-| Bus, tasks, leases, review gate, MCP server, 10 harness adapters | yes | yes |
+| Bus, tasks, leases, review gate, MCP server, harness adapter table (`ADAPTERS`) | yes | yes (`rust/README.md` lists the same adapters) |
 | `task stalled`, `task requeue`, `trace` | yes | yes (`rust/src/cli.rs`) |
 | `supervise --roster`, `supervise --auto-requeue-min` | yes | no |
 | Per-task git worktrees (`claim --worktree`, `"isolation": "worktree"`) | yes | no |
