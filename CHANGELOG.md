@@ -4,6 +4,43 @@ All notable changes to the Agent Communication System. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Stalled-task detection** — claims whose assignee went quiet are listed by
+  `qagent task stalled`; `qagent task requeue` returns a task to the pool;
+  `qagent supervise --auto-requeue-min <n>` requeues dead claims automatically.
+- **`qagent trace <id>`** — a task's full causal chain (events, notes, task
+  mail) in one timeline, as text, `--format json`, or a self-contained HTML
+  export via `--export`.
+- **`qagent supervise --roster`** — runs every roster agent from one
+  supervisor process; a dead sibling no longer orphans the rest.
+- **Registry manifests** — `server.json`, `glama.json`, `smithery.yaml` for
+  MCP-registry submission, plus `docs/submission-pack.md`.
+- **Demo + docs** — `acs` TUI demo GIF in the README, competitive analysis,
+  promotion playbook, standout-features list, launch copy, and a full
+  marketing strategy with a 30-day calendar.
+
+### Changed
+
+- **Efficiency pass** — cached prepared statements on hot paths, batched
+  dashboard delta reads (`agentSummaries`, `messageSummaries`), indexed
+  router lookups, cheaper idle waits, narrower auto-claim candidate reads.
+- **npm packaging** — `private` removed, `files` whitelist (~129 KB tarball),
+  `publishConfig`, `prepack` build, `repository` and `mcpName` metadata;
+  `npm install -g` / `npx` now lead the README install section.
+
+### Fixed
+
+- Expired claims can be released and requeued; a batch of expired claims
+  requeues correctly after the mid-batch expiry sweep; the auto-requeue
+  sweep no longer eats live claims.
+- `public-release-audit` accepts an exact-address `allowedEmails` whitelist
+  (the published SECURITY.md contact) — main's CI is green again.
+- Claim-race test no longer crashes the suite on an expected child-stdin
+  EPIPE.
+
 ## [0.2.0] — 2026-09-30
 
 First public release.
