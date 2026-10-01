@@ -37,7 +37,7 @@ The prototype supports discovery only where a CLI safely exposes it:
 - Other official CLIs: registry configuration unless a stable enumeration command is available.
 - Ollama/LM Studio: documented external discovery paths, not silently scraped by the broker.
 
-`agent-bus doctor` scans the known provider catalog (PATH plus well-known install locations) and reports login commands for missing CLIs. It also probes enabled harnesses. It does not infer login state, subscription entitlement, remaining quota or model access from the presence of a binary.
+`qagent doctor` checks the bus and the operator token. `qagent doctor <agent> [project]` also checks that agent's identity, its entry in the supervisor configuration, and that the configured harness command is on PATH. It does not run the CLI, scan for other providers, or report login commands, and it does not infer login state, subscription entitlement, remaining quota or model access.
 
 ## Primary references inspected
 

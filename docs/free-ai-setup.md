@@ -21,8 +21,9 @@ coordination layer — always free, always local).
 | 5 | **Groq free tier** | $0 | Free Groq API key | ~30 req/min, ~1,000 req/day | Fast cheap workers (gpt-oss, qwen3, kimi-k2) |
 | 6 | **GitHub Models** | Free | Free GitHub account | Per-model daily limits | Extra capacity via an OpenAI-compatible endpoint |
 
-Anything missing or misconfigured is caught by `qagent doctor`, which prints the
-exact install/login command per provider.
+`qagent doctor <agent> <project>` checks an agent's identity, its configuration
+entry, and that its CLI is on PATH. It does not check logins; each option below
+gives its install and login commands.
 
 ---
 
@@ -36,7 +37,8 @@ npm install -g @google/gemini-cli
 gemini            # first run: choose "Login with Google"
 ```
 
-That's the whole setup. In your `agent-bus.config.json`:
+That's the whole setup. In your supervisor config (`.qagent/config.json`, see
+[Putting a free team on the bus](#putting-a-free-team-on-the-bus)):
 
 ```json
 "models": {
@@ -165,8 +167,12 @@ endpoint at it directly.
 ## Putting a free team on the bus
 
 Two layers to set up: **bus identities** (created with `qagent agent add`, which
-writes each agent's token) and **config entries** in `agent-bus.config.json`
-telling the supervisor which harness/model each identity runs.
+writes each agent's token) and **config entries** in the project's
+`.qagent/config.json` telling the supervisor which harness/model each identity
+runs. Start that file from a copy of the shipped `agent-bus.config.json` at the
+root of your ACS checkout; it holds the roles, routing and constraints every
+config needs, and its `providers`, `harnesses`, `models` and `agents` start
+empty.
 
 ### Recommended preset — all-free OpenCode team
 
@@ -185,7 +191,53 @@ qagent agent add worker-2 --role implementation --authority worker
 qagent agent add worker-3 --role implementation --authority worker
 ```
 
-2. Add the model entries (capabilities are required — every score must be
+2. Create the config in your project and add the provider and harness each
+   model refers to (`google`/`gemini` is only needed for the Option 1 model,
+   `ollama` only for the Option 3 model):
+
+```sh
+mkdir -p .qagent
+cp <acs-checkout>/agent-bus.config.json .qagent/config.json
+```
+
+```json
+"providers": {
+  "google": {
+    "id": "google", "displayName": "Google", "authKind": "subscription",
+    "authSource": "Gemini CLI login", "subscriptionBacked": true, "enabled": true
+  },
+  "opencode": {
+    "id": "opencode", "displayName": "OpenCode", "authKind": "subscription",
+    "authSource": "OpenCode provider account", "subscriptionBacked": true, "enabled": true
+  },
+  "ollama": {
+    "id": "ollama", "displayName": "Ollama", "authKind": "local",
+    "authSource": "Local Ollama runtime", "subscriptionBacked": false, "enabled": true
+  }
+},
+"harnesses": {
+  "gemini": {
+    "id": "gemini", "adapter": "gemini", "command": "gemini", "providers": ["google"],
+    "enabled": true,
+    "features": {
+      "headless": true, "resume": true, "mcp": true, "structuredOutput": true,
+      "streaming": true, "cancellation": true, "modelSelection": true,
+      "reasoningControl": false, "usageReporting": false
+    }
+  },
+  "opencode": {
+    "id": "opencode", "adapter": "opencode", "command": "opencode", "providers": ["opencode", "ollama"],
+    "enabled": true,
+    "features": {
+      "headless": true, "resume": true, "mcp": true, "structuredOutput": true,
+      "streaming": true, "cancellation": true, "modelSelection": true,
+      "reasoningControl": true, "usageReporting": true
+    }
+  }
+}
+```
+
+3. Add the model entries (capabilities are required — every score must be
    present, `0`–`1`):
 
 ```json
@@ -221,7 +273,7 @@ qagent agent add worker-3 --role implementation --authority worker
 }
 ```
 
-3. Add the agents — `harnessOptions.variant: "xhigh"` selects the high-effort
+4. Add the agents — `harnessOptions.variant: "xhigh"` selects the high-effort
    reasoning variant on the muse-spark agents:
 
 ```json
@@ -289,7 +341,7 @@ the workers (a good practice, e.g. `gemini-free`; ACS does not enforce it yet), 
 Then:
 
 ```sh
-qagent doctor                     # verifies every harness/login is reachable
+qagent doctor planner .           # identity, config entry, CLI on PATH (not login)
 qagent supervise planner .        # one supervisor per agent (a terminal/tab each)
 # or, on newer versions: qagent supervise --roster .
 ```

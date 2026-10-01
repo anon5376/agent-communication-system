@@ -60,6 +60,13 @@ All notable changes to the Agent Communication System. Format follows
 
 ### Fixed
 
+- `qagent` no longer prints Node's `node:sqlite` ExperimentalWarning on every
+  command; other warnings still print.
+- `docs/free-ai-setup.md` now builds a config that validates: it says the
+  supervisor reads `<project>/.qagent/config.json` (started from a copy of the
+  shipped `agent-bus.config.json`) and adds the provider and harness entries its
+  models refer to. It and `docs/provider-support.md` no longer say that
+  `qagent doctor` scans for providers, prints login commands or checks logins.
 - Worktree creation no longer blocks on a stale lock: a lock whose holder
   died, never wrote its owner file, or stopped heartbeating (pid reuse) is
   swept. Worktree cleanup (`task worktree --remove`, `prune`) now works after
