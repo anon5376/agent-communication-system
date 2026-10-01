@@ -14,6 +14,7 @@
   },
   "files": [
     "dist",
+    "schema",
     "agent-bus.config.json"
   ],
   "publishConfig": {
@@ -36,7 +37,7 @@
     "test:lifecycle": "node scripts/v2-cli-smoke.mjs",
     "test": "npm run build && npm run test:dist && npm run test:unit && npm run test:browser && npm run test:lifecycle",
     "check": "npm test",
-    "audit:public": "node scripts/public-release-audit.mjs",
+    "audit:public": "node scripts/public-release-audit.mjs && node scripts/check-readme-claims.mjs",
     "audit:public:history": "node scripts/public-release-audit.mjs --history"
   },
   "dependencies": {

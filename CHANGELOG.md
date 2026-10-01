@@ -16,6 +16,15 @@ All notable changes to the Agent Communication System. Format follows
   starts a real run (see `bench/README.md`); `--fake` runs the same scoring
   and reporting on the fake harness, which CI does. No new dependencies; the
   fake harness now handles `[TASK #n]` mail and can submit scripted reports.
+- **Numbered schema migrations** — the bus schema now lives in ordered files
+  under `schema/` (`001-baseline.sql` is the exact schema of 0.2.0) and
+  `meta.schema_version` is the highest applied number. Pending migrations run
+  in one `BEGIN IMMEDIATE` transaction on open; existing version-1 buses open
+  unchanged. A database written by a newer schema is now refused with an
+  "upgrade qagent" error instead of having its version marker overwritten
+  (read-only opens still work); binaries from before this change keep the old
+  overwrite behaviour. Migrations are additive only. TypeScript build only:
+  the Rust port still carries its own copy of the baseline schema.
 - **Per-task git worktrees** — `qagent task claim --worktree` (and
   `bus_task_claim` with `worktree: true`) gives the task its own checkout on
   branch `qagent/task-<N>-<id>` under `~/.agent-bus/worktrees/`;
@@ -46,10 +55,25 @@ All notable changes to the Agent Communication System. Format follows
   router lookups, cheaper idle waits, narrower auto-claim candidate reads.
 - **npm packaging** — `private` removed, `files` whitelist (~129 KB tarball),
   `publishConfig`, `prepack` build, `repository` and `mcpName` metadata;
-  `npm install -g` / `npx` now lead the README install section.
+  the README install section is written for the post-publish state; until the
+  first publish it leads with clone, `npm ci`, `npm run build`, `npm link`.
 
 ### Fixed
 
+- Worktree creation no longer blocks on a stale lock: a lock whose holder
+  died, never wrote its owner file, or stopped heartbeating (pid reuse) is
+  swept. Worktree cleanup (`task worktree --remove`, `prune`) now works after
+  the task's project directory is deleted; if the whole repository is gone the
+  orphaned checkout is deleted with `--force`.
+- README and docs no longer claim what the code does not back: the install
+  section leads with clone-and-build (the package is not on npm yet), review is
+  described as "by someone other than the assignee" (the gate does not check
+  model family), the `acs` TUI is labelled as the `rust-port` branch's, the
+  adapter list matches `ADAPTERS`, and the competitive analysis now includes
+  Hermes Agent. `npm run audit:public` also runs `scripts/check-readme-claims.mjs`.
+- `tests/wait-notify.test.ts` no longer fails on one slow wake-up under load:
+  the `bus_wait` test holds the median of five rounds to the bound, the signal-file test
+  asserts against the poll interval, and a fake-clock test pins the poll bound.
 - Expired claims can be released and requeued; a batch of expired claims
   requeues correctly after the mid-batch expiry sweep; the auto-requeue
   sweep no longer eats live claims.
@@ -60,7 +84,7 @@ All notable changes to the Agent Communication System. Format follows
 
 ## [0.2.0] — 2026-09-30
 
-First public release.
+Tagged on GitHub as `v0.2.0`; not yet published to npm.
 
 ### Added
 

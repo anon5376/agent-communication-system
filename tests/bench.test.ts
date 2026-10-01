@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { SCHEMA_SQL } from "../src/core/db.js";
+import { openDatabase } from "../src/core/db.js";
 
 const BENCH = join(process.cwd(), "bench");
 const MIN = 60_000;
@@ -44,8 +43,7 @@ function buildRun(root: string, arm: string, invalid: { reason: string; ms: numb
   git(workdir, ["commit", "--quiet", "-m", "base"]);
   const baseSha = git(workdir, ["rev-parse", "HEAD"]);
 
-  const db = new DatabaseSync(join(home, "bus.db"));
-  db.exec(SCHEMA_SQL);
+  const db = openDatabase(join(home, "bus.db"));
   const report = JSON.stringify({
     items: ["alpha", "Beta", "epsilon"],
     claims: [
@@ -190,8 +188,7 @@ test("validate integrates accepted task branches, reports collisions, and runs t
     branch(3, { "c.txt": "three\n", "dist/out.js": "from three\n" });
     git(workdir, ["checkout", "--quiet", "main"]);
 
-    const db = new DatabaseSync(join(home, "bus.db"));
-    db.exec(SCHEMA_SQL);
+    const db = openDatabase(join(home, "bus.db"));
     const insertTask = db.prepare("INSERT INTO tasks(id, title, state, creator, assignee, role, round, created_ms, updated_ms) VALUES(?, ?, 'accepted', 'mgr', 'w', 'implementation', 1, ?, ?)");
     const insertEvent = db.prepare("INSERT INTO events(ts_ms, actor, kind, entity, entity_id, data_json) VALUES(?, 'mgr', 'task_accepted', 'task', ?, '{\"round\":1}')");
     for (const id of [1, 2, 3]) { insertTask.run(id, `I0${id}: t`, T0, T0); insertEvent.run(T0 + id, String(id)); }

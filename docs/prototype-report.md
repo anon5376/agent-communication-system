@@ -68,7 +68,7 @@ The test suite uses temporary SQLite databases and deterministic fake harnesses.
 - cancellation and lease release;
 - retry, fallback and escalation;
 - restart recovery with the same credentials and graph;
-- deterministic routing, exact-model/family policy and independent review;
+- deterministic routing, exact-model/family policy and independent-family review in the router (not on the coordination path; the bus gate only blocks self-review);
 - adapter command normalization and malformed output;
 - fake harness execution and usage reporting;
 - telemetry persistence and routing input.
