@@ -1,68 +1,21 @@
 //! One SQLite file in WAL mode, opened directly by every process.
 //! Mirrors src/core/db.ts: pragmas, schema bootstrap, transaction helper.
 
-use crate::error::Result;
+use crate::error::{BusError, Result};
 use rusqlite::Connection;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: &str = "1";
 pub const BUSY_TIMEOUT_MS: u32 = 5000;
 
-pub const SCHEMA_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS agents (
-  id TEXT PRIMARY KEY CHECK (id <> '' AND id NOT GLOB '*[^A-Za-z0-9._-]*'),
-  role TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', harness TEXT NOT NULL DEFAULT '',
-  parent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
-  status TEXT NOT NULL DEFAULT 'offline',
-  wait_until_ms INTEGER, last_seen_ms INTEGER, created_ms INTEGER NOT NULL, meta_json TEXT NOT NULL DEFAULT '{}');
-CREATE TABLE IF NOT EXISTS identities (
-  agent_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
-  authority TEXT NOT NULL CHECK (authority IN ('operator','manager','worker')),
-  permissions_json TEXT NOT NULL, created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS messages (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, ts_ms INTEGER NOT NULL,
-  sender TEXT NOT NULL, recipient TEXT,
-  type TEXT NOT NULL DEFAULT 'info', subject TEXT NOT NULL DEFAULT '', body TEXT NOT NULL,
-  thread TEXT NOT NULL DEFAULT '', task_id INTEGER, refs_json TEXT NOT NULL DEFAULT '[]',
-  requires_ack INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'v2');
-CREATE INDEX IF NOT EXISTS messages_inbox ON messages(recipient, seq);
-CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread, seq);
-CREATE INDEX IF NOT EXISTS messages_task ON messages(task_id, seq);
-CREATE TABLE IF NOT EXISTS cursors (agent_id TEXT PRIMARY KEY, last_seq INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS acks (seq INTEGER NOT NULL, agent_id TEXT NOT NULL, ack_ms INTEGER NOT NULL, PRIMARY KEY (seq, agent_id));
-CREATE TABLE IF NOT EXISTS tasks (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, legacy_id TEXT UNIQUE, project TEXT,
-  parent_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
-  title TEXT NOT NULL, brief TEXT NOT NULL DEFAULT '', acceptance TEXT NOT NULL DEFAULT '',
-  role TEXT NOT NULL DEFAULT '', priority TEXT NOT NULL DEFAULT 'normal',
-  state TEXT NOT NULL CHECK (state IN ('open','blocked','claimed','submitted','changes_requested',
-                                        'accepted','failed','cancelled')),
-  creator TEXT NOT NULL, assignee TEXT, reviewer TEXT,
-  path_scopes_json TEXT NOT NULL DEFAULT '[]', refs_json TEXT NOT NULL DEFAULT '[]',
-  result_json TEXT, review_json TEXT, round INTEGER NOT NULL DEFAULT 1,
-  attempts INTEGER NOT NULL DEFAULT 0, max_retries INTEGER NOT NULL DEFAULT 2,
-  claim_expires_ms INTEGER, created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS tasks_board ON tasks(state, assignee, updated_ms);
-CREATE INDEX IF NOT EXISTS tasks_parent ON tasks(parent_id);
-CREATE INDEX IF NOT EXISTS tasks_project ON tasks(project, state);
-CREATE TABLE IF NOT EXISTS task_deps (task_id INTEGER NOT NULL, depends_on INTEGER NOT NULL, PRIMARY KEY (task_id, depends_on));
-CREATE INDEX IF NOT EXISTS task_deps_rev ON task_deps(depends_on);
-CREATE TABLE IF NOT EXISTS task_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, author TEXT NOT NULL,
-  ts_ms INTEGER NOT NULL, body TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS task_notes_task ON task_notes(task_id);
-CREATE TABLE IF NOT EXISTS leases (project TEXT NOT NULL, path TEXT NOT NULL, task_id INTEGER NOT NULL,
-  created_ms INTEGER NOT NULL, PRIMARY KEY (task_id, path));
-CREATE INDEX IF NOT EXISTS leases_project ON leases(project, path);
-CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER NOT NULL, actor TEXT NOT NULL,
-  kind TEXT NOT NULL, entity TEXT NOT NULL, entity_id TEXT NOT NULL, data_json TEXT NOT NULL DEFAULT '{}',
-  source TEXT NOT NULL DEFAULT 'v2');
-CREATE INDEX IF NOT EXISTS events_entity ON events(entity, entity_id, seq);
-CREATE TABLE IF NOT EXISTS usage (agent_id TEXT NOT NULL, day TEXT NOT NULL, turns INTEGER, input_tokens INTEGER,
-  output_tokens INTEGER, cost_usd REAL, latency_ms INTEGER, PRIMARY KEY (agent_id, day));
-"#;
+/// Ordered, additive-only migrations shared with the TypeScript build (`schema/NNN-name.sql` at the
+/// repo root). Adding a file means adding a line here; `tests/schema_tests.rs` fails if they drift.
+pub const MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    name: "baseline",
+    sql: include_str!("../../schema/001-baseline.sql"),
+}];
 
 /// Database path: --db flag, then QAGENT_BUS_DB, then <QAGENT_HOME or AGENT_BUS_HOME or ~/.agent-bus>/bus.db.
 pub fn resolve_db_path(flag: Option<&str>) -> PathBuf {
@@ -133,7 +86,14 @@ pub fn home_for(db_path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn schema_ready(conn: &Connection) -> Result<bool> {
+pub struct Migration {
+    pub version: u32,
+    pub name: &'static str,
+    pub sql: &'static str,
+}
+
+/// The version marker: 0 for an empty database, otherwise the highest applied migration.
+pub fn current_schema_version(conn: &Connection) -> Result<u32> {
     let table: Option<i64> = conn
         .query_row(
             "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
@@ -142,21 +102,77 @@ fn schema_ready(conn: &Connection) -> Result<bool> {
         )
         .ok();
     if table.is_none() {
-        return Ok(false);
+        return Ok(0);
     }
-    let version: Option<String> = conn
+    let value: Option<String> = conn
         .query_row(
             "SELECT value FROM meta WHERE key = 'schema_version'",
             [],
             |row| row.get(0),
         )
         .ok();
-    Ok(version.as_deref() == Some(SCHEMA_VERSION))
+    match value {
+        None => Ok(0),
+        Some(text) => {
+            if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(BusError::invalid(format!(
+                    "bus database has an unreadable schema_version: {text:?}"
+                )));
+            }
+            text.parse::<u32>().map_err(|_| {
+                BusError::invalid(format!("bus database has an unreadable schema_version: {text:?}"))
+            })
+        }
+    }
+}
+
+fn newer_schema_error(found: u32, known: u32, path: &str) -> BusError {
+    BusError::invalid(format!(
+        "bus database {path} is at schema version {found}, but this qagent only knows up to {known}: upgrade qagent (it will not write to a newer schema)"
+    ))
+}
+
+/// Bring the database up to the newest migration in one BEGIN IMMEDIATE transaction. The version
+/// is re-read inside the transaction so concurrent first opens apply each migration once. A
+/// database newer than the migrations is refused, never rewritten.
+pub fn migrate_with(conn: &Connection, path: &str, migrations: &[Migration]) -> Result<()> {
+    let known = migrations.len() as u32;
+    let found = current_schema_version(conn)?;
+    if found > known {
+        return Err(newer_schema_error(found, known, path));
+    }
+    if found == known {
+        return Ok(());
+    }
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let outcome = (|| -> Result<()> {
+        let start = current_schema_version(conn)?;
+        if start > known {
+            return Err(newer_schema_error(start, known, path));
+        }
+        for migration in &migrations[start as usize..] {
+            conn.execute_batch(migration.sql)?;
+            set_meta(conn, "schema_version", &migration.version.to_string())?;
+        }
+        Ok(())
+    })();
+    match outcome {
+        Ok(()) => conn.execute_batch("COMMIT")?,
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+pub fn migrate(conn: &Connection, path: &str) -> Result<()> {
+    migrate_with(conn, path, MIGRATIONS)
 }
 
 /// Open the bus. The busy timeout is set before anything else so concurrent first
-/// opens wait for each other. The schema is only written when it is missing, so an
-/// ordinary open performs no write at all.
+/// opens wait for each other. The schema is only written when it is missing or behind, so an
+/// ordinary open performs no write at all. A newer schema is refused.
 pub fn open_database(path: &Path) -> Result<Connection> {
     let dir = path.parent().unwrap_or(Path::new("."));
     if !dir.exists() {
@@ -174,24 +190,7 @@ pub fn open_database(path: &Path) -> Result<Connection> {
         conn.execute_batch("PRAGMA journal_mode = WAL")?;
     }
     conn.execute_batch("PRAGMA foreign_keys = ON")?;
-    if !schema_ready(&conn)? {
-        conn.execute_batch("BEGIN IMMEDIATE")?;
-        let outcome = (|| -> Result<()> {
-            conn.execute_batch(SCHEMA_SQL)?;
-            conn.execute(
-                "INSERT INTO meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [SCHEMA_VERSION],
-            )?;
-            Ok(())
-        })();
-        match outcome {
-            Ok(()) => conn.execute_batch("COMMIT")?,
-            Err(error) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(error);
-            }
-        }
-    }
+    migrate(&conn, &path.display().to_string())?;
     Ok(conn)
 }
 
