@@ -11,7 +11,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::db::{absolutize, append_event, get_meta, open_database, set_meta, SCHEMA_SQL};
+use crate::db::{absolutize, append_event, get_meta, open_database, set_meta};
 use crate::error::Result;
 use crate::identity::is_safe_agent_id;
 use crate::types::OPERATOR_ID;
@@ -1141,7 +1141,7 @@ fn meta_key(sha256: &str) -> String {
 fn open_target(db_path: &Path, dry_run: bool) -> Result<Connection> {
     if dry_run && !db_path.exists() {
         let conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA_SQL)?;
+        crate::db::migrate(&conn, ":memory:")?;
         return Ok(conn);
     }
     open_database(db_path)
