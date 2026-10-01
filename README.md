@@ -8,6 +8,8 @@ Coordination lives in one SQLite file. The CLI and MCP server open it directly, 
 
 ![acs terminal UI demo](docs/assets/acs-demo.gif)
 
+*The `acs` terminal UI (Rust, `rust-port` branch; not part of the npm package or this branch's build). See [Terminal UI](#terminal-ui).*
+
 **Why not…**
 
 - *…CrewAI/AutoGen/LangGraph?* Different layer. Those define agents inside a runtime; ACS is the mailbox and task board underneath the standalone CLIs you already run — mix Claude Code, Codex, and a local model on one bus.
@@ -19,26 +21,15 @@ Coordination lives in one SQLite file. The CLI and MCP server open it directly, 
 - Verified agent identities with per-agent tokens.
 - Direct, multi-recipient, and broadcast messages.
 - Threads, acknowledgements, typed messages, and file or URL references.
-- Tasks with assignment, dependencies, claims, path leases, progress notes, submission, and independent review.
+- Tasks with assignment, dependencies, claims, path leases, progress notes, submission, and review by someone other than the assignee.
 - A stdio MCP server with 14 agent tools and one operator-only tool.
-- Harness adapters for Claude Code, Codex, Gemini, Kimi, OpenCode, and OpenAI-compatible CLIs.
+- Harness adapters: `claude`, `codex`, `gemini`, `kimi`, `cursor`, `grok`, `opencode`, `hermes`, plus any other CLI through the `command` adapter.
 - A localhost-only dashboard and an optional supervisor.
 - Import tools for earlier Qagent and Python prototype stores.
 
 ## Quick start
 
-Requires Node.js 22.13 or newer. Install globally, or run straight through `npx`:
-
-```bash
-npm install -g agent-communication-system
-# or: npx -p agent-communication-system qagent <command>
-
-qagent init
-qagent agent add claude --role manager --authority manager
-qagent agent add codex --role worker
-```
-
-Building from source instead (contributors):
+Requires Node.js 22.13 or newer. The package is not on npm yet, so build from source:
 
 ```bash
 git clone https://github.com/anon5376/agent-communication-system.git
@@ -46,7 +37,13 @@ cd agent-communication-system
 npm ci
 npm run build
 npm link
+
+qagent init
+qagent agent add claude --role manager --authority manager
+qagent agent add codex --role worker
 ```
+
+After the first npm release (not published yet), `npm install -g agent-communication-system` or `npx -p agent-communication-system qagent <command>` will replace the clone-and-build steps.
 
 Every agent names itself with `QAGENT_AGENT_ID` or `--as <id>`:
 
@@ -62,6 +59,10 @@ Generate MCP client configuration without copying tokens into configuration file
 qagent mcp-config --agent claude --client claude
 qagent mcp-config --agent codex --client codex
 ```
+
+## Terminal UI
+
+The `acs` terminal UI in the demo above is part of the Rust implementation on the `rust-port` branch. It is not built by this branch and is not in the npm package. It opens the same `bus.db`, tokens, and signal files as the TypeScript `qagent`, so both can drive one bus. To build it, follow the install steps in the [`rust-port` README](https://github.com/anon5376/agent-communication-system/blob/rust-port/README.md) (Rust toolchain, then `./rust/install.sh`). The two implementations differ in some commands; see [Implementation differences](docs/FULL-GUIDE.md#implementation-differences).
 
 ## Documentation
 

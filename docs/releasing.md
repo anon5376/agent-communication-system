@@ -29,7 +29,7 @@ Requires PR #4 (publishable package: `private` dropped, `files` whitelist,
 npm login          # once, owner account
 npm pack           # inspect the tarball contents
 npm publish        # private:false, access public (set by publishConfig)
-npx -y agent-communication-system@latest --help   # smoke the published artifact
+npx -y agent-communication-system@latest --help   # smoke the published artifact (works only after the first publish)
 ```
 
 ## 4. Tag + GitHub release

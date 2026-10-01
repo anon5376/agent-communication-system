@@ -464,3 +464,19 @@ git diff --check
 The public audit rejects common credential formats, private absolute home paths, local project markers, tracked environment files, and unsafe commit metadata. It reports file and line locations without printing the matched value.
 
 Automated checks reduce risk; they do not prove that prose, screenshots, fixtures, or Git history contain no private information. Review the staged diff and the final public repository separately.
+
+## Implementation differences
+
+ACS exists twice on one SQLite schema: TypeScript on `main` (the npm package) and Rust on the `rust-port` branch. They share `bus.db`, tokens, and signal files. They do not have the same commands. Where one side lacks a feature, that is a gap, not a design choice.
+
+Written against `main` at `4d4cf5a` and `rust-port` at `c6df26b`, read from the source on 2026-10-01 (nothing was executed to produce this table). `rust-port` is behind `main`, so some rows may already be out of date there.
+
+| Feature | TypeScript (`main`) | Rust (`rust-port`) |
+|---|---|---|
+| Bus, tasks, leases, review gate, MCP server, 10 harness adapters | yes | yes |
+| `task stalled`, `task requeue`, `trace` | yes | yes (`rust/src/cli.rs`) |
+| `supervise --roster`, `supervise --auto-requeue-min` | yes | no |
+| Per-task git worktrees (`claim --worktree`, `"isolation": "worktree"`) | yes | no |
+| Web dashboard | yes | yes (`rust/src/dashboard.rs`) |
+| `acs` terminal UI | no | yes (`rust/src/app.rs`) |
+| Family-aware router (`src/router.ts`) | present but not on the coordination path | no |
