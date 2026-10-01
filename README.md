@@ -9,18 +9,60 @@
 
 ## Install the TUI (`acs`)
 
+Building from source requires Git, the **Rust toolchain** (`cargo` and `rustc`),
+and a C compiler/linker. Install Rust with [rustup](https://rustup.rs/), then
+open a new terminal and check that both commands are available:
+
+```sh
+cargo --version
+rustc --version
+```
+
+On macOS, install Apple's Command Line Tools if you do not already have them,
+and finish the installer before continuing:
+
+```sh
+xcode-select --install
+```
+
+On Linux, install your distribution's C build tools (for example,
+`build-essential` on Debian/Ubuntu).
+
+Run these commands from the directory where you want to clone the repository.
+If you already have a checkout, enter it and skip the first two commands:
+
 ```bash
 git clone https://github.com/anon5376/agent-communication-system.git
 cd agent-communication-system
 git checkout rust-port
-./rust/install.sh        # builds and installs `acs` globally
-                         # (/usr/local/bin, or ~/.local/bin if no sudo)
+./rust/install.sh
 ```
 
-Then run `acs` from anywhere. First launch creates your bus automatically and
+The script builds `acs` and installs it in `/usr/local/bin`, using `sudo` if
+needed. If that installation fails, it falls back to `~/.local/bin`. When using
+the fallback directory, add it to your shell's PATH (and your shell startup
+file to keep the change across terminals):
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+After the build and installation succeed, start the dashboard:
+
+```sh
+acs
+```
+
+You can run `acs` from anywhere. First launch creates your bus automatically and
 offers a **team-setup wizard** — space toggles preset agents (planner,
 orchestrator/lead, worker-hard, worker-easy), Enter creates them with starter
 charters in their inboxes.
+
+If installation reports `cargo: command not found`, install Rust and check
+`cargo --version` before rerunning `./rust/install.sh`. If `acs` is still not
+found after a successful installation, check that the reported install directory
+is on your PATH. The command blocks above contain only commands; keep explanatory
+comments and Markdown link formatting out of terminal pastes.
 
 **Keys:** `tab`/`←→` or click — switch panes · `↑↓`/`jk`/wheel — select ·
 `m` — send a message (pick the recipient from a list) · `t` — new task ·
