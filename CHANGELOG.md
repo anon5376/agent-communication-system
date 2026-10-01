@@ -10,10 +10,13 @@ All notable changes to the Agent Communication System. Format follows
 
 - **Per-task git worktrees** — `qagent task claim --worktree` (and
   `bus_task_claim` with `worktree: true`) gives the task its own checkout on
-  branch `qagent/task-<N>` under `~/.agent-bus/worktrees/`;
+  branch `qagent/task-<N>-<id>` under `~/.agent-bus/worktrees/`;
   `qagent task worktree <N> [--remove]` and `task worktree prune` manage them.
-  With `"isolation": "worktree"` the supervisor runs single-task turns inside
-  that checkout.
+  With `"isolation": "worktree"` the supervisor runs single-task turns for a
+  claimed task inside that checkout and resumes a per-task CLI session.
+  TypeScript build only: the Rust port ignores `"isolation": "worktree"` and
+  has no `--worktree` flag or `task worktree` command; the bus schema is
+  unchanged, so both builds still share one bus.
 - **Stalled-task detection** — claims whose assignee went quiet are listed by
   `qagent task stalled`; `qagent task requeue` returns a task to the pool;
   `qagent supervise --auto-requeue-min <n>` requeues dead claims automatically.

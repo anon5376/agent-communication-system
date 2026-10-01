@@ -12,7 +12,7 @@ import { agentIdFromEnv } from "../core/identity.js";
 import { defaultImportSources, runImport } from "../core/import.js";
 import { waitForMail, waitSeconds } from "../notify/wait.js";
 import { BusError, OPERATOR_ID } from "../core/types.js";
-import { ensureTaskWorktree, pruneTaskWorktrees, removeTaskWorktree } from "../worktree.js";
+import { ensureTaskWorktree, pruneTaskWorktrees, removeTaskWorktree, repoRootFor } from "../worktree.js";
 import { renderAgents, renderEvent, renderImport, renderMessages, renderStatus, renderTask, renderTasks, renderTrace, renderTraceHtml } from "./format.js";
 const defaultIo = {
     stdout: (text) => { process.stdout.write(text); },
@@ -410,13 +410,25 @@ async function taskCommand(ctx, sub) {
         case "claim": {
             const me = ctx.identity();
             const id = ctx.parsed.positionals[2] === undefined ? null : ctx.taskId(2);
+            const wantTree = ctx.flag("worktree") === true;
+            // With an explicit task the repository check runs before the claim, so a bad project leaves it unclaimed.
+            if (wantTree && id !== null)
+                await repoRootFor(bus.getTask(id));
             const task = bus.claimTask(me, id);
-            if (ctx.flag("worktree") !== true) {
+            if (!wantTree) {
                 ctx.out(task, `claimed task #${task.id}: ${task.title}`);
                 return 0;
             }
-            const worktree = ensureTaskWorktree(task, bus.home);
-            ctx.out({ ...task, worktree }, `claimed task #${task.id}: ${task.title}\nworktree ${worktree.workdir} (branch ${worktree.branch})`);
+            // Same as the MCP tool: once claimed, the claim stands even if the checkout cannot be made.
+            let worktree = null;
+            let worktreeError = null;
+            try {
+                worktree = await ensureTaskWorktree(task, bus.home);
+            }
+            catch (error) {
+                worktreeError = error.message;
+            }
+            ctx.out({ ...task, worktree, worktreeError }, `claimed task #${task.id}: ${task.title}\n${worktree ? `worktree ${worktree.workdir} (branch ${worktree.branch})` : `no worktree: ${worktreeError}`}`);
             return 0;
         }
         case "note": {
@@ -463,19 +475,29 @@ async function taskCommand(ctx, sub) {
             return 0;
         }
         case "worktree": {
+            const me = ctx.identity(true);
+            const force = ctx.flag("force") === true;
             if (ctx.parsed.positionals[2] === "prune") {
-                const results = pruneTaskWorktrees(bus, { force: ctx.flag("force") === true });
+                if (force && me.authority !== "operator")
+                    throw new BusError("forbidden", "only the operator may prune worktrees with --force");
+                const results = await pruneTaskWorktrees(bus, { force });
                 const text = results.map((r) => `#${r.taskId} ${r.removed ? "removed" : "kept"}: ${r.reason}`).join("\n");
                 ctx.out(results, text || "(no task worktrees)");
                 return 0;
             }
             const task = bus.getTask(ctx.taskId(2));
             if (ctx.flag("remove") === true) {
-                const result = removeTaskWorktree(task, bus.home, { force: ctx.flag("force") === true });
+                if (me.authority !== "operator" && me.agentId !== task.assignee)
+                    throw new BusError("forbidden", `only ${task.assignee ?? "the assignee"} or the operator may remove the worktree of task ${task.id}`);
+                if (force && me.authority !== "operator")
+                    throw new BusError("forbidden", "only the operator may remove a worktree with --force");
+                const result = await removeTaskWorktree(task, bus.home, { force });
                 ctx.out(result, result.removed ? `removed worktree ${result.path} (branch ${result.branch} kept)` : `no worktree for task #${task.id}`);
                 return 0;
             }
-            const worktree = ensureTaskWorktree(task, bus.home);
+            if (me.authority !== "operator" && me.agentId !== task.assignee)
+                throw new BusError("forbidden", `only ${task.assignee ?? "the assignee"} or the operator may open a worktree for task ${task.id}`);
+            const worktree = await ensureTaskWorktree(task, bus.home);
             ctx.out(worktree, `${worktree.workdir} (branch ${worktree.branch}${worktree.created ? ", created" : ""})`);
             return 0;
         }

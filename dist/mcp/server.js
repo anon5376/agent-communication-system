@@ -166,15 +166,15 @@ export function createBusServer(bus, options) {
         inputSchema: { task_id: z.number().int().positive() },
     }, async (input) => run(() => renderTask(bus.getTask(input.task_id))));
     server.registerTool("bus_task_claim", {
-        description: "Claim a task. Without task_id, takes the most urgent open task assigned to you, or unassigned for your role. Claims expire after two hours without a note or submit. With worktree: true, also returns a private git worktree for the task (branch qagent/task-<id>); make your edits and commits there.",
+        description: "Claim a task. Without task_id, takes the most urgent open task assigned to you, or unassigned for your role. Claims expire after two hours without a note or submit. With worktree: true, also returns a private git worktree for the task (its own branch); make your edits and commits there.",
         inputSchema: { task_id: z.number().int().positive().optional(), worktree: z.boolean().optional() },
-    }, async (input) => run((identity) => {
+    }, async (input) => run(async (identity) => {
         const task = bus.claimTask(identity, input.task_id ?? null);
         const text = `${renderTaskLine(task, "Claimed")}\n\n${renderTask(bus.getTask(task.id))}`;
         if (!input.worktree)
             return text;
         try {
-            const worktree = ensureTaskWorktree(task, bus.home);
+            const worktree = await ensureTaskWorktree(task, bus.home);
             return `${text}\n\nWorktree: ${worktree.workdir} (branch ${worktree.branch}). Edit and commit there, not in ${task.project}.`;
         }
         catch (error) {

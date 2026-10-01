@@ -25,7 +25,7 @@ The MCP server exposes `bus_agent_add` only when started with `--operator`, and 
 
 ## Path leases
 
-A task can declare path scopes inside a project directory. Claiming the task takes leases on those paths, and a claim whose scopes overlap another task's leases is refused. Leases prevent two agents from being handed the same files. They do not stop a process from writing outside its scope; for that, use per-task git worktrees (`qagent task claim --worktree`, or `"isolation": "worktree"` for the supervisor) or the harness's own sandbox. A worktree separates checkouts, not permissions: the agent process can still reach any path its user can.
+A task can declare path scopes inside a project directory. Claiming the task takes leases on those paths, and a claim whose scopes overlap another task's leases is refused. Leases prevent two agents from being handed the same files. They do not stop a process from writing outside its scope; for that, use per-task git worktrees (`qagent task claim --worktree`, or `"isolation": "worktree"` for the supervisor; TypeScript build only) or the harness's own sandbox. A worktree separates checkouts, not permissions: the agent process can still reach any path its user can.
 
 ## Input limits
 

@@ -378,27 +378,27 @@ export async function supervise(options) {
             }
             if (!messages.length && !tasks.length)
                 continue;
-            // isolation "worktree": a turn about exactly one task runs in that task's checkout.
-            // CLI sessions are tied to their directory, so such a turn starts a fresh session.
+            // isolation "worktree": a turn about exactly one task this agent holds (or is assigned)
+            // runs in that task's checkout. Unclaimed candidates are never isolated: every same-role
+            // supervisor would race for the same checkout.
             let worktree = null;
             const focus = new Set([...taskIds, ...tasks.map((task) => task.id)]);
             if (config.constraints.isolation === "worktree" && focus.size === 1) {
                 const [focusId] = focus;
-                if (pinnedSessionId) {
-                    log(`task #${focusId}: worktree isolation skipped, ${agent.id} pins session ${pinnedSessionId}`);
+                try {
+                    const task = bus.getTask(focusId);
+                    if (pinnedSessionId)
+                        log(`task #${focusId}: worktree isolation skipped, ${agent.id} pins session ${pinnedSessionId}`);
+                    else if (task.project && task.assignee === me.agentId)
+                        worktree = await ensureTaskWorktree(task, home);
                 }
-                else {
-                    try {
-                        const task = bus.getTask(focusId);
-                        if (task.project)
-                            worktree = ensureTaskWorktree(task, home);
-                    }
-                    catch (error) {
-                        log(`task #${focusId}: worktree unavailable, running in ${workdir}: ${error.message}`);
-                    }
+                catch (error) {
+                    log(`task #${focusId}: worktree unavailable, running in ${workdir}: ${error.message}`);
                 }
             }
             const turnDir = worktree?.workdir ?? workdir;
+            // CLI sessions are tied to their directory: a worktree turn resumes that task's own session.
+            const taskSession = worktree ? session.taskSessions?.[worktree.branch] ?? null : null;
             if (worktree)
                 log(`task #${worktree.taskId}: running in worktree ${worktree.workdir} (branch ${worktree.branch})`);
             let prompt = buildBrief(agent, messages, tasks, managed);
@@ -407,7 +407,7 @@ export async function supervise(options) {
             const context = {
                 agent,
                 prompt,
-                sessionId: worktree ? null : session.sessionId,
+                sessionId: worktree ? taskSession : session.sessionId,
                 pinnedSessionId,
                 workdir: turnDir,
                 mcpServerPath: qagentBin,
@@ -441,7 +441,9 @@ export async function supervise(options) {
             session.latencyMs += processResult.durationMs;
             if (pinnedSessionId)
                 session.sessionId = pinnedSessionId;
-            else if (normalized.sessionId && !worktree)
+            else if (normalized.sessionId && worktree)
+                session.taskSessions = { ...session.taskSessions, [worktree.branch]: normalized.sessionId };
+            else if (normalized.sessionId)
                 session.sessionId = normalized.sessionId;
             writeFileSync(sessionPath, JSON.stringify(session, null, 2));
             const reportIds = new Set([...taskIds, ...tasks.map((task) => task.id)]);

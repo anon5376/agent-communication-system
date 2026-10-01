@@ -250,7 +250,15 @@ qagent task worktree 12 --remove [--force]      # delete the checkout; the branc
 qagent task worktree prune [--force]            # remove checkouts of accepted, failed and cancelled tasks
 ```
 
-Each task gets branch `qagent/task-<N>`, created from the repository's current `HEAD`, in a checkout under `~/.agent-bus/worktrees/`. Agents commit there; the reviewer or manager merges the branch. Releasing and re-claiming a task reuses the same branch. Removal refuses a checkout with uncommitted changes unless `--force` is given. Through MCP, call `bus_task_claim` with `worktree: true`.
+Each task gets its own branch, `qagent/task-<N>-<id>` (the suffix comes from the task's creation time, so a second bus whose ids restart at 1 never collides), created from the repository's current `HEAD`, in a checkout under `~/.agent-bus/worktrees/`. Agents commit there; the reviewer or manager merges the branch. Releasing and re-claiming a task reuses the same branch. Through MCP, call `bus_task_claim` with `worktree: true`.
+
+Things to know:
+
+- The project directory must be tracked in git (committed), or the checkout would not contain it; otherwise the command fails with a clear error. With an explicit task number, `claim --worktree` checks the repository before claiming; a bare `claim --worktree` (or the MCP tool) keeps the claim and reports "no worktree" if the checkout cannot be made.
+- Only the task's assignee or the operator may open or remove its worktree; `--force` and `prune --force` are operator-only.
+- Removal refuses uncommitted or untracked changes unless `--force`. Gitignored files (build output, `.env`) are deleted with the directory either way.
+- Files harness adapters write into the working directory (`.cursor/mcp.json`, `opencode.json`, `.agent-bus/`, `.qagent/`) are added to the repository's `.git/info/exclude`, so they do not make a checkout dirty. That file is local and shared by all worktrees of the repository.
+- The Rust port does not implement worktrees: it ignores `"isolation": "worktree"` and has no `--worktree` flag or `task worktree` command. The bus database is unchanged, so the two builds still share one bus.
 
 ### Submit real evidence
 
@@ -360,7 +368,7 @@ qagent supervise coder /workspace/project
 
 `supervise --roster` runs every enabled agent in the config from one foreground process (one supervisor loop each, same signals). `--auto-requeue-min M` additionally requeues claims that sit idle longer than M minutes (uses the operator token on the machine), and `qagent task stalled`/`qagent task requeue` do the same by hand. `qagent trace <N>` prints a task's full causal chain — its events, notes and bus mail in order — with `--format json` or `--format html --out FILE` for export.
 
-With `"isolation": "worktree"` under `constraints` in the config, a turn about exactly one task whose project is a git repository runs in that task's worktree (see "Isolate a task in its own git worktree"). Such turns start a fresh CLI session, because CLI sessions are tied to their directory; an agent with a pinned `resumeSessionId` keeps running in the project directory.
+With `"isolation": "worktree"` under `constraints` in the config, a turn about exactly one task that the agent holds (or is assigned) and whose project is a git repository runs in that task's worktree (see "Isolate a task in its own git worktree"). Unclaimed candidate tasks are not isolated, because every same-role supervisor would race for the same checkout. If the worktree cannot be made, the turn runs in the project directory and the supervisor logs why. Each task checkout keeps its own CLI session (CLI sessions are tied to their directory) and is resumed on later turns; an agent with a pinned `resumeSessionId` keeps running in the project directory. The Rust supervisor ignores this setting.
 
 `doctor` performs read-only checks for the identity, token, CLI, project, and configuration. `supervise` stays in the foreground until interrupted.
 
