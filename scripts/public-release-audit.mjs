@@ -34,6 +34,10 @@ const allowedEmailDomains = new Set([
   "noreply.github.com",
   "users.noreply.github.com",
 ]);
+// Addresses published on purpose, e.g. the security contact in SECURITY.md.
+const allowedEmails = new Set([
+  "qeqx1@pm.me",
+]);
 const emailRegex = /[A-Z0-9._%+-]+@([A-Z0-9.-]+\.[A-Z]{2,}|localhost)/gi;
 
 const findings = [];
@@ -84,7 +88,7 @@ function inspectText(path, text, scope = "working tree") {
   emailRegex.lastIndex = 0;
   for (const match of text.matchAll(emailRegex)) {
     const domain = match[1].toLowerCase();
-    if (!allowedEmailDomains.has(domain)) {
+    if (!allowedEmailDomains.has(domain) && !allowedEmails.has(match[0].toLowerCase())) {
       addFinding(scope, `${path}:${lineNumber(text, match.index)}`, "non-public email address");
       break;
     }
@@ -120,7 +124,7 @@ function inspectHistory() {
     const [commit, authorEmail = "", committerEmail = ""] = row.split("\t");
     for (const [field, address] of [["author", authorEmail], ["committer", committerEmail]]) {
       const domain = address.split("@").pop()?.toLowerCase() ?? "";
-      if (!allowedEmailDomains.has(domain)) {
+      if (!allowedEmailDomains.has(domain) && !allowedEmails.has(address.toLowerCase())) {
         addFinding("history", commit.slice(0, 12), `non-public ${field} email`);
       }
     }
