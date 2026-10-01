@@ -25,6 +25,7 @@ Coordination lives in one SQLite file. The CLI and MCP server open it directly, 
 - A stdio MCP server with 14 agent tools and one operator-only tool.
 - Harness adapters: `claude`, `codex`, `gemini`, `kimi`, `cursor`, `grok`, `opencode`, `hermes`, plus any other CLI through the `command` adapter.
 - A localhost-only dashboard and an optional supervisor.
+- A Claude Code hook that wakes an idle interactive session when mail arrives.
 - Import tools for earlier Qagent and Python prototype stores.
 
 ## Quick start
@@ -59,6 +60,14 @@ Generate MCP client configuration without copying tokens into configuration file
 qagent mcp-config --agent claude --client claude
 qagent mcp-config --agent codex --client codex
 ```
+
+Let new mail wake an idle interactive Claude Code session, with no supervisor running. This prints a background `Stop` hook to merge into `.claude/settings.json`:
+
+```bash
+qagent --as claude hook claude-code --settings
+```
+
+See [Wake an idle Claude Code session](docs/FULL-GUIDE.md#wake-an-idle-claude-code-session) for what it shows Claude and its limits.
 
 ## Terminal UI
 

@@ -447,6 +447,24 @@ export class Bus {
     return Number(row.n);
   }
 
+  /**
+   * Unread mail with a seq after `afterSeq` (never before the read cursor), oldest first, without
+   * moving the cursor. `total` and `lastSeq` cover all of it, not just the returned page.
+   */
+  unreadAfter(agentId: string, afterSeq: number, limit = 50): { messages: Message[]; total: number; lastSeq: number } {
+    const from = Math.max(this.cursor(agentId), afterSeq);
+    const { rows, total } = this.unreadRows(agentId, from, Math.max(1, Math.min(LIMITS.inboxLimit, Math.floor(limit))));
+    const messages = rows.map((row) => this.toMessage(row));
+    let lastSeq = messages.length ? messages[messages.length - 1].seq : from;
+    if (total > messages.length) {
+      const row = prepared(this.db, `
+        SELECT MAX(seq) AS seq FROM messages WHERE seq > ? AND (recipient = ? OR (recipient IS NULL AND sender <> ?))
+      `).get(from, agentId, agentId) as { seq: number };
+      lastSeq = Number(row.seq);
+    }
+    return { messages, total, lastSeq };
+  }
+
   /** New mail since the cursor. Advances the cursor unless peek is set. */
   inbox(actor: Identity, options: { peek?: boolean; limit?: number } = {}): { messages: Message[]; cursor: number; remaining: number } {
     const limit = Math.max(1, Math.min(LIMITS.inboxLimit, Math.floor(options.limit ?? 50)));

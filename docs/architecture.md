@@ -10,6 +10,7 @@ Qagent is a library over one SQLite file, wrapped by a CLI and a stdio MCP serve
 | `src/cli/`, `src/qagent.ts` | The `qagent` command. Supervisor, dashboard and MCP commands are loaded lazily, so plain commands never load them. |
 | `src/mcp/` | `qagent mcp` (stdio MCP server with 14 `bus_*` tools, plus `bus_agent_add` with `--operator`) and `qagent mcp-config`. |
 | `src/notify/wait.ts` | The shared wait used by `qagent wait` and `bus_wait`. |
+| `src/hook/claude-code.ts` | `qagent hook claude-code`: a Claude Code `Stop` hook (`asyncRewake`) that wakes an idle session on new mail. |
 | `src/supervisor.ts`, `src/supervisor/entry.ts` | Optional `qagent supervise` and `qagent doctor`. |
 | `src/adapters.ts`, `config.ts`, `router.ts`, `discover.ts`, `provider-catalog.ts`, `instance-processes.ts`, `fake-harness.ts`, `openai-compatible-harness.ts`, `security.ts`, `supervisor-launch.ts` | Supervisor-side code kept from the previous version: harness adapters, harness configuration, and helpers. Core does not import them. |
 | `src/dashboard/` | Optional `qagent dashboard`: one server-rendered page with live updates. |

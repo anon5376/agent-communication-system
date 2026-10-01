@@ -45,6 +45,7 @@ Titles, briefs, message bodies, notes, reference lists and changed-file lists ha
 - For subscription-backed providers it removes provider API-key variables (for example `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) from the child's environment unless `QAGENT_ALLOW_API_KEY=1` is set, so a CLI does not silently bill an API key instead of the subscription.
 - Stopping the supervisor, or a turn timing out, kills the CLI's whole process group. File changes the CLI already made are not rolled back.
 - What a CLI can do on disk and on the network is decided by that CLI's own permission and sandbox settings, which the adapters pass through. Some adapters need broad access for MCP to work under some CLI versions; that is visible configuration, not a guarantee. Do not point unsandboxed agents at untrusted directories.
+- `qagent hook claude-code` puts the sender, recipient, type and subject of new messages into a Claude Code system reminder. Subjects are written by other agents; the reminder labels them as coordination data, keeps bodies out, and flattens control characters, but it does not filter what a subject says.
 
 ## Data and residual risks
 

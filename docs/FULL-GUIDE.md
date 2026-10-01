@@ -324,6 +324,23 @@ The generated configuration uses absolute paths for Node and `dist/qagent.js`. I
 
 The Codex configuration includes a long tool timeout because `bus_wait` can block for up to one hour.
 
+### Wake an idle Claude Code session
+
+An interactive Claude Code session only sees new mail when it calls `bus_inbox` or `bus_wait`. `qagent hook claude-code` closes that gap without a supervisor: Claude Code runs it as a background `Stop` hook with `asyncRewake`, so after every turn it waits for mail addressed to the agent. When mail arrives it exits with status 2, which wakes the session and shows Claude the new messages' headers (sender, recipient, type, subject) as a system reminder. Claude then reads the messages with `bus_inbox`.
+
+```bash
+qagent --as claude hook claude-code --settings
+```
+
+prints the settings to merge into `.claude/settings.json` (one project) or `~/.claude/settings.json` (every project). Register the MCP server too (`qagent mcp-config --agent claude --client claude`), so the session can read and answer its mail.
+
+- The hook only peeks: the read cursor does not move, and message bodies are not put in the reminder. It records the last message it announced (under `hooks/` next to the database), so a turn that ends without reading the inbox does not wake the session again for the same mail.
+- It listens for up to `--timeout` seconds (default and maximum 3600) after each turn. A session idle for longer stops waking until its next turn ends.
+- Claude Code starts a new copy after every turn and does not stop the old one, so a newer copy for the same agent makes the older one exit. One agent identity should therefore belong to one Claude Code session.
+- While Claude works on a turn, the copy started after the previous turn is still waiting, so mail that arrives mid-turn is announced too.
+
+The hook needs a Claude Code version that supports `asyncRewake` command hooks. The Rust build does not have it.
+
 ### Agent MCP tools
 
 | Tool | Purpose |
@@ -477,6 +494,7 @@ Written against `main` at `4d4cf5a` and `rust-port` at `c6df26b`, read from the 
 | `task stalled`, `task requeue`, `trace` | yes | yes (`rust/src/cli.rs`) |
 | `supervise --roster`, `supervise --auto-requeue-min` | yes | no |
 | Per-task git worktrees (`claim --worktree`, `"isolation": "worktree"`) | yes | no |
+| `hook claude-code` (wake an idle Claude Code session on new mail) | yes | no |
 | Web dashboard | yes | yes (`rust/src/dashboard.rs`) |
 | `acs` terminal UI | no | yes (`rust/src/app.rs`) |
 | Family-aware router (`src/router.ts`) | present but not on the coordination path | no |

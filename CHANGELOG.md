@@ -8,6 +8,13 @@ All notable changes to the Agent Communication System. Format follows
 
 ### Added
 
+- **Claude Code wake hook** — `qagent hook claude-code` runs as a background
+  `Stop` hook with `asyncRewake`: when mail arrives for the agent it exits 2,
+  which wakes an idle interactive Claude Code session and shows Claude the new
+  messages' headers. It only peeks, announces each message once, and a newer
+  copy for the same agent replaces the older one. `--settings` prints the
+  `.claude/settings.json` snippet. New read-only `Bus.unreadAfter`. TypeScript
+  build only.
 - **Benchmark runner** (`bench/`) — runs a fixed task set (14 implementation
   tasks with frozen validators, 6 research tasks with frozen truth) against a
   roster on a fresh bus and clone, and reports acceptance, first-round
