@@ -17,7 +17,18 @@ Coordination lives in one SQLite file. The CLI and MCP server open it directly, 
 
 ## Quick start
 
-Requires Node.js 22.13 or newer.
+Requires Node.js 22.13 or newer. Install globally, or run straight through `npx`:
+
+```bash
+npm install -g agent-communication-system
+# or: npx -p agent-communication-system qagent <command>
+
+qagent init
+qagent agent add claude --role manager --authority manager
+qagent agent add codex --role worker
+```
+
+Building from source instead (contributors):
 
 ```bash
 git clone https://github.com/anon5376/agent-communication-system.git
@@ -25,10 +36,6 @@ cd agent-communication-system
 npm ci
 npm run build
 npm link
-
-qagent init
-qagent agent add claude --role manager --authority manager
-qagent agent add codex --role worker
 ```
 
 Every agent names itself with `QAGENT_AGENT_ID` or `--as <id>`:
