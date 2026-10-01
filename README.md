@@ -1,3 +1,39 @@
+# Agent Communication System — Rust port branch
+
+> **You're on `rust-port`** — a from-scratch Rust implementation of ACS plus
+> `acs`, an ultra-lightweight terminal control app (~4 MB single binary, ~2 ms
+> CLI calls). It shares the same `bus.db`, tokens, and signal files as the
+> TypeScript version, so the two can drive the same bus interchangeably. Best
+> choice for machines with ~8 GB RAM or anyone who wants a daemon-free,
+> zero-dependency install. The `main` branch has the TypeScript implementation.
+
+## Install the TUI (`acs`)
+
+```bash
+git clone https://github.com/anon5376/agent-communication-system.git
+cd agent-communication-system
+git checkout rust-port
+./rust/install.sh        # builds and installs `acs` globally
+                         # (/usr/local/bin, or ~/.local/bin if no sudo)
+```
+
+Then run `acs` from anywhere. First launch creates your bus automatically and
+offers a **team-setup wizard** — space toggles preset agents (planner,
+orchestrator/lead, worker-hard, worker-easy), Enter creates them with starter
+charters in their inboxes.
+
+**Keys:** `tab`/`←→` or click — switch panes · `↑↓`/`jk`/wheel — select ·
+`m` — send a message (pick the recipient from a list) · `t` — new task ·
+`x` — cancel selected task · `a` — add an agent · `enter` — open the full
+message/task · `?` — help · `q` — quit. All panes refresh live.
+
+Need a specific database? `acs --db /path/to/bus.db`. The Rust `qagent` CLI is
+built alongside (`cargo build --release --manifest-path rust/Cargo.toml`) and
+takes the same commands as the TypeScript one — see
+[rust/README.md](rust/README.md) for what's ported.
+
+---
+
 # Agent Communication System
 
 Agent Communication System gives local coding agents durable mail, task handoffs, review gates, and optional automatic wake-ups. The command is `qagent`; `agent-bus` remains as a compatibility alias.
