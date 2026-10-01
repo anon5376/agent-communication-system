@@ -8,8 +8,8 @@
  * Nothing in core imports this module.
  */
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Bus } from "./core/bus.js";
 import { BusError, CLOSED_STATES, Task } from "./core/types.js";
@@ -111,36 +111,76 @@ async function findRegistered(repoRoot: string, path: string): Promise<WorktreeE
 }
 
 const LOCK_WAIT_MS = 120_000;
+/** A held lock refreshes its mtime this often; one untouched for LOCK_STALE_MS has no live owner. */
+const LOCK_HEARTBEAT_MS = 10_000;
+const LOCK_STALE_MS = 60_000;
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
+
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
+
+function readOwner(lock: string): string | null {
+  try { return readFileSync(join(lock, "owner"), "utf8").trim() || null; } catch { return null; }
+}
+
+/** Why the lock has no live owner, or null while it looks held. `owner` is "<pid>:<token>". */
+function staleReason(lock: string, owner: string | null): string | null {
+  const pid = owner ? Number(owner.split(":")[0]) : 0;
+  if (pid && !pidAlive(pid)) return `holder ${pid} is gone`;
+  let idleMs = 0;
+  try { idleMs = Date.now() - statSync(lock).mtimeMs; } catch { return null; } // released meanwhile
+  // No owner file: the holder died between mkdir and writing it. A live pid with an
+  // untouched lock: the pid was reused, or the holder hung. Either way the heartbeat stopped.
+  return idleMs > LOCK_STALE_MS ? `no heartbeat for ${Math.round(idleMs / 1000)}s` : null;
+}
+
+/** Move a lock aside atomically (one contender wins the rename) and delete it. Returns the owner it held. */
+function sweepLock(lock: string): string | null {
+  const aside = `${lock}.stale.${process.pid}.${Date.now()}`;
+  try { renameSync(lock, aside); } catch { return null; } // someone else took it, or it was released
+  const owner = readOwner(aside);
+  rmSync(aside, { recursive: true, force: true });
+  return owner;
+}
 
 /**
  * Serialise worktree creation per repository across processes: several supervisors can reach
- * for the same task at once. A mkdir lock holds the owner's pid; a dead owner's lock is taken over.
+ * for the same task at once. A mkdir lock with an owner token and a heartbeat; a lock whose
+ * owner died, or stopped heartbeating, is swept so a crashed holder never blocks a repository.
  */
 async function withRepoLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const lock = join(dir, ".lock");
+  const mine = `${process.pid}:${randomBytes(6).toString("hex")}`;
   const deadline = Date.now() + LOCK_WAIT_MS;
   for (;;) {
     try {
       mkdirSync(lock);
-      writeFileSync(join(lock, "pid"), `${process.pid}\n`);
+      writeFileSync(join(lock, "owner"), `${mine}\n`);
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      let holder = 0;
-      try { holder = Number(readFileSync(join(lock, "pid"), "utf8").trim()) || 0; } catch { /* owner is between mkdir and pid write */ }
-      let alive = true;
-      if (holder) { try { process.kill(holder, 0); } catch (killError) { alive = (killError as NodeJS.ErrnoException).code === "EPERM"; } }
-      if (holder && !alive) { rmSync(lock, { recursive: true, force: true }); continue; }
+      const owner = readOwner(lock);
+      if (staleReason(lock, owner)) {
+        // Check and rename are not one step: a lock replaced in between is swept too. Its
+        // owner notices at release (the owner file no longer matches) and the work it
+        // guards is idempotent, so the worst case is two creators retrying against git.
+        sweepLock(lock);
+        continue;
+      }
       if (Date.now() > deadline) throw new BusError("conflict", `timed out waiting for the worktree lock ${lock}`);
       await sleep(50);
     }
   }
+  const beat = setInterval(() => { try { const now = new Date(); utimesSync(lock, now, now); } catch { /* released or swept */ } }, LOCK_HEARTBEAT_MS);
+  beat.unref();
   try {
     return await fn();
   } finally {
-    rmSync(lock, { recursive: true, force: true });
+    clearInterval(beat);
+    // Only remove a lock that is still ours: a sweep may have replaced it.
+    if (readOwner(lock) === mine) sweepLock(lock);
   }
 }
 
@@ -198,22 +238,74 @@ export async function ensureTaskWorktree(task: TaskRef, home: string): Promise<T
 }
 
 /**
+ * The repository root for cleanup. The project directory may have been deleted since the
+ * task was made, so start from its nearest existing ancestor; null when no repository is left.
+ */
+async function cleanupRepoRoot(task: Pick<Task, "id" | "project">): Promise<string | null> {
+  if (!task.project) throw new BusError("invalid", `task ${task.id} has no project directory`);
+  let dir = resolve(task.project);
+  while (!existsSync(dir)) {
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+  const top = await git(dir, ["rev-parse", "--show-toplevel"]);
+  return top.ok ? real(top.stdout) : null;
+}
+
+/** A task's checkout directory under the bus home, found by name when its repository is gone. */
+function findWorktreeDirByName(home: string, task: Pick<Task, "id" | "createdMs">): string | null {
+  const root = join(home, "worktrees");
+  if (!existsSync(root)) return null;
+  const name = `task-${task.id}-${task.createdMs.toString(36)}`;
+  for (const repo of readdirSync(root, { withFileTypes: true })) {
+    const candidate = join(root, repo.name, name);
+    if (repo.isDirectory() && existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/** True when the checkout's `.git` file points at a repository that no longer exists. */
+function repositoryGone(checkout: string): boolean {
+  try {
+    const pointer = /^gitdir:\s*(.+)$/m.exec(readFileSync(join(checkout, ".git"), "utf8"));
+    return pointer ? !existsSync(pointer[1].trim()) : false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Remove the task's worktree directory. The branch stays, so committed work survives for
  * review and merge. Uncommitted or untracked changes block removal unless `force` is set;
- * gitignored files (build output, .env) go with the directory either way.
+ * gitignored files (build output, .env) go with the directory either way. Works after the
+ * task's project directory, or its whole repository, has been deleted: a checkout whose
+ * repository is gone cannot be inspected, so it needs `force`.
  */
 export async function removeTaskWorktree(task: TaskRef, home: string, options: { force?: boolean } = {}): Promise<{ path: string; branch: string; removed: boolean }> {
-  const repoRoot = await repoRootFor(task);
-  const path = taskWorktreePath(home, repoRoot, task);
+  const repoRoot = await cleanupRepoRoot(task);
   const branch = taskBranch(task);
-  return withRepoLock(repoDir(home, repoRoot), async () => {
-    if (!(await findRegistered(repoRoot, path))) return { path, branch, removed: false };
-    if (!options.force && await mustGit(path, ["status", "--porcelain"])) {
-      throw new BusError("conflict", `worktree for task ${task.id} has uncommitted changes (${path}); commit them or pass --force`);
-    }
-    await mustGit(repoRoot, options.force ? ["worktree", "remove", "--force", path] : ["worktree", "remove", path]);
-    return { path, branch, removed: true };
-  });
+  let path = "";
+  if (repoRoot) {
+    path = taskWorktreePath(home, repoRoot, task);
+    const removed = await withRepoLock(repoDir(home, repoRoot), async () => {
+      if (!(await findRegistered(repoRoot, path))) return false;
+      if (!options.force && await mustGit(path, ["status", "--porcelain"])) {
+        throw new BusError("conflict", `worktree for task ${task.id} has uncommitted changes (${path}); commit them or pass --force`);
+      }
+      await mustGit(repoRoot, options.force ? ["worktree", "remove", "--force", path] : ["worktree", "remove", path]);
+      return true;
+    });
+    if (removed) return { path, branch, removed: true };
+  }
+  // No repository, or one that does not know this checkout: only an orphan whose repository is gone is ours to delete.
+  const orphan = findWorktreeDirByName(home, task);
+  if (!orphan || !repositoryGone(orphan)) return { path: orphan ?? path, branch, removed: false };
+  if (!options.force) {
+    throw new BusError("conflict", `the repository for task ${task.id} is gone, so its checkout ${orphan} cannot be checked for uncommitted work; pass --force to delete it`);
+  }
+  rmSync(orphan, { recursive: true, force: true });
+  return { path: orphan, branch, removed: true };
 }
 
 /** Remove the worktrees of accepted, failed and cancelled tasks. Dirty ones are kept unless `force`. */

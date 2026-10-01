@@ -25,7 +25,7 @@ cd agent-communication-system && npm ci && npm run build && npm link
 qagent init
 ```
 
-Install command — after npm publish:
+Install command — only valid after `npm publish` (the package is not on npm yet; until then clone, `npm ci`, `npm run build`, `npm link`):
 
 ```bash
 npm install -g agent-communication-system

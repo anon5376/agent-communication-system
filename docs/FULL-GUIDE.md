@@ -256,7 +256,7 @@ Things to know:
 
 - The project directory must be tracked in git (committed), or the checkout would not contain it; otherwise the command fails with a clear error. With an explicit task number, `claim --worktree` checks the repository before claiming; a bare `claim --worktree` (or the MCP tool) keeps the claim and reports "no worktree" if the checkout cannot be made.
 - Only the task's assignee or the operator may open or remove its worktree; `--force` and `prune --force` are operator-only.
-- Removal refuses uncommitted or untracked changes unless `--force`. Gitignored files (build output, `.env`) are deleted with the directory either way.
+- Removal refuses uncommitted or untracked changes unless `--force`. Cleanup still works if the task's project directory has since been deleted; if the whole repository is gone, the leftover checkout cannot be inspected, so deleting it takes `--force`. Gitignored files (build output, `.env`) are deleted with the directory either way.
 - Files harness adapters write into the working directory (`.cursor/mcp.json`, `opencode.json`, `.agent-bus/`, `.qagent/`) are added to the repository's `.git/info/exclude`, so they do not make a checkout dirty. That file is local and shared by all worktrees of the repository.
 - The Rust port does not implement worktrees: it ignores `"isolation": "worktree"` and has no `--worktree` flag or `task worktree` command. The bus database is unchanged, so the two builds still share one bus.
 
@@ -464,3 +464,19 @@ git diff --check
 The public audit rejects common credential formats, private absolute home paths, local project markers, tracked environment files, and unsafe commit metadata. It reports file and line locations without printing the matched value.
 
 Automated checks reduce risk; they do not prove that prose, screenshots, fixtures, or Git history contain no private information. Review the staged diff and the final public repository separately.
+
+## Implementation differences
+
+ACS exists twice on one SQLite schema: TypeScript on `main` (the npm package) and Rust on the `rust-port` branch. They share `bus.db`, tokens, and signal files. They do not have the same commands. Where one side lacks a feature, that is a gap, not a design choice.
+
+Written against `main` at `4d4cf5a` and `rust-port` at `c6df26b`, read from the source on 2026-10-01 (nothing was executed to produce this table). `rust-port` is behind `main`, so some rows may already be out of date there.
+
+| Feature | TypeScript (`main`) | Rust (`rust-port`) |
+|---|---|---|
+| Bus, tasks, leases, review gate, MCP server, harness adapter table (`ADAPTERS`) | yes | yes (`rust/README.md` lists the same adapters) |
+| `task stalled`, `task requeue`, `trace` | yes | yes (`rust/src/cli.rs`) |
+| `supervise --roster`, `supervise --auto-requeue-min` | yes | no |
+| Per-task git worktrees (`claim --worktree`, `"isolation": "worktree"`) | yes | no |
+| Web dashboard | yes | yes (`rust/src/dashboard.rs`) |
+| `acs` terminal UI | no | yes (`rust/src/app.rs`) |
+| Family-aware router (`src/router.ts`) | present but not on the coordination path | no |
