@@ -71,8 +71,21 @@ function startSupervisor(f: Fixture, agentId: string, configPath: string, extraE
   return child;
 }
 
+function startRosterSupervisor(f: Fixture, configPath: string, extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
+  const log = openSync(join(f.home, "supervisor-roster.log"), "a");
+  return spawn(process.execPath, [QAGENT, "supervise", "--roster", f.project, "--config", configPath], {
+    env: f.env(undefined, extraEnv),
+    stdio: ["ignore", log, log],
+    detached: true,
+  });
+}
+
 function supervisorLog(f: Fixture, agentId: string): string {
   try { return readFileSync(join(f.home, `supervisor-${agentId}.log`), "utf8"); } catch { return ""; }
+}
+
+function rosterLog(f: Fixture): string {
+  try { return readFileSync(join(f.home, "supervisor-roster.log"), "utf8"); } catch { return ""; }
 }
 
 async function until<T>(label: string, timeoutMs: number, probe: () => T | null | undefined | false, onTimeout = () => ""): Promise<T> {
@@ -103,6 +116,54 @@ function killAll(children: ChildProcess[]): void {
     try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch { /* gone */ } }
   }
 }
+
+test("roster contains one supervisor failure without stopping healthy siblings", { timeout: 60_000 }, async (t) => {
+  // testConfig enables fake-small and fake-strong, but only fake-small exists on the bus.
+  // fake-strong therefore fails immediately while fake-small must keep running.
+  const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
+  const configPath = writeConfig(f.home, (config) => {
+    config.harnesses.fake.features.mcp = true;
+    config.agents["fake-small"].harnessOptions = { mode: "bus-cli" };
+  });
+  const roster = startRosterSupervisor(f, configPath);
+  t.after(() => killAll([roster]));
+
+  await until(
+    "the healthy roster supervisor to hold the wait",
+    15_000,
+    () => f.bus.getAgent("fake-small")?.storedStatus === "waiting",
+    () => rosterLog(f),
+  );
+  await until(
+    "the failed roster supervisor to be reported",
+    5_000,
+    () => /supervisor for fake-strong exited with error/.test(rosterLog(f)),
+    () => rosterLog(f),
+  );
+  assert.equal(roster.exitCode, null, "one supervisor failure must not terminate the roster");
+
+  const created = f.json("operator", ["task", "add", "Still works", "--to", "fake-small"]);
+  const task = await until(
+    "the healthy sibling to submit after another supervisor failed",
+    20_000,
+    () => {
+      const current = f.bus.getTask(created.id);
+      return current.state === "submitted" ? current : null;
+    },
+    () => rosterLog(f),
+  );
+  assert.equal(task.assignee, "fake-small");
+  assert.match(readFileSync(join(f.home, "logs", "fake-small.log"), "utf8"), /supervising fake-small/);
+
+  // SIGTERM still reaches the shared AbortController; the non-zero exit records
+  // that the roster suffered a partial failure without killing healthy siblings early.
+  assert.equal(await stop(roster), 1, rosterLog(f));
+  assert.equal(
+    existsSync(join(f.home, "supervisors", "fake-small.pid")),
+    false,
+    "healthy sibling releases its lock during shared shutdown",
+  );
+});
 
 test("a fake-harness agent under `qagent supervise` claims and submits a CLI-created task as itself, and stays reachable after the supervisor stops", { timeout: 60_000 }, async (t) => {
   const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);

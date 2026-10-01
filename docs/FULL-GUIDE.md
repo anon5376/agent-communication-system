@@ -345,6 +345,8 @@ qagent doctor coder /workspace/project
 qagent supervise coder /workspace/project
 ```
 
+`supervise --roster` runs every enabled agent in the config from one foreground process (one supervisor loop each, same signals). `--auto-requeue-min M` additionally requeues claims that sit idle longer than M minutes (uses the operator token on the machine), and `qagent task stalled`/`qagent task requeue` do the same by hand. `qagent trace <N>` prints a task's full causal chain — its events, notes and bus mail in order — with `--format json` or `--format html --out FILE` for export.
+
 `doctor` performs read-only checks for the identity, token, CLI, project, and configuration. `supervise` stays in the foreground until interrupted.
 
 Configuration defaults to `<project>/.qagent/config.json`. Provider-specific fields and support status are documented in [provider support](provider-support.md).

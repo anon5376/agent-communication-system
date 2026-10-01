@@ -143,11 +143,13 @@ qagent task add <title> [--brief -] [--to ID] [--parent N] [--dep N]... [--scope
 qagent task list [--mine] [--state S]... [--all] | task show <N>
 qagent task claim [<N>] | task note <N> <text> | task submit <N> --summary S [--file F]...
 qagent task review <N> --accept|--revise --feedback F | task cancel <N> [--reason R]
+qagent task stalled [--stall-min M] | task requeue <N> [--reason R]   idle claims back to open
 qagent log [--follow] [--since SEQ]             events feed; --follow uses core/changes.ts
+qagent trace <N> [--format text|json|html] [--out FILE]               the task's causal chain
 qagent import [--jsonl P] [--qagent-state P] [--prototype P] [--dry-run] [--force]
 qagent mcp [--operator]                         stdio MCP server (lane 2)
 qagent mcp-config [--agent ID] [--client claude|codex]   prints registration snippet (lane 2)
-qagent supervise <agent> [dir] | qagent doctor  optional supervisor (lane 3)
+qagent supervise <agent> [dir] [--auto-requeue-min M] | supervise --roster | doctor   optional supervisor (lane 3)
 qagent dashboard [--port 11512] [--open]        optional dashboard (lane 4)
 ```
 
