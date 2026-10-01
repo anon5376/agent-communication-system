@@ -8,6 +8,15 @@ All notable changes to the Agent Communication System. Format follows
 
 ### Added
 
+- **Numbered schema migrations** — the bus schema now lives in ordered files
+  under `schema/` (`001-baseline.sql` is the exact schema of 0.2.0) and
+  `meta.schema_version` is the highest applied number. Pending migrations run
+  in one `BEGIN IMMEDIATE` transaction on open; existing version-1 buses open
+  unchanged. A database written by a newer schema is now refused with an
+  "upgrade qagent" error instead of having its version marker overwritten
+  (read-only opens still work); binaries from before this change keep the old
+  overwrite behaviour. Migrations are additive only. TypeScript build only:
+  the Rust port still carries its own copy of the baseline schema.
 - **Per-task git worktrees** — `qagent task claim --worktree` (and
   `bus_task_claim` with `worktree: true`) gives the task its own checkout on
   branch `qagent/task-<N>-<id>` under `~/.agent-bus/worktrees/`;

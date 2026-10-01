@@ -16,7 +16,7 @@ Qagent is a library over one SQLite file, wrapped by a CLI and a stdio MCP serve
 
 ## The database
 
-`~/.agent-bus/bus.db` in WAL mode with a 5 s busy timeout. Tables: `agents`, `identities` (token hashes), `messages`, `cursors` and `acks`, `tasks`, `task_deps`, `task_notes`, `leases`, `events`, `usage` (reserved for the supervisor, not yet written) and `meta`. The full schema is in `src/core/db.ts`.
+`~/.agent-bus/bus.db` in WAL mode with a 5 s busy timeout. Tables: `agents`, `identities` (token hashes), `messages`, `cursors` and `acks`, `tasks`, `task_deps`, `task_notes`, `leases`, `events`, `usage` (reserved for the supervisor, not yet written) and `meta`. The schema is the ordered, additive-only files in `schema/` (applied by `src/core/db.ts`; `meta.schema_version` is the highest applied number).
 
 Every write is one `BEGIN IMMEDIATE` transaction that also appends a row to `events`. `events.seq` is the change counter every reader uses, and the `events` table is the only history; there is no separate audit file. Opening an existing database performs no write.
 
