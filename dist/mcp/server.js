@@ -18,6 +18,7 @@ import { Bus } from "../core/bus.js";
 import { agentIdFromEnv, identityForToken, resolveIdentity } from "../core/identity.js";
 import { BusError, LIMITS, MAX_WAIT_SEC, OPERATOR_ID } from "../core/types.js";
 import { waitForMail, waitSeconds } from "../notify/wait.js";
+import { ensureTaskWorktree } from "../worktree.js";
 import { renderAgents, renderError, renderInbox, renderNote, renderSent, renderTask, renderTaskLine, renderTasks, renderWait, renderWhoami, } from "./render.js";
 export const AGENT_TOOLS = [
     "bus_whoami", "bus_agents", "bus_send", "bus_inbox", "bus_wait", "bus_ack",
@@ -165,11 +166,21 @@ export function createBusServer(bus, options) {
         inputSchema: { task_id: z.number().int().positive() },
     }, async (input) => run(() => renderTask(bus.getTask(input.task_id))));
     server.registerTool("bus_task_claim", {
-        description: "Claim a task. Without task_id, takes the most urgent open task assigned to you, or unassigned for your role. Claims expire after two hours without a note or submit.",
-        inputSchema: { task_id: z.number().int().positive().optional() },
-    }, async (input) => run((identity) => {
+        description: "Claim a task. Without task_id, takes the most urgent open task assigned to you, or unassigned for your role. Claims expire after two hours without a note or submit. With worktree: true, also returns a private git worktree for the task (its own branch); make your edits and commits there.",
+        inputSchema: { task_id: z.number().int().positive().optional(), worktree: z.boolean().optional() },
+    }, async (input) => run(async (identity) => {
         const task = bus.claimTask(identity, input.task_id ?? null);
-        return `${renderTaskLine(task, "Claimed")}\n\n${renderTask(bus.getTask(task.id))}`;
+        const text = `${renderTaskLine(task, "Claimed")}\n\n${renderTask(bus.getTask(task.id))}`;
+        if (!input.worktree)
+            return text;
+        try {
+            const worktree = await ensureTaskWorktree(task, bus.home);
+            return `${text}\n\nWorktree: ${worktree.workdir} (branch ${worktree.branch}). Edit and commit there, not in ${task.project}.`;
+        }
+        catch (error) {
+            // The claim stands; only the isolation step failed.
+            return `${text}\n\nNo worktree: ${error.message}`;
+        }
     }));
     server.registerTool("bus_task_note", {
         description: "Add a progress note to a task. A note from the assignee also renews the claim.",

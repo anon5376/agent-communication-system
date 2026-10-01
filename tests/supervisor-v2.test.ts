@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { ChildProcess, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -241,6 +241,39 @@ test("a harness without bus tools is supervisor-managed: it claims an unassigned
   assert.equal(task.assignee, "fake-small");
   assert.equal(task.result?.summary, `key=absent token=absent id=fake-small db=${f.dbPath}`);
   assert.match(task.result?.details ?? "", /auto-submitted by the supervisor/);
+  assert.equal(await stop(supervisor), 0, supervisorLog(f, "fake-small"));
+});
+
+test("isolation \"worktree\" runs a single-task turn inside that task's git worktree", { timeout: 60_000 }, async (t) => {
+  const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
+  const gitIn = (args: string[]) => {
+    const result = spawnSync("git", ["-c", "user.email=test@example.com", "-c", "user.name=test", ...args], { cwd: f.project, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  gitIn(["init", "-q"]);
+  writeFileSync(join(f.project, "README"), "x\n");
+  gitIn(["add", "."]);
+  gitIn(["commit", "-q", "-m", "init"]);
+  const probe = "process.stdout.write(JSON.stringify({result: 'cwd=' + process.cwd()}) + '\\n')";
+  const configPath = writeConfig(f.home, (config) => {
+    config.harnesses.fake.adapter = "command";
+    config.harnesses.fake.command = process.execPath;
+    config.harnesses.fake.features.mcp = false;
+    config.constraints.isolation = "worktree";
+    config.agents["fake-small"].harnessOptions = { args: ["-e", probe] };
+  });
+  const supervisor = startSupervisor(f, "fake-small", configPath);
+  t.after(() => killAll([supervisor]));
+  await until("the supervisor to hold the wait", 15_000, () => f.bus.getAgent("fake-small")?.storedStatus === "waiting", () => supervisorLog(f, "fake-small"));
+
+  const created = f.json("operator", ["task", "add", "Edit the readme", "--role", "cheap-worker", "--project", f.project]);
+  const task = await until("the task to be submitted", 20_000, () => {
+    const current = f.bus.getTask(created.id);
+    return current.state === "submitted" ? current : null;
+  }, () => supervisorLog(f, "fake-small"));
+  const worktree = f.json(undefined, ["task", "worktree", String(created.id)]);
+  assert.equal(worktree.created, false);
+  assert.equal(realpathSync(task.result?.summary?.replace(/^cwd=/, "") ?? ""), realpathSync(worktree.workdir));
   assert.equal(await stop(supervisor), 0, supervisorLog(f, "fake-small"));
 });
 

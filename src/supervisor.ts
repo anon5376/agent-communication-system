@@ -15,6 +15,7 @@ import { BusConfig, ResolvedAgent, configPathFromProject, loadConfig, resolveAge
 import { Bus } from "./core/bus.js";
 import type { Identity } from "./core/identity.js";
 import { BusError, DEFAULT_WAIT_SEC, Message, OPERATOR_ID, Task } from "./core/types.js";
+import { TaskWorktree, ensureTaskWorktree } from "./worktree.js";
 
 /** First non-empty environment variable among `names` (new name first, old name second). */
 function envValue(...names: string[]): string | undefined {
@@ -157,6 +158,8 @@ interface SessionRecord {
   totalTokens: number;
   costUSD: number;
   latencyMs: number;
+  /** Session ids of worktree turns, by task branch: each task checkout has its own directory. */
+  taskSessions?: Record<string, string>;
 }
 
 function emptySession(): SessionRecord {
@@ -390,12 +393,34 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
       }
       if (!messages.length && !tasks.length) continue;
 
+      // isolation "worktree": a turn about exactly one task this agent holds (or is assigned)
+      // runs in that task's checkout. Unclaimed candidates are never isolated: every same-role
+      // supervisor would race for the same checkout.
+      let worktree: TaskWorktree | null = null;
+      const focus = new Set<number>([...taskIds, ...tasks.map((task) => task.id)]);
+      if (config.constraints.isolation === "worktree" && focus.size === 1) {
+        const [focusId] = focus;
+        try {
+          const task = bus.getTask(focusId);
+          if (pinnedSessionId) log(`task #${focusId}: worktree isolation skipped, ${agent.id} pins session ${pinnedSessionId}`);
+          else if (task.project && task.assignee === me.agentId) worktree = await ensureTaskWorktree(task, home);
+        } catch (error) {
+          log(`task #${focusId}: worktree unavailable, running in ${workdir}: ${(error as Error).message}`);
+        }
+      }
+      const turnDir = worktree?.workdir ?? workdir;
+      // CLI sessions are tied to their directory: a worktree turn resumes that task's own session.
+      const taskSession = worktree ? session.taskSessions?.[worktree.branch] ?? null : null;
+      if (worktree) log(`task #${worktree.taskId}: running in worktree ${worktree.workdir} (branch ${worktree.branch})`);
+      let prompt = buildBrief(agent, messages, tasks, managed);
+      if (worktree) prompt += `\nWork only in the git worktree ${worktree.workdir} on branch ${worktree.branch}; commit your changes there.`;
+
       const context: AdapterContext = {
         agent,
-        prompt: buildBrief(agent, messages, tasks, managed),
-        sessionId: session.sessionId,
+        prompt,
+        sessionId: worktree ? taskSession : session.sessionId,
         pinnedSessionId,
-        workdir,
+        workdir: turnDir,
         mcpServerPath: qagentBin,
         fakeHarnessPath: options.fakeHarnessPath ?? DEFAULT_FAKE_HARNESS,
         busEnvironment: { QAGENT_AGENT_ID: me.agentId, QAGENT_BUS_DB: bus.dbPath, QAGENT_BLOCK_SEC: blockSec, AGENT_BUS_BLOCK_SEC: blockSec },
@@ -406,7 +431,7 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
       bus.setStatus(me, "working");
       let processResult: Awaited<ReturnType<typeof runHarnessProcess>>;
       try {
-        processResult = await runHarnessProcess(invocation, agent, workdir, (pid) => { childPid = pid; });
+        processResult = await runHarnessProcess(invocation, agent, turnDir, (pid) => { childPid = pid; });
       } finally {
         childPid = null;
         if (bus.getAgent(me.agentId)?.storedStatus === "working") bus.setStatus(me, "idle");
@@ -424,6 +449,7 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
       session.costUSD += normalized.usage.costUSD;
       session.latencyMs += processResult.durationMs;
       if (pinnedSessionId) session.sessionId = pinnedSessionId;
+      else if (normalized.sessionId && worktree) session.taskSessions = { ...session.taskSessions, [worktree.branch]: normalized.sessionId };
       else if (normalized.sessionId) session.sessionId = normalized.sessionId;
       writeFileSync(sessionPath, JSON.stringify(session, null, 2));
 

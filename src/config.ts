@@ -148,7 +148,8 @@ export interface BusConstraints {
   permittedFamilies: string[];
   preferSubscription: boolean;
   defaultWriteScopes: string[];
-  isolation: "path-locks" | "none";
+  /** "worktree": the supervisor runs a single-task turn inside that task's git worktree. */
+  isolation: "path-locks" | "worktree" | "none";
   optionalTokenBudget: number | null;
   optionalApiCostBudgetUSD: number | null;
   enrollmentTtlSeconds: number;
@@ -267,6 +268,7 @@ export function validateConfig(value: unknown): BusConfig {
   if (config.constraints.maxDelegationDepth < 0) throw new Error("maxDelegationDepth must be >= 0");
   if (config.constraints.maxConcurrentTasks < 1) throw new Error("maxConcurrentTasks must be >= 1");
   if (config.constraints.maxRetries < 0) throw new Error("maxRetries must be >= 0");
+  if (!["path-locks", "worktree", "none"].includes(config.constraints.isolation)) throw new Error("isolation must be path-locks, worktree or none");
   return config;
 }
 
