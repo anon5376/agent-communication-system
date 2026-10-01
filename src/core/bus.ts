@@ -20,7 +20,7 @@ import {
 import {
   Agent, AgentStatus, Authority, boundedString, BusError, BusEvent, CLAIM_TTL_MS, CLOSED_STATES, ContextReference,
   contextReferences, LIMITS, Message, MESSAGE_TYPES, MessageType, OPERATOR_ID, PRIORITIES, Priority, STALE_AGENT_MS,
-  Task, TASK_STATES, TaskDetail, TaskNote, TaskResult, TaskReview, TaskState, TaskSummary, ValidationObservation,
+  Task, TASK_STATES, TaskDetail, TaskNote, TaskResult, TaskReview, TaskState, TaskSummary, TaskTrace, TraceItem, ValidationObservation,
 } from "./types.js";
 
 type Row = Record<string, unknown>;
@@ -678,6 +678,31 @@ export class Bus {
          OR (t.updated_ms < ? AND (a.last_seen_ms IS NULL OR a.last_seen_ms < ?))
        ) ORDER BY t.id`,
     ).all(now, cutoff, cutoff) as Row[]).map((row) => this.toTask(row));
+  }
+
+  /**
+   * The task's causal chain: its events, its notes, and the mail the bus sent about it,
+   * merged into one chronological timeline — the bus is the trace.
+   */
+  traceTask(id: number): TaskTrace {
+    const task = this.getTask(id);
+    // Imported tasks' events are keyed by legacy_id, not the new numeric id.
+    const ids = task.legacyId !== null ? [String(id), task.legacyId] : [String(id)];
+    const events = (this.db.prepare("SELECT * FROM events WHERE entity = 'task' AND entity_id IN (SELECT value FROM json_each(?)) ORDER BY seq").all(JSON.stringify(ids)) as Row[]).map((row) => this.toEvent(row));
+    const timeline: TraceItem[] = [];
+    for (const event of events) {
+      timeline.push({ seq: event.seq, tsMs: event.tsMs, kind: event.kind, actor: event.actor, summary: event.kind.replaceAll("_", " "), data: event.data });
+    }
+    for (const note of task.notes) {
+      timeline.push({ seq: note.id, tsMs: note.tsMs, kind: "note", actor: note.author, summary: note.body.split("\n", 1)[0].slice(0, 200), body: note.body });
+    }
+    // Uncapped: getTask() limits messages to 1000, a trace wants the whole chain.
+    const mail = (this.db.prepare("SELECT * FROM messages WHERE task_id = ? ORDER BY seq").all(id) as Row[]).map((row) => this.toMessage(row));
+    for (const message of mail) {
+      timeline.push({ seq: message.seq, tsMs: message.tsMs, kind: "mail", actor: message.sender, to: message.recipient, summary: message.subject, body: message.body });
+    }
+    timeline.sort((a, b) => a.tsMs - b.tsMs || a.seq - b.seq);
+    return { task, dependencies: task.dependencies, dependents: task.dependents, timeline };
   }
 
   /** Reopen claims past their expiry. There is no sweeper process; every task write calls this first. */

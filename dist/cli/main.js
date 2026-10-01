@@ -4,7 +4,7 @@
  * each module exports
  *   main(argv: string[], context: { dbPath: string; command: string }): Promise<number>.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { Bus } from "../core/bus.js";
 import { ChangeWatcher } from "../core/changes.js";
 import { homeFor, resolveDbPath } from "../core/db.js";
@@ -12,7 +12,7 @@ import { agentIdFromEnv } from "../core/identity.js";
 import { defaultImportSources, runImport } from "../core/import.js";
 import { waitForMail, waitSeconds } from "../notify/wait.js";
 import { BusError, OPERATOR_ID } from "../core/types.js";
-import { renderAgents, renderEvent, renderImport, renderMessages, renderStatus, renderTask, renderTasks } from "./format.js";
+import { renderAgents, renderEvent, renderImport, renderMessages, renderStatus, renderTask, renderTasks, renderTrace, renderTraceHtml } from "./format.js";
 const defaultIo = {
     stdout: (text) => { process.stdout.write(text); },
     stderr: (text) => { process.stderr.write(text); },
@@ -82,6 +82,7 @@ Global: --db PATH (or QAGENT_BUS_DB; default ~/.agent-bus/bus.db)  --as ID|opera
   qagent task review <N> --accept|--revise --feedback F | task cancel <N> [--reason R]
   qagent task stalled [--stall-min M] | task requeue <N> [--reason R]
   qagent log [--follow] [--since SEQ] [--limit N]
+  qagent trace <task-N> [--format text|json|html] [--out FILE]   the task's causal chain
   qagent import [--jsonl P] [--qagent-state P] [--prototype P] [--dry-run] [--force]
   qagent mcp [--operator] | mcp-config | supervise <agent> [dir] | doctor | dashboard
 `;
@@ -336,6 +337,26 @@ async function dispatch(ctx) {
             return logCommand(ctx);
         case "task":
             return taskCommand(ctx, sub);
+        case "trace": {
+            const trace = ctx.bus.traceTask(ctx.taskId(1));
+            const format = ctx.str("format") ?? (ctx.str("out")?.endsWith(".html") ? "html" : "text");
+            if (format === "html") {
+                const out = ctx.str("out");
+                if (!out)
+                    throw new BusError("invalid", "--format html requires --out FILE");
+                writeFileSync(out, renderTraceHtml(trace), { mode: 0o600 });
+                ctx.out({ out }, `wrote ${out}`);
+                return 0;
+            }
+            if (format === "json") {
+                console.log(JSON.stringify(trace, null, 2));
+                return 0;
+            }
+            if (format !== "text")
+                throw new BusError("invalid", "--format must be text, json, or html");
+            ctx.out(trace, renderTrace(trace));
+            return 0;
+        }
         case "import": {
             const explicit = ["jsonl", "qagent-state", "prototype"].some((name) => ctx.str(name) !== undefined);
             const sources = explicit

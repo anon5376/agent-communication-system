@@ -172,6 +172,29 @@ export interface TaskDetail extends Task {
   leases: string[];
 }
 
+/** One line in a task's causal timeline: an event, a note, or task-bound mail, ordered by time. */
+export interface TraceItem {
+  seq: number;
+  tsMs: number;
+  /** Event kind, 'note', or 'mail'. */
+  kind: string;
+  actor: string;
+  /** One-line description for text output. */
+  summary: string;
+  /** Note/mail body, omitted when empty. */
+  body?: string;
+  /** For mail: the recipient (null = broadcast). */
+  to?: string | null;
+  data?: Record<string, unknown>;
+}
+
+export interface TaskTrace {
+  task: TaskDetail;
+  dependencies: number[];
+  dependents: number[];
+  timeline: TraceItem[];
+}
+
 export interface BusEvent {
   seq: number;
   tsMs: number;
