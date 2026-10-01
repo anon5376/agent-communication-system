@@ -1,0 +1,88 @@
+{
+  "tasks": {
+    "total": 8,
+    "accepted": 7,
+    "firstRoundAccepted": 6,
+    "failed": 1,
+    "cancelled": 0,
+    "unfinished": []
+  },
+  "defectEscape": {
+    "acceptedImplementation": 4,
+    "failedValidator": [
+      "I05"
+    ],
+    "rate": 0.25
+  },
+  "research": {
+    "R01": {
+      "reportFound": true,
+      "claims": 3,
+      "claimsWithEvidence": 3,
+      "verifiedEvidence": 1
+    },
+    "R02": {
+      "reportFound": true,
+      "claims": 3,
+      "claimsWithEvidence": 3,
+      "verifiedEvidence": 1
+    },
+    "R05": {
+      "reportFound": true,
+      "claims": 3,
+      "claimsWithEvidence": 3,
+      "verifiedEvidence": 1
+    }
+  },
+  "perTask": {
+    "I01": {
+      "state": "accepted",
+      "round": 1,
+      "accepted": true,
+      "validatorPassed": true
+    },
+    "I03": {
+      "state": "accepted",
+      "round": 2,
+      "accepted": true,
+      "validatorPassed": true
+    },
+    "I05": {
+      "state": "accepted",
+      "round": 1,
+      "accepted": true,
+      "validatorPassed": false
+    },
+    "I10": {
+      "state": "failed",
+      "round": 4,
+      "accepted": false,
+      "validatorPassed": false
+    },
+    "I12": {
+      "state": "accepted",
+      "round": 1,
+      "accepted": true,
+      "validatorPassed": true
+    },
+    "R01": {
+      "state": "accepted",
+      "round": 1,
+      "accepted": true,
+      "validatorPassed": null
+    },
+    "R02": {
+      "state": "accepted",
+      "round": 1,
+      "accepted": true,
+      "validatorPassed": null
+    },
+    "R05": {
+      "state": "accepted",
+      "round": 1,
+      "accepted": true,
+      "validatorPassed": null
+    }
+  },
+  "endCause": "all-terminal"
+}

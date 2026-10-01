@@ -1,0 +1,36 @@
+{
+  "id": "R04",
+  "reconciled": false,
+  "derivedBy": "Read src/dashboard/{server,entry,assets,session,page}.ts, src/core/changes.ts, src/notify/wait.ts at commit 4d4cf5a9f4ca0e819dfc9b97d6610cc05fbf1893; measured with `node derive-R04.mjs` (copy of the commit at research-out/B/repo, node_modules symlinked, committed dist/, Node v22.22.0, Linux). The script wraps node:sqlite StatementSync.prototype.{get,all,run,iterate} to log every execution with its SQL and timestamp, starts startDashboard({dbPath, port: 0}) with default safetyMs, signs in via /session, opens one /api/events stream, waits 60 s with no writes.",
+  "question": "Where does the dashboard re-query the bus database while the bus is idle (no writes), and how often?",
+  "items": [
+    {
+      "id": "src/core/changes.ts:ChangeWatcher.next",
+      "aliases": [
+        "src/core/changes.ts:next",
+        "changes.ts:ChangeWatcher.next",
+        "src/core/changes.ts:ChangeWatcher",
+        "src/core/changes.ts:ChangeWatcher.dataVersion",
+        "src/core/changes.ts:dataVersion",
+        "src/core/changes.ts:ChangeWatcher.sleep",
+        "src/core/changes.ts:sleep",
+        "src/core/changes.ts:data_version poll"
+      ],
+      "evidence": "src/core/changes.ts:78-92: while loop sleeps (setTimeout in sleep(), :97-109) then calls this.dataVersion() (:84, PRAGMA data_version prepared at :36), interval doubling from minPollMs to maxPollMs (:91); max(seq) read only when data_version moves (:85-88). Measured: 14 PRAGMA data_version executions in 60 s."
+    },
+    {
+      "id": "src/dashboard/server.ts:Hub.start",
+      "aliases": [
+        "src/dashboard/server.ts:start",
+        "server.ts:Hub.start",
+        "src/dashboard/server.ts:Hub",
+        "src/dashboard/server.ts:Hub loop",
+        "src/dashboard/server.ts:CountingWatcher",
+        "src/dashboard/server.ts:CountingWatcher.dataVersion",
+        "src/dashboard/server.ts:startDashboard"
+      ],
+      "evidence": "src/dashboard/server.ts:222-230: while (this.streams.size) loop awaits this.watcher.next(this.seq, LOOP_TIMEOUT_MS, ...) on the CountingWatcher configured at :67-73 with minPollMs = FAST_POLL_MS 25 (:34) and maxPollMs = safetyMs (DEFAULT_SAFETY_MS 10_000, :25, :312-313). Loop stops when no stream is open (:224, idle() :240-243)."
+    }
+  ],
+  "notes": "MEASURED (derive-R04.mjs, one stream, default safetyMs 10 s, no writes, 60 000 ms window from stream open): 15 statement executions = 14 x `PRAGMA data_version` + 1 x `SELECT COALESCE(MAX(seq), 0) AS seq FROM events`; dashboard stats.queries delta also 15; deltas 0. Timestamps (ms after stream open): 1 1 27 77 177 378 779 1581 3183 6383 12788 22799 32803 42811 52815. So: on stream open next() reads max(seq) once and data_version once, then data_version at 25, 50, 100 ... 6400 ms gaps (back-off from 25 ms doubling), reaching the 10 s ceiling ~12.8 s after the stream opened; steady state is 1 read per 10 s (0.1 reads/s, 3 reads in the second 30 s), independent of the number of streams (one shared loop). An answer of 'about one read per 10 s at steady state, ~14-16 reads in the first minute' is correct; counts of 13-17 are within timer jitter. The server.ts header comment (:8-9, :31-32) and docs/architecture.md:49 say the same (10 s safety interval, settles ~20 s after the last write). With zero open streams the loop exits and there are no reads (code: server.ts:224, :186-190, :240-243; not measured). NOT ITEMS (deliberately excluded): fs.watch waker in ChangeWatcher.startFsWatch (changes.ts:41-55) only fires on bus.db / bus.db-wal changes, so it does not fire while idle (measured: intervals doubled with no resets); Hub ping setInterval (server.ts:216-218) writes ': ping' every 25 s with no DB read (2 ping frames seen in the window); client setInterval(render, 30000) in src/dashboard/assets.ts:99 re-renders locally with no request; Reader.state/Reader.delta, /api/task, /login, /api/send run only on page load, request or change; Hub constructor currentSeq (server.ts:168) runs once at startup. src/notify/wait.ts (SignalFileWatcher, waitForMail with maxPollMs 1000) is NOT used by the dashboard (server.ts imports ChangeWatcher directly); an answer that lists a src/notify/ site is a false positive. An agent that lists currentSeq separately should be treated as naming the next() loop only if it is clearly about the idle loop; otherwise it is a false positive (it runs once per next() call, i.e. once per 24 h LOOP_TIMEOUT_MS when idle)."
+}
