@@ -11,6 +11,7 @@ import { homeFor, resolveDbPath } from "../core/db.js";
 import { agentIdFromEnv } from "../core/identity.js";
 import { defaultImportSources, runImport } from "../core/import.js";
 import { waitForMail, waitSeconds } from "../notify/wait.js";
+import { budgetLine, budgetOf, budgetOver, limitsEmpty, usageJson } from "../core/control.js";
 import { BusError, OPERATOR_ID } from "../core/types.js";
 import { renderAgents, renderEvent, renderImport, renderMessages, renderStatus, renderTask, renderTasks } from "./format.js";
 const defaultIo = {
@@ -19,7 +20,7 @@ const defaultIo = {
     readStdin: () => readFileSync(0, "utf8"),
     env: process.env,
 };
-const BOOLEAN_FLAGS = new Set(["json", "peek", "all", "mine", "ack", "accept", "revise", "dry-run", "force", "follow", "operator", "open", "help"]);
+const BOOLEAN_FLAGS = new Set(["json", "peek", "all", "mine", "ack", "accept", "revise", "dry-run", "force", "follow", "operator", "open", "help", "clear"]);
 const REPEATED_FLAGS = new Set(["dep", "scope", "state", "file"]);
 export function parseArgs(argv) {
     const positionals = [];
@@ -295,7 +296,54 @@ async function dispatch(ctx) {
                 ctx.out(result, `added ${result.agent.id}; token ${result.tokenPath}`);
                 return 0;
             }
-            throw new BusError("invalid", "usage: qagent agent add <id> --role R | qagent agent list");
+            if (sub === "pause") {
+                const me = ctx.identity(true);
+                const id = ctx.position(2, "agent id");
+                const reason = ctx.str("reason") ?? ctx.parsed.positionals.slice(3).join(" ");
+                const agent = ctx.bus.pauseAgent(me, id, reason || null);
+                ctx.out(agent, `paused ${agent.id}; it starts no new turn until qagent agent resume ${agent.id}`);
+                return 0;
+            }
+            if (sub === "resume") {
+                const me = ctx.identity(true);
+                const agent = ctx.bus.resumeAgent(me, ctx.position(2, "agent id"));
+                const fresh = budgetOf(agent.meta, { turns: 0, minutes: 0, usd: 0 }) ? "; its budget starts again" : "";
+                ctx.out(agent, `resumed ${agent.id}${fresh}`);
+                return 0;
+            }
+            if (sub === "budget") {
+                const id = ctx.position(2, "agent id");
+                const limits = {};
+                for (const name of ["turns", "minutes", "usd"]) {
+                    const raw = ctx.str(name);
+                    if (raw === undefined)
+                        continue;
+                    const value = Number(raw.trim());
+                    if (!raw.trim() || Number.isNaN(value))
+                        throw new BusError("invalid", `--${name} must be a number`);
+                    limits[name] = value;
+                }
+                const clear = ctx.flag("clear") === true;
+                let agent;
+                if (clear || !limitsEmpty(limits)) {
+                    agent = ctx.bus.setBudget(ctx.identity(true), id, clear ? null : limits);
+                }
+                else {
+                    const found = ctx.bus.getAgent(id);
+                    if (!found)
+                        throw new BusError("not_found", `unknown agent: ${id}`);
+                    agent = found;
+                }
+                const budget = ctx.bus.budgetOf(agent);
+                const over = budget ? budgetOver(budget) : null;
+                const text = budget ? `${agent.id} budget: ${budgetLine(budget)}${over ? ` / reached (${over})` : ""}` : `${agent.id} has no budget`;
+                const value = budget
+                    ? { agent: agent.id, limits: { turns: budget.limits.turns ?? null, minutes: budget.limits.minutes ?? null, usd: budget.limits.usd ?? null }, used: usageJson(budget.used), over }
+                    : { agent: agent.id, limits: null };
+                ctx.out(value, text);
+                return 0;
+            }
+            throw new BusError("invalid", "usage: qagent agent add <id> --role R | list | pause <id> [reason] | resume <id> | budget <id> [--turns N] [--minutes N] [--usd N] [--clear]");
         }
         case "token": {
             if (sub !== "rotate")

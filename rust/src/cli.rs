@@ -43,7 +43,7 @@ impl Default for Io {
 
 const BOOLEAN_FLAGS: &[&str] = &[
     "json", "peek", "all", "mine", "ack", "accept", "revise", "dry-run", "force", "follow",
-    "operator", "open", "help",
+    "operator", "open", "help", "clear",
 ];
 const REPEATED_FLAGS: &[&str] = &["dep", "scope", "state", "file"];
 
@@ -1183,8 +1183,97 @@ fn dispatch(ctx: &mut Context) -> Result<i32> {
                 );
                 Ok(0)
             }
+            Some("pause") => {
+                let me = ctx.identity(true)?;
+                let id = ctx.position(2, "agent id")?;
+                let reason = ctx.str_flag("reason").unwrap_or_else(|| {
+                    ctx.parsed
+                        .positionals
+                        .get(3..)
+                        .map(|w| w.join(" "))
+                        .unwrap_or_default()
+                });
+                let agent = ctx.bus()?.pause_agent(
+                    &me,
+                    &id,
+                    Some(reason.as_str()).filter(|r| !r.is_empty()),
+                )?;
+                ctx.out(
+                    serde_json::to_value(&agent)?,
+                    &format!(
+                        "paused {}; it starts no new turn until qagent agent resume {}",
+                        agent.id, agent.id
+                    ),
+                );
+                Ok(0)
+            }
+            Some("resume") => {
+                let me = ctx.identity(true)?;
+                let id = ctx.position(2, "agent id")?;
+                let agent = ctx.bus()?.resume_agent(&me, &id)?;
+                let fresh = if crate::control::budget(&agent.meta, Default::default()).is_some() {
+                    "; its budget starts again"
+                } else {
+                    ""
+                };
+                ctx.out(
+                    serde_json::to_value(&agent)?,
+                    &format!("resumed {}{fresh}", agent.id),
+                );
+                Ok(0)
+            }
+            Some("budget") => {
+                let id = ctx.position(2, "agent id")?;
+                let number = |ctx: &Context, name: &str| -> Result<Option<f64>> {
+                    ctx.str_flag(name)
+                        .map(|v| {
+                            v.trim().parse::<f64>().map_err(|_| {
+                                BusError::invalid(format!("--{name} must be a number"))
+                            })
+                        })
+                        .transpose()
+                };
+                let limits = crate::control::Limits {
+                    turns: number(ctx, "turns")?,
+                    minutes: number(ctx, "minutes")?,
+                    usd: number(ctx, "usd")?,
+                };
+                let bus_agent = if ctx.bool_flag("clear") || !limits.is_empty() {
+                    let me = ctx.identity(true)?;
+                    let limits = (!ctx.bool_flag("clear")).then_some(limits);
+                    ctx.bus()?.set_budget(&me, &id, limits)?
+                } else {
+                    ctx.bus()?
+                        .get_agent(&id)?
+                        .ok_or_else(|| BusError::not_found(format!("unknown agent: {id}")))?
+                };
+                let bus = ctx.bus()?;
+                let budget = bus.budget_of(&bus_agent);
+                let text = match &budget {
+                    Some(b) => format!(
+                        "{} budget: {}{}",
+                        bus_agent.id,
+                        b.line(),
+                        b.over()
+                            .map(|o| format!(" / reached ({o})"))
+                            .unwrap_or_default()
+                    ),
+                    None => format!("{} has no budget", bus_agent.id),
+                };
+                let value = match &budget {
+                    Some(b) => json!({
+                        "agent": bus_agent.id,
+                        "limits": {"turns": b.limits.turns, "minutes": b.limits.minutes, "usd": b.limits.usd},
+                        "used": b.used.to_json(),
+                        "over": b.over(),
+                    }),
+                    None => json!({"agent": bus_agent.id, "limits": null}),
+                };
+                ctx.out(value, &text);
+                Ok(0)
+            }
             _ => Err(BusError::invalid(
-                "usage: qagent agent add <id> --role R | qagent agent list",
+                "usage: qagent agent add <id> --role R | list | pause <id> [reason] | resume <id> | budget <id> [--turns N] [--minutes N] [--usd N] [--clear]",
             )),
         },
         Some("token") => {

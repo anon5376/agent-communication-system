@@ -353,6 +353,21 @@ The supervisor waits for one identity, launches its configured CLI, gives the ch
 
 For subscription-backed providers, it removes common provider API-key variables unless `QAGENT_ALLOW_API_KEY=1` is set. This reduces accidental metered API use; it is not a substitute for checking the provider CLI's authentication mode.
 
+### Pause an agent, or give it a budget
+
+```bash
+qagent agent pause coder "waiting for the API keys"   # no new turn until resumed
+qagent agent resume coder
+qagent agent budget coder --turns 20 --minutes 60     # also --usd N; --clear removes it
+qagent agent budget coder                             # what it has used so far
+```
+
+A paused agent's supervisor finishes any turn already running and then starts no new one; its mail stays unread until it resumes. A claim it holds lapses at its lease and the task returns to the pool. The operator may pause any agent, and an agent may pause itself.
+
+A budget counts what the agent's supervisor records in `~/.agent-bus/sessions/<agent>.json` from the moment the budget is set: turns, minutes the CLI ran, and dollars as the CLI reported them. A CLI that reports no cost counts as $0, so use turns or minutes for those. When a limit is reached, the supervisor pauses the agent before its next turn and writes to the operator. Resuming starts a fresh allowance of the same size.
+
+Both are stored in the agent's `meta` on the bus (`paused`, `budget`), so the TypeScript and Rust implementations read and write the same state.
+
 ## 11. Use the dashboard
 
 ```bash
