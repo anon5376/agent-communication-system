@@ -64,6 +64,7 @@ Everything aos knows about your crew is a plain file in `~/.agent-bus/aos/` (nex
 | `missions/*.md` | mission templates |
 | `trusted` | folders you allowed agents to work in |
 | `workdir` | the folder the crew last worked in |
+| `history` | lines you typed in command home, for up and down |
 
 aos writes a preset only when the file is missing, so your edits are never overwritten; delete a file and run `aos setup` to get the default back. `aos setup --force` rewrites `crew.json` from what is installed now. To pin a model, add `"exactModel"` to its entry under `models`; without one each CLI uses its own default. To add a teammate, copy an agent block in `crew.json`, give it an `instructions` file, and run `aos setup`.
 
@@ -77,6 +78,8 @@ Only Claude Code, Codex CLI and Cursor CLI can join a crew today: aos hands thos
 aos "make the tests pass"        # hand a goal to the crew and return
 aos fix "login crashes on an empty password"
 aos start | aos stop             # start the crew in this folder / stop it
+aos resume                       # start the crew again and carry on with what is open
+aos history                      # your past goals and how each ended
 aos setup [--force]              # detect CLIs, write the crew
 aos doctor                       # check everything; exits 1 if something needs fixing
 aos missions
@@ -129,7 +132,7 @@ On an agent, the options act on the task it has claimed. The operator may review
 
 ## Commands
 
-Press `c` for command home. It lists the operator's latest mail with message numbers, and takes:
+Press `c` for command home. It lists the operator's latest mail with message numbers, and takes the commands below. While you type the first word, matching commands and missions appear under the prompt and `tab` completes the first one; a leading `/` is allowed (`/help`). Up and down bring back earlier lines, also after a restart (they are kept in `~/.agent-bus/aos/history`). When you open aos and a goal is still open while the crew is stopped, aos says so and `resume` carries on.
 
 | Command | What it writes |
 |---|---|
@@ -137,6 +140,8 @@ Press `c` for command home. It lists the operator's latest mail with message num
 | `<mission> <what>` | a goal from that mission's template (`missions` lists them) |
 | `run <goal> [--to agent]` | a top-level task: the new goal |
 | `start [agent]`, `stop agents`, `stop <agent>` | nothing on the bus: starts or stops crew supervisors |
+| `resume` | nothing on the bus: starts any stopped crew members; they pick up the open goal where it was |
+| `history` | nothing: your last 12 goals, each as open, at your gate, done, failed or stopped |
 | `setup [--force]`, `doctor`, `missions`, `crew` | nothing |
 | `task add <title> [--to agent] [--under #] [--review]` | a task; `--review` makes you its reviewer, so its result comes to your gate |
 | `accept # <reason>`, `revise # <feedback>` | a review |

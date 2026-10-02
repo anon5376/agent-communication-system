@@ -20,7 +20,7 @@ fn temp_db(tag: &str) -> PathBuf {
         .join("bus.db")
 }
 
-fn app_on(db: &PathBuf) -> App {
+fn app_on(db: &std::path::Path) -> App {
     let bus = Bus::open(Some(db)).unwrap();
     assert!(ensure_operator(&bus).unwrap());
     let mut app = App::new(bus, DEFAULT_STALL_MIN * 60_000).unwrap();
@@ -148,4 +148,47 @@ fn the_role_prompt_goes_before_the_brief() {
         acs::supervisor::with_role_prompt(None, "do it".into()),
         "do it"
     );
+}
+
+#[test]
+fn tab_completes_and_history_lists_past_goals() {
+    let db = temp_db("history");
+    assert!(demo::seed(&db).unwrap());
+    let mut app = app_on(&db);
+    app.ui.route = Route::Home;
+    app.command_line("fix the flaky budget test").unwrap();
+    for c in "/his".chars() {
+        app.key(Key::Char(c)).unwrap();
+    }
+    let all = text(&app);
+    assert!(all.contains("tab history"), "{all}");
+    app.key(Key::Tab).unwrap();
+    assert_eq!(app.ui.prompt, "history ");
+    app.key(Key::Enter).unwrap();
+    let all = text(&app);
+    assert!(all.contains("#8    open"), "{all}");
+    assert!(all.contains("fix the flaky budget test"), "{all}");
+}
+
+#[test]
+fn up_brings_back_earlier_lines_after_a_restart() {
+    let db = temp_db("recall");
+    assert!(demo::seed(&db).unwrap());
+    let mut app = app_on(&db);
+    app.ui.route = Route::Home;
+    for line in ["status", "missions"] {
+        for c in line.chars() {
+            app.key(Key::Char(c)).unwrap();
+        }
+        app.key(Key::Enter).unwrap();
+    }
+    let mut app = app_on(&db);
+    app.ui.route = Route::Home;
+    app.key(Key::Up).unwrap();
+    assert_eq!(app.ui.prompt, "missions");
+    app.key(Key::Up).unwrap();
+    assert_eq!(app.ui.prompt, "status");
+    app.key(Key::Down).unwrap();
+    app.key(Key::Down).unwrap();
+    assert_eq!(app.ui.prompt, "");
 }

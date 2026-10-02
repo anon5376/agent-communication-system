@@ -483,7 +483,7 @@ fn keys_line(f: &Frame, ui: &Ui) -> VLine {
         Route::Inspect => "1-3 act  w message  esc back  j/k next  tab gate  ? keys",
         Route::Gate => "1-3 choose  esc back  ? keys",
         Route::Help => "esc back  q leave",
-        Route::Home => "type a command  enter run  esc back",
+        Route::Home => "type a goal or a command  tab complete  up/down earlier lines  esc back",
         Route::Goal => "j/k move  enter inspect  s swarm  esc back  ? keys",
         Route::Evidence => "j/k move  enter inspect  s swarm  esc back  ? keys",
         Route::Retro => "j/k scroll  a all events  f follow  esc back  ? keys",
@@ -2013,6 +2013,70 @@ pub fn help(f: &Frame, ui: &Ui) -> Vec<VLine> {
     compose(f, ui, "keys", body)
 }
 
+/// Command-home words, for the suggestions under the prompt and for tab.
+/// (word, how to use it, what it does). Missions are added from their files.
+pub const COMMANDS: &[(&str, &str, &str)] = &[
+    ("help", "help", "every command on one screen"),
+    (
+        "resume",
+        "resume",
+        "start the crew again and carry on with open goals",
+    ),
+    ("history", "history", "your past goals and how each ended"),
+    ("start", "start [agent]", "start the crew in this folder"),
+    (
+        "stop",
+        "stop agents | stop [#]",
+        "stop the crew, or a goal and all under it",
+    ),
+    ("status", "status", "agents, open tasks, reviews, stalls"),
+    ("gate", "gate", "open the result waiting for your decision"),
+    ("accept", "accept # <reason>", "accept a result"),
+    (
+        "revise",
+        "revise # <feedback>",
+        "send a result back for changes",
+    ),
+    ("send", "send <agent|all> <message>", "write to an agent"),
+    ("reply", "reply <msg#> <text>", "answer a message"),
+    ("read", "read", "mark the operator's mail read"),
+    ("missions", "missions", "list mission templates"),
+    (
+        "setup",
+        "setup [--force]",
+        "find agent CLIs and write your crew",
+    ),
+    ("doctor", "doctor", "check everything and say what to fix"),
+    ("swarm", "swarm", "the live view of agents and work"),
+    ("goal", "goal", "the open goal as a tree"),
+    ("evidence", "evidence", "submitted results"),
+    ("crew", "crew", "who is on the team, running or stopped"),
+    ("retro", "retro", "the event log"),
+];
+
+/// Up to `max` commands and missions whose word starts with what is typed.
+/// Only while the first word is still being typed; a leading / is allowed.
+pub fn suggestions(f: &Frame, typed: &str, max: usize) -> Vec<(String, String)> {
+    let t = typed.trim_start().trim_start_matches('/');
+    if typed.trim().is_empty() || t.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    let t = t.to_lowercase();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (name, summary) in &f.crew.missions {
+        if name.starts_with(&t) && name != "run" {
+            out.push((format!("{name} <what>"), summary.clone()));
+        }
+    }
+    for (word, usage, what) in COMMANDS {
+        if word.starts_with(&t) && !out.iter().any(|(u, _)| u.split(' ').next() == Some(word)) {
+            out.push((usage.to_string(), what.to_string()));
+        }
+    }
+    out.truncate(max);
+    out
+}
+
 pub fn home(f: &Frame, ui: &Ui) -> Vec<VLine> {
     let w = ui.width;
     let mut body = vec![rule(w)];
@@ -2046,7 +2110,12 @@ pub fn home(f: &Frame, ui: &Ui) -> Vec<VLine> {
         body.push(dim("no mail for the operator"));
     }
     body.push(rule(w));
-    let room = ui.height.saturating_sub(4 + body.len() + 1);
+    let hints = if ui.pending.is_none() {
+        suggestions(f, &ui.prompt, 5)
+    } else {
+        Vec::new()
+    };
+    let room = ui.height.saturating_sub(4 + body.len() + 1 + hints.len());
     let out: Vec<_> = ui
         .out
         .iter()
@@ -2056,8 +2125,15 @@ pub fn home(f: &Frame, ui: &Ui) -> Vec<VLine> {
     for segs in out {
         body.push(line(segs));
     }
-    while body.len() < ui.height.saturating_sub(4 + 1) {
+    while body.len() < ui.height.saturating_sub(4 + 1 + hints.len()) {
         body.push(blank());
+    }
+    for (i, (usage, what)) in hints.iter().enumerate() {
+        body.push(line(vec![
+            seg(if i == 0 { "tab " } else { "    " }, Role::Dim),
+            seg(pad(usage, 28), Role::Plain),
+            seg(trunc(what, w.saturating_sub(32)), Role::Dim),
+        ]));
     }
     body.push(match &ui.pending {
         Some(p) => confirm_line(p),

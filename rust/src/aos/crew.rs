@@ -246,6 +246,10 @@ impl Paths {
     pub fn workdir_file(&self) -> PathBuf {
         self.dir.join("workdir")
     }
+    /// Lines typed in command home, newest last, for up and down.
+    pub fn history_file(&self) -> PathBuf {
+        self.dir.join("history")
+    }
     pub fn trusted_file(&self) -> PathBuf {
         self.dir.join("trusted")
     }
@@ -1194,7 +1198,7 @@ pub fn doctor(db_path: &Path) -> Vec<Check> {
                 .join(" ")
         ),
     ));
-    let others: Vec<String> = detect()
+    let others: Vec<(String, bool)> = detect()
         .into_iter()
         .filter(|f| f.path.is_some())
         .filter(|f| {
@@ -1202,10 +1206,31 @@ pub fn doctor(db_path: &Path) -> Vec<Check> {
                 .as_ref()
                 .is_none_or(|c| !c.harnesses.contains_key(f.cli.id))
         })
-        .map(|f| f.cli.id.to_string())
+        .map(|f| (f.cli.id.to_string(), f.cli.crew_ready))
         .collect();
-    if !others.is_empty() {
-        out.push(check(None, "also found", others.join(", ")));
+    let ready: Vec<String> = others.iter().filter(|o| o.1).map(|o| o.0.clone()).collect();
+    let not_ready: Vec<String> = others
+        .iter()
+        .filter(|o| !o.1)
+        .map(|o| o.0.clone())
+        .collect();
+    if !ready.is_empty() {
+        let detail = if config.is_some() {
+            format!(
+                "{} / not in your crew; aos setup --force rebuilds it",
+                ready.join(", ")
+            )
+        } else {
+            format!("{} / aos setup puts them in a crew", ready.join(", "))
+        };
+        out.push(check(None, "found", detail));
+    }
+    if !not_ready.is_empty() {
+        out.push(check(
+            None,
+            "found",
+            format!("{} / can't join a crew yet", not_ready.join(", ")),
+        ));
     }
     out
 }

@@ -26,6 +26,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
+use std::fs;
 use std::io::stdout;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -111,7 +112,12 @@ pub struct App {
     pub paths: crew::Paths,
     /// Agent CLIs found on this computer, once something asked.
     pub found: Vec<crew::Found>,
+    /// Lines typed in command home, oldest first, and where up/down is in them.
+    pub typed: Vec<String>,
+    pub typed_at: Option<usize>,
 }
+
+const TYPED_KEEP: usize = 500;
 
 impl App {
     pub fn new(bus: Bus, stall_ms: i64) -> Result<App> {
@@ -123,11 +129,55 @@ impl App {
             ui: Ui::default(),
             stall_ms,
             quit: false,
+            typed: fs::read_to_string(paths.history_file())
+                .map(|t| t.lines().map(str::to_string).collect())
+                .unwrap_or_default(),
+            typed_at: None,
             paths,
             found: Vec::new(),
         };
         app.refresh()?;
         Ok(app)
+    }
+
+    /// Remember a line typed in command home, here and in the history file.
+    fn remember(&mut self, line: &str) {
+        let line = line.trim();
+        self.typed_at = None;
+        if line.is_empty() || self.typed.last().map(String::as_str) == Some(line) {
+            return;
+        }
+        self.typed.push(line.to_string());
+        if self.typed.len() > TYPED_KEEP {
+            self.typed.drain(..self.typed.len() - TYPED_KEEP);
+        }
+        let _ = fs::create_dir_all(&self.paths.dir);
+        let _ = fs::write(self.paths.history_file(), self.typed.join("\n") + "\n");
+    }
+
+    /// Up (older) or down (newer) through the typed lines.
+    fn recall(&mut self, older: bool) {
+        let n = self.typed.len();
+        if n == 0 {
+            return;
+        }
+        let at = match (self.typed_at, older) {
+            (None, true) => Some(n - 1),
+            (None, false) => None,
+            (Some(i), true) => Some(i.saturating_sub(1)),
+            (Some(i), false) if i + 1 < n => Some(i + 1),
+            (Some(_), false) => None,
+        };
+        self.typed_at = at;
+        self.ui.prompt = at.map(|i| self.typed[i].clone()).unwrap_or_default();
+    }
+
+    /// The open goal, if the crew is configured but nobody is running it.
+    pub fn stranded_goal(&self) -> Option<&crate::types::Task> {
+        let c = &self.frame.crew;
+        (c.configured && c.running() == 0)
+            .then_some(())
+            .and(self.frame.goal.as_ref())
     }
 
     /// First run: no crew file and nobody on the bus but the operator.
@@ -440,6 +490,8 @@ impl App {
             .strip_prefix("qagent ")
             .or_else(|| input.strip_prefix("aos "))
             .unwrap_or(input);
+        // People used to other agent CLIs type /help, /resume: same thing.
+        let input = input.strip_prefix('/').unwrap_or(input);
         let mut words = input.split_whitespace();
         let Some(w) = words.next() else { return Ok(()) };
         let rest: Vec<&str> = words.collect();
@@ -464,6 +516,7 @@ impl App {
                     "<anything>        type what you want done; the lead takes it as a goal",
                     "fix|build|research|review|explain|docs <what>   start from a mission",
                     "missions          list mission templates (your own files, editable)",
+                    "history           past goals   resume   start the crew and carry on",
                     "start [agent]     start the crew here   stop agents|<agent>   stop it",
                     "setup [--force]   find agent CLIs, make the crew   doctor   check all",
                     "accept # <reason>   revise # <feedback>   requeue # [reason]",
@@ -471,6 +524,7 @@ impl App {
                     "send <agent|all> <message>   reply <msg#> <text>   ack <msg#>   read",
                     "task add <title> [--to agent] [--under #] [--review]   status",
                     "screens: swarm goal evidence retro crew memory keys",
+                    "tab completes a command; up and down bring back earlier lines",
                 ] {
                     self.ui.out.push(out(l.into()));
                 }
@@ -613,6 +667,29 @@ impl App {
                 if rest.len() == 1 && self.frame.crew.members.iter().any(|m| m.id == rest[0]) =>
             {
                 self.stop_crew(&[rest[0].to_string()])?;
+            }
+            "history" if rest.is_empty() => self.history()?,
+            "resume" | "continue" if rest.is_empty() => {
+                if !self.frame.crew.configured {
+                    self.say(dim_line("no crew yet / setup makes one"));
+                } else {
+                    let goal = self.frame.goal.clone();
+                    if self.frame.crew.running() < self.frame.crew.members.len()
+                        && !self.start_crew(&[])?
+                    {
+                        return Ok(());
+                    }
+                    match goal {
+                        Some(g) => self.say(ok_line(format!(
+                            "carrying on with goal #{} / {}",
+                            g.id,
+                            view::trunc(&g.title, 50)
+                        ))),
+                        None => self.say(dim_line(
+                            "nothing open to carry on / type what you want done",
+                        )),
+                    }
+                }
             }
             "missions" if rest.is_empty() => {
                 for m in crew::missions(&self.paths) {
@@ -834,11 +911,23 @@ impl App {
                 Key::Esc => self.back(),
                 Key::Enter => {
                     let line = std::mem::take(&mut self.ui.prompt);
+                    self.remember(&line);
                     self.command(&line)?;
                 }
                 Key::Backspace => {
                     self.ui.prompt.pop();
                 }
+                Key::Tab => {
+                    if let Some((usage, _)) = view::suggestions(&self.frame, &self.ui.prompt, 1)
+                        .into_iter()
+                        .next()
+                    {
+                        let word = usage.split(' ').next().unwrap_or("").to_string();
+                        self.ui.prompt = format!("{word} ");
+                    }
+                }
+                Key::Up => self.recall(true),
+                Key::Down => self.recall(false),
                 Key::Char(c) if self.ui.prompt.chars().count() < 400 => self.ui.prompt.push(c),
                 _ => {}
             }
@@ -1209,6 +1298,53 @@ impl App {
 
     /// Start a goal from a mission template and hand it to the lead, starting
     /// the crew first if nobody is running.
+    /// The goals the operator started, newest first, and how each one ended.
+    fn history(&mut self) -> Result<()> {
+        let ids: Vec<i64> = {
+            let mut stmt = self.bus.conn.prepare_cached(
+                "SELECT id FROM tasks WHERE parent_id IS NULL AND creator = ? ORDER BY id DESC LIMIT 12",
+            )?;
+            let rows = stmt.query_map([OPERATOR_ID], |row| row.get::<_, i64>(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        if ids.is_empty() {
+            self.say(dim_line("no goals yet / type what you want done"));
+            return Ok(());
+        }
+        let now = self.frame.now;
+        let w = self.ui.width.max(60);
+        let mut at_gate = None;
+        for id in ids {
+            let t = self.bus.get_task(id)?.task;
+            let state = match t.state.as_str() {
+                "accepted" => "done",
+                "failed" => "failed",
+                "cancelled" => "stopped",
+                "submitted" => "at your gate",
+                _ => "open",
+            };
+            if t.state == "submitted" && at_gate.is_none() {
+                at_gate = Some(t.id);
+            }
+            self.ui.out.push(vec![
+                (view::pad(&format!("#{}", t.id), 6), Role::Dim),
+                (view::pad(state, 14), Role::Plain),
+                (view::trunc(&t.title, w.saturating_sub(32)), Role::Plain),
+                (
+                    format!("  {}", frame::age(Some(t.updated_ms), now)),
+                    Role::Dim,
+                ),
+            ]);
+        }
+        match at_gate {
+            Some(id) => self.say(dim_line(format!(
+                "#{id} waits for you: accept {id} <why>, or revise {id} <what to change>"
+            ))),
+            None => self.say(dim_line("details of one: aos task show <#>")),
+        }
+        Ok(())
+    }
+
     fn start_goal(&mut self, mission: &str, goal: &str, to: Option<String>) -> Result<()> {
         let goal = goal.trim();
         if goal.is_empty() {
@@ -1435,6 +1571,12 @@ pub fn run(db_path: &Path, tier: Tier, stall_ms: i64) -> Result<i32> {
     } else if app.first_run() {
         app.detect()?;
         app.ui.route = Route::Welcome;
+    } else if let Some(g) = app.stranded_goal() {
+        let text = format!(
+            "goal #{} is still open and the crew is stopped / c, then resume",
+            g.id
+        );
+        app.note(text);
     }
     let mut seq = app.frame.seq;
 
@@ -1512,6 +1654,8 @@ const USAGE: &str = "aos - mission control for a team of AI coding agents
   aos fix <what is broken>  start from a mission: build, fix, research, review,
                             explain, docs, or any mission file you add
   aos start | aos stop      start the crew in this folder (it keeps running) / stop it
+  aos resume                start the crew again and carry on with what is open
+  aos history               your past goals and how each ended
   aos setup [--force]       find agent CLIs on this computer and write your crew
   aos doctor                check everything and say what to fix
   aos missions              list the mission templates
