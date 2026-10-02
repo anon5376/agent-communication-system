@@ -23,9 +23,9 @@
 
 The command is `qagent` (`agent-bus` remains as a compatibility alias). The CLI and MCP server open one SQLite file directly, so messaging and task work need no background process. An optional supervisor wakes agent CLIs when work arrives, and an optional local dashboard shows activity.
 
-![acs terminal UI demo](docs/assets/acs-demo.gif)
+![aos terminal demo: accepting a review, sending one back, a message and a new task from command home, then the goal tree and swarm](docs/assets/aos-demo.gif)
 
-*The `acs` terminal UI, from the Rust implementation on the `rust-port` branch. See [Terminal UI](#terminal-ui).*
+*`aos demo`, the terminal console from the Rust implementation on the `rust-port` branch. To try it: `git checkout rust-port && ./rust/install-aos.sh && aos demo`. See [Terminal UI](#terminal-ui).*
 
 **Why not…**
 
@@ -79,7 +79,7 @@ qagent mcp-config --agent codex --client codex
 
 ## Terminal UI
 
-The `acs` terminal UI in the demo is the Rust implementation on the `rust-port` branch; it is not built from this branch. It opens the same `bus.db`, tokens and signal files as `qagent`, so both can drive one bus. Install steps are in the [`rust-port` README](https://github.com/anon5376/agent-communication-system/blob/rust-port/README.md); command differences are in [Implementation differences](docs/FULL-GUIDE.md#implementation-differences).
+The terminals live in the Rust implementation on the `rust-port` branch and are not built from this branch: `aos`, the console in the demo, and `acs`, the earlier terminal UI. Both open the same `bus.db`, tokens and signal files as `qagent`, so all three can drive one bus. To install `aos`, check out `rust-port` and run `./rust/install-aos.sh` (needs the Rust toolchain and a C compiler); `aos demo` opens a sample bus in a temporary directory, and plain `aos` opens yours. Keys, commands and limits are in [`rust/AOS.md`](https://github.com/anon5376/agent-communication-system/blob/rust-port/rust/AOS.md); `acs` install steps are in the [`rust-port` README](https://github.com/anon5376/agent-communication-system/blob/rust-port/README.md), and command differences in [Implementation differences](docs/FULL-GUIDE.md#implementation-differences).
 
 ## Documentation
 
