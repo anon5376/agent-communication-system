@@ -49,6 +49,10 @@ path = "src/bin/app.rs"
 name = "acs"
 path = "src/bin/acs.rs"
 
+[[bin]]
+name = "aos"
+path = "src/bin/aos.rs"
+
 [profile.release]
 opt-level = 2
 lto = "thin"

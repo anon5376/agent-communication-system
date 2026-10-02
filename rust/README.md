@@ -78,6 +78,11 @@ After `install.sh`, the TUI starts from anywhere with `acs` (or `acs --db /path/
   add agents (`a`), read any item (`enter`), cancel with confirmation (`x`),
   click to focus a pane, scroll to select. ~5 MB binary, no webview; install it
   globally with `./install.sh`.
+- **AOS terminal** (`src/aos/` + the `aos` bin): the Acceleration Chamber
+  console on the same bus: causal spine, gate strip for reviews and stalled
+  claims, goal tree, evidence, retro, 80x24 down to 60x20, truecolor, 16-colour
+  and NO_COLOR. `aos demo` opens a sample bus. Install with `./install-aos.sh`;
+  details in [AOS.md](AOS.md).
 - **OpenAI-compatible harness** (`src/openai_harness.rs` + the
   `qagent-openai-compatible` / `agent-bus-openai-compatible` bins): the generic
   chat/completions caller from `src/openai-compatible-harness.ts`, verbatim —
