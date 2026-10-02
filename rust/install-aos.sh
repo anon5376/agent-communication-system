@@ -8,12 +8,13 @@ src="$here/target/release/aos"
 
 install_to() {
     if [ -w "$1" ] || [ -w "$1/aos" ]; then
-        cp "$src" "$1/aos"
+        # Rename over the old one so agents still running it are not disturbed.
+        cp "$src" "$1/.aos.new" && mv -f "$1/.aos.new" "$1/aos"
         echo "installed: $1/aos"
         return 0
     fi
     if command -v sudo >/dev/null 2>&1; then
-        sudo cp "$src" "$1/aos" && echo "installed: $1/aos" && return 0
+        sudo cp "$src" "$1/.aos.new" && sudo mv -f "$1/.aos.new" "$1/aos" && echo "installed: $1/aos" && return 0
     fi
     return 1
 }
@@ -27,10 +28,10 @@ elif install_to "$HOME/.local/bin"; then
     esac
 else
     mkdir -p "$HOME/.local/bin"
-    cp "$src" "$HOME/.local/bin/aos"
+    cp "$src" "$HOME/.local/bin/.aos.new" && mv -f "$HOME/.local/bin/.aos.new" "$HOME/.local/bin/aos"
     echo "installed: $HOME/.local/bin/aos"
     echo "note: add ~/.local/bin to your PATH (export PATH=\"\$HOME/.local/bin:\$PATH\")"
 fi
 
-echo "try it:  aos demo     (opens a sample bus in a temp directory)"
-echo "         aos          (uses ~/.agent-bus/bus.db, the same bus as qagent and acs)"
+echo "next: cd into a project folder and run  aos"
+echo "      (to look around first with a sample team:  aos demo)"
