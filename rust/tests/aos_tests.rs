@@ -76,6 +76,21 @@ fn every_screen_fits_its_terminal_exactly() {
         assert_eq!(text(&app).len(), h);
         app.ui.inspect = Some(Target::Task(4));
         assert!(text(&app).iter().all(|l| l.chars().count() == w));
+        app.ui.inspect = Some(Target::Task(3));
+        app.key(Key::Char('1')).unwrap();
+        let lines = text(&app);
+        assert_eq!(lines.len(), h);
+        assert!(lines.iter().all(|l| l.chars().count() == w));
+        app.key(Key::Esc).unwrap();
+        app.ui.route = Route::Home;
+        app.command_line("stop").unwrap();
+        let lines = text(&app);
+        assert_eq!(lines.len(), h);
+        assert!(
+            lines.iter().all(|l| l.chars().count() == w),
+            "home confirm at {w}x{h}"
+        );
+        app.key(Key::Esc).unwrap();
     }
 }
 
@@ -323,4 +338,147 @@ fn a_missing_operator_token_opens_read_only_and_never_rotates() {
     assert!(status.contains("x FAILED / no token file"), "{status}");
     let bus = Bus::open(Some(&db)).unwrap();
     assert_eq!(bus.get_task(3).unwrap().task.state, "submitted");
+}
+
+fn home(app: &mut App, line: &str) -> String {
+    app.ui.route = Route::Home;
+    app.command_line(line).unwrap();
+    text(app).join("\n")
+}
+
+#[test]
+fn inspecting_a_task_offers_the_actions_its_state_allows() {
+    let (mut app, db) = demo_app(80, 24);
+    app.ui.route = Route::Inspect;
+    app.ui.inspect = Some(Target::Task(5));
+    let all = text(&app).join("\n");
+    assert!(all.contains("options     [3] CANCEL"), "{all}");
+    keys(&mut app, &[Key::Char('1')]);
+    assert!(
+        app.ui.pending.is_none(),
+        "no option 1 on a task waiting for changes"
+    );
+
+    app.ui.inspect = Some(Target::Task(3));
+    let all = text(&app).join("\n");
+    assert!(
+        all.contains("[1] ACCEPT   [2] REVISE   [3] CANCEL"),
+        "{all}"
+    );
+    keys(&mut app, &[Key::Char('2')]);
+    typed(&mut app, "add the interop column first");
+    keys(&mut app, &[Key::Enter]);
+    let t = Bus::open(Some(&db)).unwrap().get_task(3).unwrap().task;
+    assert_eq!(t.state, "changes_requested");
+    assert_eq!(
+        app.ui.route,
+        Route::Inspect,
+        "stays on the task after acting"
+    );
+}
+
+#[test]
+fn inspecting_an_agent_acts_on_its_claim() {
+    let (mut app, db) = demo_app(80, 24);
+    app.ui.route = Route::Inspect;
+    app.ui.inspect = Some(Target::Agent("impl-b".into()));
+    let all = text(&app).join("\n");
+    assert!(all.contains("[1] REQUEUE   [3] CANCEL  on #4"), "{all}");
+    keys(&mut app, &[Key::Char('1'), Key::Enter]);
+    let t = Bus::open(Some(&db)).unwrap().get_task(4).unwrap().task;
+    assert_eq!(t.state, "open");
+    assert_eq!(t.assignee, None);
+}
+
+#[test]
+fn w_opens_home_ready_to_message_the_selected_agent() {
+    let (mut app, _) = demo_app(80, 24);
+    keys(&mut app, &[Key::Char('j'), Key::Char('w')]);
+    assert_eq!(app.ui.route, Route::Home);
+    assert_eq!(app.ui.prompt, "send impl-b ");
+}
+
+#[test]
+fn run_and_task_add_take_assignee_parent_and_review() {
+    let (mut app, db) = demo_app(80, 24);
+    let all = home(&mut app, "run document the budget api --to lead");
+    assert!(
+        all.contains("[ ok ] goal #8 started / open for lead"),
+        "{all}"
+    );
+    let all = home(
+        &mut app,
+        "task add write the examples --under #8 --to scout --review",
+    );
+    assert!(all.contains("[ ok ] task #9 created"), "{all}");
+    let bus = Bus::open(Some(&db)).unwrap();
+    let goal = bus.get_task(8).unwrap().task;
+    assert_eq!(goal.title, "document the budget api");
+    assert_eq!(goal.parent_id, None);
+    let t = bus.get_task(9).unwrap().task;
+    assert_eq!(t.parent_id, Some(8));
+    assert_eq!(t.assignee.as_deref(), Some("scout"));
+    assert_eq!(t.reviewer.as_deref(), Some("operator"));
+}
+
+#[test]
+fn stop_cancels_the_goal_and_its_open_tasks_after_the_word() {
+    let (mut app, db) = demo_app(80, 24);
+    home(&mut app, "stop");
+    assert!(app.ui.pending.is_some());
+    typed(&mut app, "stp");
+    keys(&mut app, &[Key::Enter]);
+    assert_eq!(
+        Bus::open(Some(&db))
+            .unwrap()
+            .get_task(1)
+            .unwrap()
+            .task
+            .state,
+        "claimed"
+    );
+    for _ in 0..3 {
+        keys(&mut app, &[Key::Backspace]);
+    }
+    typed(&mut app, "stop");
+    keys(&mut app, &[Key::Enter]);
+    let all = text(&app).join("\n");
+    assert!(all.contains("#1 stopped / 6 tasks cancelled"), "{all}");
+    let bus = Bus::open(Some(&db)).unwrap();
+    for id in [1, 3, 4, 5, 6, 7] {
+        assert_eq!(bus.get_task(id).unwrap().task.state, "cancelled", "#{id}");
+    }
+    assert_eq!(
+        bus.get_task(2).unwrap().task.state,
+        "accepted",
+        "closed work stays closed"
+    );
+}
+
+#[test]
+fn reply_answers_in_the_thread_and_read_clears_the_mail() {
+    let (mut app, db) = demo_app(80, 24);
+    let q = app
+        .frame
+        .mail
+        .iter()
+        .find(|m| m.sender == "impl-b")
+        .cloned()
+        .unwrap();
+    assert!(app.frame.operator_unread > 0);
+    let all = home(
+        &mut app,
+        &format!("reply #{} record unknown cost and continue", q.seq),
+    );
+    assert!(all.contains(&format!("to impl-b on #{}", q.seq)), "{all}");
+    let bus = Bus::open(Some(&db)).unwrap();
+    let sent = bus
+        .get_messages(Some(q.seq), Some(10), Some(&q.thread), None)
+        .unwrap();
+    let a = sent.iter().find(|m| m.sender == "operator").unwrap();
+    assert_eq!(a.recipient.as_deref(), Some("impl-b"));
+    assert_eq!(a.msg_type, "answer");
+    assert_eq!(a.task_id, q.task_id);
+    home(&mut app, "read");
+    assert_eq!(app.frame.operator_unread, 0);
 }

@@ -89,6 +89,8 @@ pub enum PendingKind {
     Revise,
     Requeue,
     Cancel,
+    /// Cancel the goal and every open task under it.
+    Stop,
 }
 
 #[derive(Debug, Clone)]
@@ -98,11 +100,50 @@ pub struct Pending {
     pub typed: String,
 }
 
+/// The actions the operator can take on a task in its current state, as
+/// (option number, action). Closed tasks have none.
+pub fn task_options(t: &crate::types::Task) -> Vec<(u8, PendingKind)> {
+    match t.state.as_str() {
+        "submitted" => vec![
+            (1, PendingKind::Accept),
+            (2, PendingKind::Revise),
+            (3, PendingKind::Cancel),
+        ],
+        "claimed" => vec![(1, PendingKind::Requeue), (3, PendingKind::Cancel)],
+        "open" | "blocked" | "changes_requested" => vec![(3, PendingKind::Cancel)],
+        _ => Vec::new(),
+    }
+}
+
+fn option_word(k: PendingKind) -> &'static str {
+    match k {
+        PendingKind::Accept => "ACCEPT",
+        PendingKind::Revise => "REVISE",
+        PendingKind::Requeue => "REQUEUE",
+        PendingKind::Cancel => "CANCEL",
+        PendingKind::Stop => "STOP",
+    }
+}
+
+fn task_options_line(t: &crate::types::Task) -> Option<VLine> {
+    let opts = task_options(t);
+    if opts.is_empty() {
+        return None;
+    }
+    let text = opts
+        .iter()
+        .map(|(n, k)| format!("[{n}] {}", option_word(*k)))
+        .collect::<Vec<_>>()
+        .join("   ");
+    Some(lv("options", vec![seg(text, Role::Plain)]))
+}
+
 impl Pending {
     /// What has to be typed before Enter commits, if anything.
     pub fn needs_word(&self) -> Option<&'static str> {
         match self.kind {
             PendingKind::Cancel => Some("CANCEL"),
+            PendingKind::Stop => Some("STOP"),
             _ => None,
         }
     }
@@ -424,7 +465,7 @@ fn keys_line(f: &Frame, ui: &Ui) -> VLine {
     }
     let narrow = ui.width < 80;
     let t = match ui.route {
-        Route::Inspect => "esc back  j/k next  tab gate  ? keys  q leave",
+        Route::Inspect => "1-3 act  w message  esc back  j/k next  tab gate  ? keys",
         Route::Gate => "1-3 choose  esc back  ? keys",
         Route::Help => "esc back  q leave",
         Route::Home => "type a command  enter run  esc back",
@@ -645,13 +686,17 @@ fn confirm_line(p: &Pending) -> VLine {
         PendingKind::Revise => ("feedback", "what to change: "),
         PendingKind::Requeue => ("reason", "why requeue (optional): "),
         PendingKind::Cancel => ("confirm", "type CANCEL to cancel the task: "),
+        PendingKind::Stop => (
+            "confirm",
+            "type STOP to cancel the goal and its open tasks: ",
+        ),
     };
     lv(
         label,
         vec![
             seg(
                 prompt,
-                if p.kind == PendingKind::Cancel {
+                if matches!(p.kind, PendingKind::Cancel | PendingKind::Stop) {
                     Role::Gate
                 } else {
                     Role::Bold
@@ -1109,11 +1154,27 @@ pub fn inspect(f: &Frame, ui: &Ui) -> Vec<VLine> {
                 seg(format!("{} {}", a.id, a.role), Role::Bold),
             ]));
             let next = match a.st {
-                St::Blocked => "claim is stalled / tab to the gate to requeue or cancel",
+                St::Blocked => "claim is stalled / 1 requeue or 3 cancel below",
                 St::Disconnected => "agent is offline / qagent supervise to wake it",
                 _ => "nothing needs you on this agent",
             };
             body.push(lvs("next", next));
+            if let Some(t) = a
+                .task
+                .as_ref()
+                .and_then(|(tid, _)| f.tree.iter().find(|n| n.task.id == *tid))
+            {
+                if let Some(mut l) = task_options_line(&t.task) {
+                    l.segs
+                        .push(seg(format!("  on #{}   w message", t.task.id), Role::Dim));
+                    body.push(l);
+                }
+                if let Some(p) = ui.pending.as_ref().filter(|p| p.task_id == t.task.id) {
+                    body.push(confirm_line(p));
+                }
+            } else {
+                body.push(lvs("options", "w message"));
+            }
             body.push(rule(w));
             body.extend(agent_facts(f, a, w, if ui.height >= 30 { 11 } else { 9 }));
             body.push(rule(w));
@@ -1138,6 +1199,14 @@ pub fn inspect(f: &Frame, ui: &Ui) -> Vec<VLine> {
                 seg(trunc(&format!("#{} {}", t.id, t.title), w - 12), Role::Bold),
             ]));
             body.push(lvs("state", phrase));
+            let before_opts = body.len();
+            if let Some(l) = task_options_line(t) {
+                body.push(l);
+            }
+            if let Some(p) = ui.pending.as_ref().filter(|p| p.task_id == t.id) {
+                body.push(confirm_line(p));
+            }
+            let opts = body.len() - before_opts;
             body.push(rule(w));
             body.push(lvs(
                 "assignee",
@@ -1193,7 +1262,7 @@ pub fn inspect(f: &Frame, ui: &Ui) -> Vec<VLine> {
                     ),
                 ));
             }
-            body.truncate(if ui.height >= 30 { 16 } else { 13 });
+            body.truncate(opts + if ui.height >= 30 { 16 } else { 13 });
             body.push(rule(w));
             body.push(dim("events on this task, newest last"));
             let room = ui.height.saturating_sub(3 + 1 + body.len()).max(1);
@@ -1688,12 +1757,13 @@ pub fn help(f: &Frame, ui: &Ui) -> Vec<VLine> {
         ("tab", "move between the spine and the gate"),
         ("enter", "inspect, or open a gate (never approves)"),
         ("esc", "close detail, cancel, back one level"),
-        ("1 2 3", "choose a gate option; each one confirms"),
+        ("1 2 3", "choose an option on a gate or task; each confirms"),
+        ("w", "write to the selected agent (opens home)"),
         ("/", "filter the spine (never changes the bus)"),
         ("d", "expand or collapse hidden agents"),
         ("f", "follow the newest events"),
         ("g s e m r", "goal, swarm, evidence, memory, retro"),
-        ("c", "command home: status, send, task add"),
+        ("c", "command home: run, stop, task add, send, reply"),
         ("p", "providers"),
         ("q  ctrl-c", "leave aos (agents keep running)"),
         ("n b m", "under 80 columns: next, back, more"),
@@ -1758,11 +1828,14 @@ pub fn home(f: &Frame, ui: &Ui) -> Vec<VLine> {
     while body.len() < ui.height.saturating_sub(4 + 1) {
         body.push(blank());
     }
-    body.push(line(vec![
-        seg("> ", Role::Run),
-        seg(ui.prompt.clone(), Role::Bold),
-        seg(" ", Role::Cursor),
-    ]));
+    body.push(match &ui.pending {
+        Some(p) => confirm_line(p),
+        None => line(vec![
+            seg("> ", Role::Run),
+            seg(ui.prompt.clone(), Role::Bold),
+            seg(" ", Role::Cursor),
+        ]),
+    });
     compose(f, ui, "home", body)
 }
 

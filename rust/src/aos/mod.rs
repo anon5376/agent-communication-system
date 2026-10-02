@@ -9,7 +9,7 @@ pub mod demo;
 pub mod frame;
 pub mod view;
 
-use crate::bus::{Bus, CreateTaskInput, SendInput};
+use crate::bus::{Bus, CreateTaskInput, ListTasksInput, SendInput};
 use crate::error::{BusError, Result};
 use crate::identity::{self, Identity};
 use crate::types::OPERATOR_ID;
@@ -177,6 +177,90 @@ impl App {
         }
     }
 
+    /// The task an option key acts on in inspect: the inspected task, or the
+    /// inspected agent's claimed task.
+    fn inspected_task(&self) -> Option<&crate::types::Task> {
+        let id = match self.ui.inspect.as_ref()? {
+            Target::Task(id) => *id,
+            Target::Agent(a) => {
+                self.frame
+                    .agents
+                    .iter()
+                    .find(|x| &x.id == a)?
+                    .task
+                    .as_ref()?
+                    .0
+            }
+        };
+        self.frame
+            .tree
+            .iter()
+            .find(|n| n.task.id == id)
+            .map(|n| &n.task)
+    }
+
+    fn choose_on_task(&mut self, n: u8) {
+        let Some(t) = self.inspected_task() else {
+            self.note("nothing to act on here");
+            return;
+        };
+        let id = t.id;
+        match view::task_options(t).into_iter().find(|(k, _)| *k == n) {
+            Some((_, kind)) => self.ask(kind, id),
+            None => self.note(format!("no option {n} on #{id} / see options")),
+        }
+    }
+
+    fn ask(&mut self, kind: PendingKind, task_id: i64) {
+        self.ui.pending = Some(Pending {
+            kind,
+            task_id,
+            typed: String::new(),
+        });
+    }
+
+    /// Cancel the goal and every open task under it, deepest first. Returns
+    /// how many tasks were cancelled.
+    fn stop_goal(&self, op: &Identity, goal: i64) -> Result<usize> {
+        let all = self.bus.list_tasks(ListTasksInput {
+            mine: None,
+            states: None,
+            include_closed: true,
+            limit: Some(1000),
+        })?;
+        let parent: std::collections::HashMap<i64, Option<i64>> =
+            all.iter().map(|t| (t.id, t.parent_id)).collect();
+        let depth_under = |mut id: i64| -> Option<usize> {
+            let mut d = 0;
+            loop {
+                if id == goal {
+                    return Some(d);
+                }
+                id = (*parent.get(&id)?)?;
+                d += 1;
+                if d > 64 {
+                    return None;
+                }
+            }
+        };
+        let mut doomed: Vec<(usize, i64)> = all
+            .iter()
+            .filter(|t| !matches!(t.state.as_str(), "accepted" | "failed" | "cancelled"))
+            .filter_map(|t| depth_under(t.id).map(|d| (d, t.id)))
+            .collect();
+        if doomed.is_empty() {
+            return Err(BusError::invalid(format!(
+                "#{goal} has no open tasks to stop"
+            )));
+        }
+        doomed.sort_by_key(|(d, id)| (std::cmp::Reverse(*d), *id));
+        for (_, id) in &doomed {
+            self.bus
+                .cancel_task(op, *id, Some("stopped by the operator in aos"))?;
+        }
+        Ok(doomed.len())
+    }
+
     fn choose(&mut self, n: u8) {
         let Some(i) = self.gate_index() else { return };
         let g = &self.frame.gates[i];
@@ -222,11 +306,11 @@ impl App {
             PendingKind::Accept => self
                 .bus
                 .review_task(&op, p.task_id, true, &reason)
-                .map(|_| "accepted"),
+                .map(|_| "accepted".to_string()),
             PendingKind::Revise => self
                 .bus
                 .review_task(&op, p.task_id, false, &reason)
-                .map(|_| "sent back for changes"),
+                .map(|_| "sent back for changes".to_string()),
             PendingKind::Requeue => self
                 .bus
                 .requeue_task(
@@ -234,11 +318,17 @@ impl App {
                     p.task_id,
                     Some(&reason).filter(|r| !r.is_empty()).map(|r| r.as_str()),
                 )
-                .map(|_| "requeued"),
+                .map(|_| "requeued".to_string()),
             PendingKind::Cancel => self
                 .bus
                 .cancel_task(&op, p.task_id, Some("cancelled by the operator in aos"))
-                .map(|_| "cancelled"),
+                .map(|_| "cancelled".to_string()),
+            PendingKind::Stop => self.stop_goal(&op, p.task_id).map(|n| {
+                format!(
+                    "stopped / {n} task{} cancelled",
+                    if n == 1 { "" } else { "s" }
+                )
+            }),
         });
         self.ui.pending = None;
         match result {
@@ -255,7 +345,36 @@ impl App {
             }
             Err(e) => self.note(format!("x FAILED / {}", e.message)),
         }
+        if self.ui.route == Route::Home {
+            if let Some((text, ok)) = self.ui.flash.clone() {
+                let tag = if ok { "[ ok ]" } else { "[ -- ]" };
+                self.ui.out.push(vec![
+                    (tag.into(), Role::Bold),
+                    (format!(" {text}"), Role::Plain),
+                ]);
+            }
+        }
         Ok(())
+    }
+
+    /// Run a write and print its outcome in the home transcript.
+    fn outcome<T>(&mut self, r: Result<T>, ok: impl FnOnce(T) -> String) {
+        let line = match r {
+            Ok(v) => vec![
+                ("[ ok ]".into(), Role::Bold),
+                (format!(" {}", ok(v)), Role::Plain),
+            ],
+            Err(e) => vec![
+                ("x FAILED".into(), Role::Err),
+                (format!(" / {}", e.message), Role::Plain),
+            ],
+        };
+        self.ui.out.push(line);
+    }
+
+    /// Run one command-home line, as if typed and entered.
+    pub fn command_line(&mut self, raw: &str) -> Result<()> {
+        self.command(raw)
     }
 
     fn command(&mut self, raw: &str) -> Result<()> {
@@ -287,10 +406,29 @@ impl App {
         }
         let out = |s: String| vec![(s, Role::Dim)];
         match w {
-            "help" => self.ui.out.push(out("status  send <agent> <message>  task add <title>  swarm goal evidence retro providers memory".into())),
+            "help" => {
+                for l in [
+                    "run <goal> [--to agent]           start a goal as a top-level task",
+                    "task add <title> [--to agent] [--under #] [--review]",
+                    "accept # <reason>   revise # <feedback>   requeue # [reason]",
+                    "cancel #   stop [#]                 both ask for a typed word",
+                    "send <agent|all> <message>   reply <msg#> <text>   ack <msg#>   read",
+                    "status   swarm goal evidence retro providers memory keys",
+                ] {
+                    self.ui.out.push(out(l.into()));
+                }
+            }
             "status" => {
                 let f = &self.frame;
-                let line = format!("{} agents / {} running / {} open tasks / {} reviews / {} stalled / event #{}", f.agents.len(), f.running(), f.open_tasks, f.reviews(), f.stalled(), f.seq);
+                let line = format!(
+                    "{} agents / {} running / {} open tasks / {} reviews / {} stalled / event #{}",
+                    f.agents.len(),
+                    f.running(),
+                    f.open_tasks,
+                    f.reviews(),
+                    f.stalled(),
+                    f.seq
+                );
                 self.ui.out.push(vec![(line, Role::Plain)]);
             }
             "gate" => {
@@ -301,25 +439,194 @@ impl App {
                 }
             }
             "send" if rest.len() >= 2 => {
+                let to = if rest[0] == "all" { "*" } else { rest[0] };
                 let body = rest[1..].join(" ");
                 let subject: String = body.chars().take(60).collect();
-                match self.operator().and_then(|op| self.bus.send(&op, SendInput { to: rest[0].into(), subject: Some(subject), body, msg_type: None, thread: None, task_id: None, refs: None, requires_ack: false })) {
-                    Ok(msgs) => {
-                        let seq = msgs.first().map(|m| m.seq).unwrap_or(0);
-                        self.ui.out.push(vec![("[ ok ]".into(), Role::Bold), (format!(" sent #{seq} to {}", rest[0]), Role::Plain)]);
+                let r = self.operator().and_then(|op| {
+                    self.bus.send(
+                        &op,
+                        SendInput {
+                            to: to.into(),
+                            subject: Some(subject),
+                            body,
+                            msg_type: None,
+                            thread: None,
+                            task_id: None,
+                            refs: None,
+                            requires_ack: false,
+                        },
+                    )
+                });
+                let who = rest[0].to_string();
+                self.outcome(r, |msgs| {
+                    format!(
+                        "sent #{} to {who}",
+                        msgs.first().map(|m| m.seq).unwrap_or(0)
+                    )
+                });
+            }
+            "reply" if rest.len() >= 2 => {
+                let Some(m) = parse_id(rest[0])
+                    .and_then(|n| self.frame.mail.iter().find(|m| m.seq == n).cloned())
+                else {
+                    self.ui.out.push(out(format!(
+                        "no message {} in the operator's mail",
+                        rest[0]
+                    )));
+                    return self.refresh();
+                };
+                let body = rest[1..].join(" ");
+                let subject = if m.subject.starts_with("re: ") {
+                    m.subject.clone()
+                } else {
+                    format!("re: {}", m.subject)
+                };
+                let r = self.operator().and_then(|op| {
+                    let sent = self.bus.send(
+                        &op,
+                        SendInput {
+                            to: m.sender.clone(),
+                            subject: Some(subject),
+                            body,
+                            msg_type: Some("answer".into()),
+                            thread: Some(m.thread.clone()),
+                            task_id: m.task_id,
+                            refs: None,
+                            requires_ack: false,
+                        },
+                    )?;
+                    if m.requires_ack {
+                        self.bus.ack(&op, m.seq)?;
                     }
-                    Err(e) => self.ui.out.push(vec![("x FAILED".into(), Role::Err), (format!(" / {}", e.message), Role::Plain)]),
+                    Ok(sent)
+                });
+                self.outcome(r, |msgs| {
+                    format!(
+                        "replied #{} to {} on #{}",
+                        msgs.first().map(|x| x.seq).unwrap_or(0),
+                        m.sender,
+                        m.seq
+                    )
+                });
+            }
+            "ack" if rest.len() == 1 => {
+                let r = parse_id(rest[0])
+                    .ok_or_else(|| BusError::invalid("ack takes a message number"))
+                    .and_then(|n| self.operator().and_then(|op| self.bus.ack(&op, n)));
+                self.outcome(r, |_| format!("acknowledged {}", rest[0]));
+            }
+            "read" => {
+                let r = self
+                    .operator()
+                    .and_then(|op| self.bus.inbox(&op, false, Some(500)));
+                self.outcome(r, |i| {
+                    format!("{} marked read / cursor #{}", i.messages.len(), i.cursor)
+                });
+            }
+            "run" if !rest.is_empty() => {
+                let (args, to, _, _) = task_flags(&rest);
+                let title = args.join(" ");
+                if title.is_empty() {
+                    self.ui
+                        .out
+                        .push(out("usage: run <goal> [--to agent]".into()));
+                } else {
+                    let r = self.operator().and_then(|op| {
+                        self.bus.create_task(
+                            &op,
+                            CreateTaskInput {
+                                title,
+                                to,
+                                ..Default::default()
+                            },
+                        )
+                    });
+                    self.outcome(r, |t| {
+                        format!(
+                            "goal #{} started / {}{}",
+                            t.id,
+                            t.state,
+                            t.assignee.map(|a| format!(" for {a}")).unwrap_or_default()
+                        )
+                    });
                 }
             }
             "task" if rest.first() == Some(&"add") && rest.len() >= 2 => {
-                let title = rest[1..].join(" ");
-                match self.operator().and_then(|op| self.bus.create_task(&op, CreateTaskInput { title, ..Default::default() })) {
-                    Ok(t) => self.ui.out.push(vec![("[ ok ]".into(), Role::Bold), (format!(" task #{} created / {}", t.id, t.state), Role::Plain)]),
-                    Err(e) => self.ui.out.push(vec![("x FAILED".into(), Role::Err), (format!(" / {}", e.message), Role::Plain)]),
+                let (args, to, under, review) = task_flags(&rest[1..]);
+                let title = args.join(" ");
+                if title.is_empty() {
+                    self.ui.out.push(out(
+                        "usage: task add <title> [--to agent] [--under #] [--review]".into(),
+                    ));
+                } else {
+                    let reviewer = review.then(|| OPERATOR_ID.to_string());
+                    let r = self.operator().and_then(|op| {
+                        self.bus.create_task(
+                            &op,
+                            CreateTaskInput {
+                                title,
+                                to,
+                                parent_id: under,
+                                reviewer,
+                                ..Default::default()
+                            },
+                        )
+                    });
+                    self.outcome(r, |t| format!("task #{} created / {}", t.id, t.state));
                 }
             }
-            "send" | "task" => self.ui.out.push(out("usage: send <agent> <message>  /  task add <title>".into())),
-            other => self.ui.out.push(vec![("? UNKNOWN".into(), Role::Dim), (format!(" / no command \"{}\" / type help", view::trunc(other, 20)), Role::Plain)]),
+            "accept" | "revise" if rest.len() >= 2 && parse_id(rest[0]).is_some() => {
+                let id = parse_id(rest[0]).unwrap_or(0);
+                let reason = rest[1..].join(" ");
+                let ok = w == "accept";
+                let r = self
+                    .operator()
+                    .and_then(|op| self.bus.review_task(&op, id, ok, &reason));
+                self.outcome(r, |_| {
+                    format!(
+                        "#{id} {}",
+                        if ok {
+                            "accepted"
+                        } else {
+                            "sent back for changes"
+                        }
+                    )
+                });
+            }
+            "requeue" if !rest.is_empty() && parse_id(rest[0]).is_some() => {
+                let id = parse_id(rest[0]).unwrap_or(0);
+                let reason = rest[1..].join(" ");
+                let r = self.operator().and_then(|op| {
+                    self.bus
+                        .requeue_task(&op, id, Some(reason.as_str()).filter(|r| !r.is_empty()))
+                });
+                self.outcome(r, |_| format!("#{id} requeued"));
+            }
+            "cancel" if rest.len() == 1 && parse_id(rest[0]).is_some() => {
+                self.ask(PendingKind::Cancel, parse_id(rest[0]).unwrap_or(0));
+            }
+            "stop" if rest.len() <= 1 => {
+                let goal = match rest.first() {
+                    Some(r) => parse_id(r),
+                    None => self.frame.goal.as_ref().map(|g| g.id),
+                };
+                match goal {
+                    Some(id) => self.ask(PendingKind::Stop, id),
+                    None => self
+                        .ui
+                        .out
+                        .push(out("no open goal to stop / stop <#>".into())),
+                }
+            }
+            "send" | "task" | "run" | "reply" | "ack" | "accept" | "revise" | "requeue"
+            | "cancel" | "stop" => self.ui.out.push(out(format!("usage for {w}: type help"))),
+            other => self.ui.out.push(vec![
+                ("? UNKNOWN".into(), Role::Dim),
+                (
+                    format!(" / no command \"{}\" / type help", view::trunc(other, 20)),
+                    Role::Plain,
+                ),
+            ]),
         }
         self.refresh()?;
         Ok(())
@@ -417,9 +724,32 @@ impl App {
                 return Ok(());
             }
             Key::CtrlL => return Ok(()),
+            Key::Char(c @ '1'..='3') if self.ui.route == Route::Inspect => {
+                self.choose_on_task(c as u8 - b'0');
+                return Ok(());
+            }
+            Key::Char('w') if matches!(self.ui.route, Route::Swarm | Route::Inspect) => {
+                let target = match &self.ui.inspect {
+                    Some(Target::Agent(a)) if self.ui.route == Route::Inspect => Some(a.clone()),
+                    _ if self.ui.route == Route::Swarm && !self.narrow() => {
+                        view::visible_agents(&self.frame, &self.ui)
+                            .get(self.ui.sel)
+                            .map(|a| a.id.clone())
+                    }
+                    _ => None,
+                };
+                match target {
+                    Some(id) => {
+                        self.go(Route::Home);
+                        self.ui.prompt = format!("send {id} ");
+                    }
+                    None => self.note("select an agent to write to"),
+                }
+                return Ok(());
+            }
             Key::Char(c @ '1'..='3')
                 if !self.frame.gates.is_empty()
-                    && matches!(self.ui.route, Route::Swarm | Route::Gate | Route::Inspect) =>
+                    && matches!(self.ui.route, Route::Swarm | Route::Gate) =>
             {
                 self.choose(c as u8 - b'0');
                 return Ok(());
@@ -789,6 +1119,34 @@ usage:
 The bus defaults to ~/.agent-bus/bus.db (or $QAGENT_BUS_DB, or bus.db in $QAGENT_HOME), the same file qagent and acs use.
 NO_COLOR, TERM=dumb and --color none give plain text with markers and state words.
 Press ? inside for keys.";
+
+/// `#12` or `12`.
+fn parse_id(s: &str) -> Option<i64> {
+    s.trim_start_matches('#').parse().ok().filter(|n| *n > 0)
+}
+
+/// Split `--to A`, `--under #` and `--review` out of a command's words.
+fn task_flags<'a>(words: &[&'a str]) -> (Vec<&'a str>, Option<String>, Option<i64>, bool) {
+    let mut rest = Vec::new();
+    let (mut to, mut under, mut review) = (None, None, false);
+    let mut i = 0;
+    while i < words.len() {
+        match words[i] {
+            "--to" if i + 1 < words.len() => {
+                to = Some(words[i + 1].to_string());
+                i += 1;
+            }
+            "--under" if i + 1 < words.len() => {
+                under = parse_id(words[i + 1]);
+                i += 1;
+            }
+            "--review" => review = true,
+            w => rest.push(w),
+        }
+        i += 1;
+    }
+    (rest, to, under, review)
+}
 
 fn flag(argv: &[String], name: &str) -> Option<String> {
     argv.iter()

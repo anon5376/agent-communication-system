@@ -50,12 +50,13 @@ On a bus with no operator yet, `aos` creates one the way `qagent init` does. It 
 | `j` `k`, arrows | move in the spine, the task tree or a list |
 | `tab` | move between the spine and the gate strip |
 | `enter` | inspect an agent or task, or open the gate in full; it never approves |
-| `1` `2` `3` | choose a gate option; every option confirms first |
+| `1` `2` `3` | choose an option on the gate, an inspected task, or an inspected agent's claim; every option confirms first |
+| `w` | write to the selected or inspected agent (opens command home with `send <agent> `) |
 | `esc` | cancel, close detail, back one level |
 | `/` | filter the spine by id, role, model, harness or task |
 | `d` | expand or collapse agents folded into the aggregate row |
 | `g` `s` `e` `m` `r` | goal tree, swarm, evidence, memory, retro |
-| `c` | command home: `status`, `send <agent> <message>`, `task add <title>` |
+| `c` | command home (see [Commands](#commands)) |
 | `p` | providers (harnesses in use) |
 | `f` | follow the newest events in retro |
 | `?` | every key |
@@ -70,6 +71,40 @@ The gate strip shows tasks that need the operator, review first:
 - **Stalled**: a claimed task with no claim or note activity for the stall window. `[1] REQUEUE` returns it to the pool (reason optional). `[3] CANCEL` asks you to type `CANCEL`. `[2] HOLD` writes nothing.
 
 Each write prints an `[ ok ]` receipt on the status line with the event number it created.
+
+## Acting on any task
+
+Press Enter on a task in the goal tree or evidence list, or on an agent in the spine, and the detail shows the options that task's state allows:
+
+| State | Options |
+|---|---|
+| submitted | `[1] ACCEPT` (reason), `[2] REVISE` (feedback), `[3] CANCEL` |
+| claimed | `[1] REQUEUE` (reason optional), `[3] CANCEL` |
+| open, blocked, changes requested | `[3] CANCEL` |
+| accepted, failed, cancelled | none |
+
+On an agent, the options act on the task it has claimed. The operator may review any submitted task, not only ones addressed to it, as `qagent review` allows.
+
+## Commands
+
+Press `c` for command home. It lists the operator's latest mail with message numbers, and takes:
+
+| Command | What it writes |
+|---|---|
+| `run <goal> [--to agent]` | a top-level task: the new goal |
+| `task add <title> [--to agent] [--under #] [--review]` | a task; `--review` makes you its reviewer, so its result comes to your gate |
+| `accept # <reason>`, `revise # <feedback>` | a review |
+| `requeue # [reason]` | returns a claimed task to the pool |
+| `cancel #` | cancels one task after you type `CANCEL` |
+| `stop [#]` | cancels the goal (or task `#`) and every open task under it, deepest first, after you type `STOP`; closed tasks stay as they are, and each assignee gets the bus's cancel notice |
+| `send <agent\|all> <message>` | a message, or a broadcast with `all` |
+| `reply <msg#> <text>` | an answer to that message's sender, in its thread and on its task; acknowledges it if it asked for an ack |
+| `ack <msg#>`, `read` | acknowledges one message; marks all your mail read |
+| `status`, `help`, a screen name | nothing |
+
+## What aos cannot do yet
+
+These are in the design but have no ACS verb, so aos does not fake them: pausing or resuming an agent, rerouting an agent to another harness or model, run budgets, handing a task straight to a named agent (requeue returns it to the pool; `--to` works only when creating), and starting agent processes, which is `acs supervise` or `qagent supervise`, run separately.
 
 ## Where each readout comes from
 
