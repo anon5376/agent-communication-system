@@ -82,7 +82,9 @@ fn a_sentence_becomes_a_goal_after_one_enter() {
     let bus = Bus::open(Some(&db)).unwrap();
     let t = bus.get_task(8).unwrap().task;
     assert_eq!(t.title, "read the budget notes and summarize them");
-    assert!(t.brief.contains("The operator's goal: read the budget notes"));
+    assert!(t
+        .brief
+        .contains("The operator's goal: read the budget notes"));
 }
 
 #[test]
@@ -142,5 +144,8 @@ fn the_role_prompt_goes_before_the_brief() {
     let out = acs::supervisor::with_role_prompt(Some("be careful".into()), "do it".into());
     assert!(out.starts_with("=== how you work (your role prompt) ===\nbe careful"));
     assert!(out.ends_with("do it"));
-    assert_eq!(acs::supervisor::with_role_prompt(None, "do it".into()), "do it");
+    assert_eq!(
+        acs::supervisor::with_role_prompt(None, "do it".into()),
+        "do it"
+    );
 }

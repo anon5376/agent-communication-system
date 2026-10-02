@@ -602,12 +602,15 @@ impl App {
                     .collect();
                 self.start_crew(&only)?;
             }
-            "stop" if rest.first().is_some_and(|w| matches!(*w, "agents" | "all" | "crew")) => {
+            "stop"
+                if rest
+                    .first()
+                    .is_some_and(|w| matches!(*w, "agents" | "all" | "crew")) =>
+            {
                 self.stop_crew(&[])?;
             }
             "stop"
-                if rest.len() == 1
-                    && self.frame.crew.members.iter().any(|m| m.id == rest[0]) =>
+                if rest.len() == 1 && self.frame.crew.members.iter().any(|m| m.id == rest[0]) =>
             {
                 self.stop_crew(&[rest[0].to_string()])?;
             }
@@ -627,7 +630,14 @@ impl App {
             "doctor" if rest.is_empty() => {
                 for c in crew::doctor(&self.bus.db_path) {
                     self.ui.out.push(vec![
-                        (format!("{} ", c.mark()), if c.ok == Some(false) { Role::Err } else { Role::Dim }),
+                        (
+                            format!("{} ", c.mark()),
+                            if c.ok == Some(false) {
+                                Role::Err
+                            } else {
+                                Role::Dim
+                            },
+                        ),
                         (view::pad(&c.label, 10), Role::Bold),
                         (c.detail, Role::Plain),
                     ]);
@@ -1035,15 +1045,20 @@ impl App {
     }
 }
 
-
 // ------------------------------------------------------------------ the crew
 
 fn ok_line(text: impl Into<String>) -> Vec<(String, Role)> {
-    vec![("[ ok ]".into(), Role::Bold), (format!(" {}", text.into()), Role::Plain)]
+    vec![
+        ("[ ok ]".into(), Role::Bold),
+        (format!(" {}", text.into()), Role::Plain),
+    ]
 }
 
 fn fail_line(text: impl Into<String>) -> Vec<(String, Role)> {
-    vec![("x FAILED".into(), Role::Err), (format!(" / {}", text.into()), Role::Plain)]
+    vec![
+        ("x FAILED".into(), Role::Err),
+        (format!(" / {}", text.into()), Role::Plain),
+    ]
 }
 
 fn dim_line(text: impl Into<String>) -> Vec<(String, Role)> {
@@ -1097,7 +1112,9 @@ impl App {
         match crew::load_crew(&self.paths) {
             Ok(Some(c)) => Some(c),
             Ok(None) => {
-                self.say(fail_line("no crew yet / type setup to make one from the CLIs on this computer"));
+                self.say(fail_line(
+                    "no crew yet / type setup to make one from the CLIs on this computer",
+                ));
                 None
             }
             Err(e) => {
@@ -1158,15 +1175,25 @@ impl App {
                 Err(e) => self.say(fail_line(format!("{id} did not start: {}", e.message))),
             }
         }
-        self.say(dim_line(format!("agents work in {}", crew::Paths::show(&dir))));
-        self.say(dim_line("they keep running after you leave aos / stop agents stops them"));
+        self.say(dim_line(format!(
+            "agents work in {}",
+            crew::Paths::show(&dir)
+        )));
+        self.say(dim_line(
+            "they keep running after you leave aos / stop agents stops them",
+        ));
         self.refresh()?;
         Ok(true)
     }
 
     fn stop_crew(&mut self, only: &[String]) -> Result<()> {
         let ids: Vec<String> = if only.is_empty() {
-            self.frame.crew.members.iter().map(|m| m.id.clone()).collect()
+            self.frame
+                .crew
+                .members
+                .iter()
+                .map(|m| m.id.clone())
+                .collect()
         } else {
             only.to_vec()
         };
@@ -1188,8 +1215,13 @@ impl App {
             self.say(dim_line(format!("usage: {mission} <what you want done>")));
             return Ok(());
         }
-        let Some(m) = crew::missions(&self.paths).into_iter().find(|m| m.name == mission) else {
-            self.say(fail_line(format!("no mission {mission} / missions lists them")));
+        let Some(m) = crew::missions(&self.paths)
+            .into_iter()
+            .find(|m| m.name == mission)
+        else {
+            self.say(fail_line(format!(
+                "no mission {mission} / missions lists them"
+            )));
             return Ok(());
         };
         let (title, brief, acceptance) = crew::expand(&m, goal);
@@ -1255,7 +1287,9 @@ impl App {
                     lead.unwrap_or_else(|| "the first free agent".into())
                 )));
                 self.say(dim_line("watch it: esc, then s swarm or g goal"));
-                self.say(dim_line("the result comes to your gate to accept or send back"));
+                self.say(dim_line(
+                    "the result comes to your gate to accept or send back",
+                ));
             }
             Err(e) => self.say(fail_line(e.message)),
         }
@@ -1492,8 +1526,24 @@ Inside aos: press ? for keys, or c and type help.";
 
 /// qagent commands `aos` hands to the CLI unchanged, so one binary does both.
 const QAGENT_COMMANDS: &[&str] = &[
-    "init", "agent", "token", "whoami", "status", "send", "inbox", "ack", "wait", "task", "log",
-    "trace", "import", "mcp", "mcp-config", "supervise", "dashboard", "fake-harness",
+    "init",
+    "agent",
+    "token",
+    "whoami",
+    "status",
+    "send",
+    "inbox",
+    "ack",
+    "wait",
+    "task",
+    "log",
+    "trace",
+    "import",
+    "mcp",
+    "mcp-config",
+    "supervise",
+    "dashboard",
+    "fake-harness",
 ];
 
 /// Positional words, skipping flags and their values.
@@ -1508,7 +1558,10 @@ fn positionals(argv: &[String]) -> Vec<String> {
         }
         if let Some(name) = a.strip_prefix("--") {
             if !a.contains('=')
-                && matches!(name, "db" | "color" | "stall-min" | "print" | "as" | "config")
+                && matches!(
+                    name,
+                    "db" | "color" | "stall-min" | "print" | "as" | "config"
+                )
             {
                 i += 1;
             }
@@ -1567,10 +1620,20 @@ fn shell_line(db_path: &Path, words: &[String], yes: bool, stall_ms: i64) -> i32
     let run = |app: &mut App| -> Result<()> {
         app.command_line(&line)?;
         // A whole sentence typed at the shell is meant as a goal: no second ask.
-        if app.ui.pending.as_ref().is_some_and(|p| p.kind == PendingKind::Goal) {
+        if app
+            .ui
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.kind == PendingKind::Goal)
+        {
             app.commit()?;
         }
-        if app.ui.pending.as_ref().is_some_and(|p| p.kind == PendingKind::Trust) {
+        if app
+            .ui
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.kind == PendingKind::Trust)
+        {
             let dir = std::env::current_dir()
                 .map(|d| crew::Paths::show(&d))
                 .unwrap_or_default();
@@ -1699,8 +1762,7 @@ pub fn main() -> i32 {
             return crate::cli::run(&argv, &mut io);
         }
     }
-    if argv.iter().any(|a| a == "--help" || a == "-h")
-        || words.first().is_some_and(|w| w == "help")
+    if argv.iter().any(|a| a == "--help" || a == "-h") || words.first().is_some_and(|w| w == "help")
     {
         println!("{USAGE}");
         return 0;
@@ -1763,6 +1825,13 @@ pub fn main() -> i32 {
                 1
             }
         };
+    }
+    {
+        use std::io::IsTerminal;
+        if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
+            eprintln!("aos: the console needs a terminal. In scripts use aos --print 80x24, or the shell commands in aos --help.");
+            return 2;
+        }
     }
     let tier = Tier::detect(flag(&argv, "--color").as_deref());
     match run(&db_path, tier, stall_ms) {

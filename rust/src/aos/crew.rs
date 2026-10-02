@@ -150,7 +150,13 @@ fn search_dirs() -> Vec<PathBuf> {
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
     if let Some(home) = dirs::home_dir() {
-        for d in [".local/bin", "bin", ".claude/local", ".npm-global/bin", ".cursor/bin"] {
+        for d in [
+            ".local/bin",
+            "bin",
+            ".claude/local",
+            ".npm-global/bin",
+            ".cursor/bin",
+        ] {
             dirs.push(home.join(d));
         }
     }
@@ -197,7 +203,11 @@ pub fn probe_version(path: &Path) -> Option<String> {
     }
     let mut out = String::new();
     child.stdout.take()?.read_to_string(&mut out).ok()?;
-    let first = out.lines().find(|l| !l.trim().is_empty())?.trim().to_string();
+    let first = out
+        .lines()
+        .find(|l| !l.trim().is_empty())?
+        .trim()
+        .to_string();
     Some(first.chars().take(40).collect())
 }
 
@@ -266,14 +276,20 @@ pub const ROLE_PRESETS: &[(&str, &str)] = &[
     ("lead", include_str!("../../presets/roles/lead.md")),
     ("builder", include_str!("../../presets/roles/builder.md")),
     ("reviewer", include_str!("../../presets/roles/reviewer.md")),
-    ("researcher", include_str!("../../presets/roles/researcher.md")),
+    (
+        "researcher",
+        include_str!("../../presets/roles/researcher.md"),
+    ),
 ];
 
 pub const MISSION_PRESETS: &[(&str, &str)] = &[
     ("run", include_str!("../../presets/missions/run.md")),
     ("build", include_str!("../../presets/missions/build.md")),
     ("fix", include_str!("../../presets/missions/fix.md")),
-    ("research", include_str!("../../presets/missions/research.md")),
+    (
+        "research",
+        include_str!("../../presets/missions/research.md"),
+    ),
     ("review", include_str!("../../presets/missions/review.md")),
     ("explain", include_str!("../../presets/missions/explain.md")),
     ("docs", include_str!("../../presets/missions/docs.md")),
@@ -282,7 +298,10 @@ pub const MISSION_PRESETS: &[(&str, &str)] = &[
 /// Write each preset that is missing. Returns how many were written.
 pub fn write_presets(paths: &Paths) -> Result<usize> {
     let mut written = 0;
-    for (dir, presets) in [(paths.roles(), ROLE_PRESETS), (paths.missions(), MISSION_PRESETS)] {
+    for (dir, presets) in [
+        (paths.roles(), ROLE_PRESETS),
+        (paths.missions(), MISSION_PRESETS),
+    ] {
         fs::create_dir_all(&dir)?;
         for (name, text) in presets {
             let path = dir.join(format!("{name}.md"));
@@ -333,8 +352,12 @@ pub fn plan(found: &[Found]) -> Vec<Member> {
     }
     let lead = pick(&ready, &["claude", "codex", "cursor"], None).unwrap();
     let builder = pick(&ready, &["codex", "claude", "cursor"], None).unwrap();
-    let reviewer = pick(&ready, &["claude", "codex", "cursor"], Some(builder.cli.family))
-        .unwrap_or(builder);
+    let reviewer = pick(
+        &ready,
+        &["claude", "codex", "cursor"],
+        Some(builder.cli.family),
+    )
+    .unwrap_or(builder);
     vec![
         Member {
             id: "lead",
@@ -468,7 +491,11 @@ pub fn sync_bus(bus: &Bus, config: &BusConfig) -> Result<Vec<String>> {
         let a = &config.agents[&id];
         let harness = config.models.get(&a.model).map(|m| m.harness.clone());
         let parent = lead.as_deref().filter(|l| *l != id.as_str());
-        let authority = if a.authority == "manager" { "manager" } else { "worker" };
+        let authority = if a.authority == "manager" {
+            "manager"
+        } else {
+            "worker"
+        };
         bus.add_agent(
             &op,
             &id,
@@ -591,7 +618,9 @@ pub fn missions(paths: &Paths) -> Vec<Mission> {
             .filter_map(|p| {
                 let name = p.file_stem()?.to_string_lossy().to_lowercase();
                 let ok = !name.is_empty()
-                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
                 let text = fs::read_to_string(&p).ok()?;
                 ok.then(|| parse_mission(&name, &text))
             })
@@ -712,7 +741,12 @@ pub fn unsafe_workdir(dir: &Path) -> Option<String> {
 
 /// Start a supervisor for each agent in the background, working in `workdir`.
 /// Each keeps running after aos exits. Returns one line per agent.
-pub fn start(db_path: &Path, paths: &Paths, ids: &[String], workdir: &Path) -> Vec<(String, Result<i32>)> {
+pub fn start(
+    db_path: &Path,
+    paths: &Paths,
+    ids: &[String],
+    workdir: &Path,
+) -> Vec<(String, Result<i32>)> {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aos"));
     let _ = fs::create_dir_all(paths.home.join("logs"));
     let _ = fs::write(paths.workdir_file(), format!("{}\n", workdir.display()));
@@ -820,9 +854,7 @@ pub fn stop(paths: &Paths, ids: &[String]) -> Vec<(String, Result<bool>)> {
         }
     }
     let deadline = Instant::now() + Duration::from_secs(6);
-    while Instant::now() < deadline
-        && asked.iter().any(|(_, p)| p.is_some_and(alive))
-    {
+    while Instant::now() < deadline && asked.iter().any(|(_, p)| p.is_some_and(alive)) {
         std::thread::sleep(Duration::from_millis(100));
     }
     asked
@@ -853,19 +885,6 @@ pub fn usage(paths: &Paths, ids: &[String]) -> (f64, f64) {
         }
     }
     (cost, tokens)
-}
-
-/// The last `n` lines of an agent's supervisor log, without timestamps.
-pub fn log_tail(paths: &Paths, agent: &str, n: usize) -> Vec<String> {
-    let text = fs::read_to_string(paths.log_file(agent)).unwrap_or_default();
-    let lines: Vec<String> = text
-        .lines()
-        .map(|l| match l.find("] ") {
-            Some(i) if l.starts_with('[') => l[i + 2..].to_string(),
-            _ => l.to_string(),
-        })
-        .collect();
-    lines[lines.len().saturating_sub(n)..].to_vec()
 }
 
 // ------------------------------------------------------------------ the view
@@ -1009,13 +1028,20 @@ pub fn doctor(db_path: &Path) -> Vec<Check> {
         out.push(check(
             None,
             "bus",
-            format!("{} not created yet / aos makes it the first time it opens", Paths::show(db_path)),
+            format!(
+                "{} not created yet / aos makes it the first time it opens",
+                Paths::show(db_path)
+            ),
         ));
     } else {
         match Bus::open(Some(db_path)) {
             Ok(bus) => {
                 if bus.identify(Some(OPERATOR_ID)).is_ok() {
-                    out.push(check(Some(true), "bus", format!("{} / you can write", Paths::show(db_path))));
+                    out.push(check(
+                        Some(true),
+                        "bus",
+                        format!("{} / you can write", Paths::show(db_path)),
+                    ));
                 } else {
                     out.push(check(
                         Some(false),
@@ -1027,7 +1053,11 @@ pub fn doctor(db_path: &Path) -> Vec<Check> {
                     ));
                 }
             }
-            Err(e) => out.push(check(Some(false), "bus", format!("{} does not open: {}", Paths::show(db_path), e.message))),
+            Err(e) => out.push(check(
+                Some(false),
+                "bus",
+                format!("{} does not open: {}", Paths::show(db_path), e.message),
+            )),
         }
     }
     let config = match load_crew(&paths) {
@@ -1036,11 +1066,27 @@ pub fn doctor(db_path: &Path) -> Vec<Check> {
             None
         }
         Ok(Some(c)) => {
-            out.push(check(Some(true), "crew", format!("{} / {}", Paths::show(&paths.crew()), member_ids(&c).join(", "))));
+            out.push(check(
+                Some(true),
+                "crew",
+                format!(
+                    "{} / {}",
+                    Paths::show(&paths.crew()),
+                    member_ids(&c).join(", ")
+                ),
+            ));
             Some(c)
         }
         Err(e) => {
-            out.push(check(Some(false), "crew", format!("{} does not load: {} / fix it, or aos setup --force", Paths::show(&paths.crew()), e.message)));
+            out.push(check(
+                Some(false),
+                "crew",
+                format!(
+                    "{} does not load: {} / fix it, or aos setup --force",
+                    Paths::show(&paths.crew()),
+                    e.message
+                ),
+            ));
             None
         }
     };
@@ -1051,8 +1097,12 @@ pub fn doctor(db_path: &Path) -> Vec<Check> {
             .unwrap_or(Value::Null);
         for id in member_ids(config) {
             let a = &config.agents[&id];
-            let Some(model) = config.models.get(&a.model) else { continue };
-            let Some(h) = config.harnesses.get(&model.harness) else { continue };
+            let Some(model) = config.models.get(&a.model) else {
+                continue;
+            };
+            let Some(h) = config.harnesses.get(&model.harness) else {
+                continue;
+            };
             let known = cli(&h.id);
             let path = if h.command.contains('/') {
                 Some(PathBuf::from(&h.command)).filter(|p| is_executable(p))
@@ -1069,7 +1119,9 @@ pub fn doctor(db_path: &Path) -> Vec<Check> {
                             "{} at {} ({v}){}",
                             h.id,
                             Paths::show(&p),
-                            known.map(|c| format!(" / signed in? if turns fail: {}", c.sign_in)).unwrap_or_default()
+                            known
+                                .map(|c| format!(" / signed in? if turns fail: {}", c.sign_in))
+                                .unwrap_or_default()
                         ),
                     ));
                 }
@@ -1085,38 +1137,71 @@ pub fn doctor(db_path: &Path) -> Vec<Check> {
                 )),
             }
             match running_pid(&paths, &id) {
-                Some(pid) => out.push(check(Some(true), "", format!("running / pid {pid} / log {}", Paths::show(&paths.log_file(&id))))),
+                Some(pid) => out.push(check(
+                    Some(true),
+                    "",
+                    format!(
+                        "running / pid {pid} / log {}",
+                        Paths::show(&paths.log_file(&id))
+                    ),
+                )),
                 None => {
-                    let last = paths
-                        .out_file(&id)
-                        .exists()
-                        .then(|| format!(" / last: {}", last_words(&paths, &id)))
-                        .unwrap_or_default();
+                    let last = if paths.out_file(&id).exists() {
+                        format!(" / last: {}", last_words(&paths, &id))
+                    } else {
+                        String::new()
+                    };
                     out.push(check(None, "", format!("stopped{last}")));
                 }
             }
             if let Some(rel) = raw["agents"][&id]["instructions"].as_str() {
                 let file = paths.dir.join(rel);
                 if !file.exists() {
-                    out.push(check(Some(false), "", format!("role prompt {} is missing / aos setup restores it", Paths::show(&file))));
+                    out.push(check(
+                        Some(false),
+                        "",
+                        format!(
+                            "role prompt {} is missing / aos setup restores it",
+                            Paths::show(&file)
+                        ),
+                    ));
                 }
             }
         }
         match crew_workdir(&paths) {
-            Some(d) => out.push(check(None, "folder", format!("the crew last worked in {}", Paths::show(&d)))),
-            None => out.push(check(None, "folder", "the crew has not run yet / it works where you start it")),
+            Some(d) => out.push(check(
+                None,
+                "folder",
+                format!("the crew last worked in {}", Paths::show(&d)),
+            )),
+            None => out.push(check(
+                None,
+                "folder",
+                "the crew has not run yet / it works where you start it",
+            )),
         }
     }
     let ms = missions(&paths);
     out.push(check(
         None,
         "missions",
-        format!("{} / {}", ms.len(), ms.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(" ")),
+        format!(
+            "{} / {}",
+            ms.len(),
+            ms.iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
     ));
     let others: Vec<String> = detect()
         .into_iter()
         .filter(|f| f.path.is_some())
-        .filter(|f| config.as_ref().is_none_or(|c| !c.harnesses.contains_key(f.cli.id)))
+        .filter(|f| {
+            config
+                .as_ref()
+                .is_none_or(|c| !c.harnesses.contains_key(f.cli.id))
+        })
         .map(|f| f.cli.id.to_string())
         .collect();
     if !others.is_empty() {
@@ -1133,7 +1218,9 @@ mod tests {
         CLIS.iter()
             .map(|cli| Found {
                 cli,
-                path: ids.contains(&cli.id).then(|| PathBuf::from(format!("/bin/{}", cli.id))),
+                path: ids
+                    .contains(&cli.id)
+                    .then(|| PathBuf::from(format!("/bin/{}", cli.id))),
                 version: None,
             })
             .collect()
@@ -1142,14 +1229,24 @@ mod tests {
     #[test]
     fn one_cli_fills_every_seat() {
         let m = plan(&found(&["claude"]));
-        assert_eq!(m.iter().map(|m| m.cli.id).collect::<Vec<_>>(), ["claude"; 3]);
+        assert_eq!(
+            m.iter().map(|m| m.cli.id).collect::<Vec<_>>(),
+            ["claude"; 3]
+        );
     }
 
     #[test]
     fn reviewer_comes_from_another_family_when_it_can() {
         let m = plan(&found(&["claude", "codex"]));
         let ids: Vec<_> = m.iter().map(|m| (m.id, m.cli.id)).collect();
-        assert_eq!(ids, [("lead", "claude"), ("builder", "codex"), ("reviewer", "claude")]);
+        assert_eq!(
+            ids,
+            [
+                ("lead", "claude"),
+                ("builder", "codex"),
+                ("reviewer", "claude")
+            ]
+        );
     }
 
     #[test]
@@ -1185,7 +1282,10 @@ mod tests {
     #[test]
     fn role_prompt_names_the_team() {
         let dir = std::env::temp_dir().join(format!("aos-role-{}", std::process::id()));
-        let paths = Paths { home: dir.clone(), dir: dir.join("aos") };
+        let paths = Paths {
+            home: dir.clone(),
+            dir: dir.join("aos"),
+        };
         write_presets(&paths).unwrap();
         let f = found(&["claude"]);
         fs::write(paths.crew(), crew_json(&plan(&f), &f).to_string()).unwrap();

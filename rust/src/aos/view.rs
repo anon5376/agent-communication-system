@@ -786,9 +786,10 @@ fn confirm_line(p: &Pending) -> VLine {
                 .unwrap_or_default();
             return lv(
                 "trust?",
-                vec![
-                    seg(format!("agents will run commands and edit files in {dir}"), Role::Gate),
-                ],
+                vec![seg(
+                    format!("agents will run commands and edit files in {dir}"),
+                    Role::Gate,
+                )],
             );
         }
     };
@@ -1810,7 +1811,10 @@ fn found_lines(found: &[super::crew::Found], w: usize) -> Vec<VLine> {
             (Some(_), true) => (
                 "+",
                 Role::Ok,
-                format!("{} / can join your crew", f.version.clone().unwrap_or_else(|| f.cli.name.into())),
+                format!(
+                    "{} / can join your crew",
+                    f.version.clone().unwrap_or_else(|| f.cli.name.into())
+                ),
             ),
             (Some(_), false) => (
                 "~",
@@ -1834,10 +1838,28 @@ pub fn crew(f: &Frame, ui: &Ui) -> Vec<VLine> {
     let c = &f.crew;
     let mut body = vec![rule(w)];
     if !c.configured {
-        body.push(lv("crew", vec![seg("- NONE YET", Role::Dim), seg(" / c, then setup, makes one from the CLIs on this computer", Role::Plain)]));
+        body.push(lv(
+            "crew",
+            vec![
+                seg("- NONE YET", Role::Dim),
+                seg(
+                    " / c, then setup, makes one from the CLIs on this computer",
+                    Role::Plain,
+                ),
+            ],
+        ));
     } else if let Some(e) = &c.error {
-        body.push(lv("crew", vec![seg("x FAILED", Role::Err), seg(format!(" / crew.json does not load: {e}"), Role::Plain)]));
-        body.push(lvs("fix", "edit it, or c then setup --force to write a fresh one"));
+        body.push(lv(
+            "crew",
+            vec![
+                seg("x FAILED", Role::Err),
+                seg(format!(" / crew.json does not load: {e}"), Role::Plain),
+            ],
+        ));
+        body.push(lvs(
+            "fix",
+            "edit it, or c then setup --force to write a fresh one",
+        ));
     } else {
         body.push(lvs(
             "crew",
@@ -1845,7 +1867,10 @@ pub fn crew(f: &Frame, ui: &Ui) -> Vec<VLine> {
                 "{} agents / {} running{}",
                 c.members.len(),
                 c.running(),
-                c.workdir.as_ref().map(|d| format!(" / works in {d}")).unwrap_or_default()
+                c.workdir
+                    .as_ref()
+                    .map(|d| format!(" / works in {d}"))
+                    .unwrap_or_default()
             ),
         ));
         body.push(rule(w));
@@ -1859,17 +1884,30 @@ pub fn crew(f: &Frame, ui: &Ui) -> Vec<VLine> {
             if let (None, Some(last)) = (m.pid, &m.last_words) {
                 body.push(line(vec![
                     seg(pad("", 11), Role::Plain),
-                    seg(trunc(&format!("last: {last}"), w.saturating_sub(11)), Role::Dim),
+                    seg(
+                        trunc(&format!("last: {last}"), w.saturating_sub(11)),
+                        Role::Dim,
+                    ),
                 ]));
             }
         }
     }
     body.push(rule(w));
     body.push(cost_line(f));
-    body.push(lvs("files", format!("{}  crew.json  roles/  missions/", c.dir)));
+    body.push(lvs(
+        "files",
+        format!("{}  crew.json  roles/  missions/", c.dir),
+    ));
     body.push(lvs(
         "missions",
-        trunc(&c.missions.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(" "), w - 12),
+        trunc(
+            &c.missions
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            w - 12,
+        ),
     ));
     if !c.found.is_empty() {
         body.push(rule(w));
@@ -1877,7 +1915,9 @@ pub fn crew(f: &Frame, ui: &Ui) -> Vec<VLine> {
         body.extend(found_lines(&c.found, w));
     }
     body.push(rule(w));
-    body.push(dim("start / stop agents / setup / doctor: type them in command home (c)"));
+    body.push(dim(
+        "start / stop agents / setup / doctor: type them in command home (c)",
+    ));
     compose(f, ui, "crew", body)
 }
 
@@ -1888,7 +1928,10 @@ pub fn welcome(f: &Frame, ui: &Ui) -> Vec<VLine> {
         rule(w),
         line(vec![
             seg("welcome to aos", Role::Bold),
-            seg("  mission control for a team of AI coding agents", Role::Dim),
+            seg(
+                "  mission control for a team of AI coding agents",
+                Role::Dim,
+            ),
         ]),
     ];
     for l in wrap(
@@ -1909,7 +1952,10 @@ pub fn welcome(f: &Frame, ui: &Ui) -> Vec<VLine> {
     if members.is_empty() {
         body.push(line(vec![
             seg("no crew yet", Role::Bold),
-            seg(" / install one CLI marked - above, sign in to it, then press r", Role::Plain),
+            seg(
+                " / install one CLI marked - above, sign in to it, then press r",
+                Role::Plain,
+            ),
         ]));
         body.push(dim("or try a sample team first: q, then aos demo"));
     } else {
@@ -1921,7 +1967,10 @@ pub fn welcome(f: &Frame, ui: &Ui) -> Vec<VLine> {
                 seg(trunc(m.description, w.saturating_sub(21)), Role::Dim),
             ]));
         }
-        if members.iter().all(|m| m.cli.family == members[0].cli.family) {
+        if members
+            .iter()
+            .all(|m| m.cli.family == members[0].cli.family)
+        {
             for l in wrap("one CLI, so the reviewer uses the same model family. Install a second CLI for independent reviews.", w, 2) {
                 body.push(dim(l));
             }
