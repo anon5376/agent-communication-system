@@ -1,7 +1,7 @@
 //! `aos` screens and gate actions against a real bus seeded by `aos demo`.
 
 use acs::aos::view::{Route, Target};
-use acs::aos::{demo, paint, App, Key, Tier, DEFAULT_STALL_MIN};
+use acs::aos::{demo, ensure_operator, paint, App, Key, Tier, DEFAULT_STALL_MIN};
 use acs::bus::Bus;
 use std::path::PathBuf;
 
@@ -294,4 +294,33 @@ fn no_color_keeps_every_state_in_words() {
         }
     }
     assert_eq!(selected, 1, "the selected row is marked with >");
+}
+
+#[test]
+fn a_missing_operator_token_opens_read_only_and_never_rotates() {
+    let (_, db) = demo_app(80, 24);
+    let bus = Bus::open(Some(&db)).unwrap();
+    let token = acs::identity::operator_token_path(&bus.home);
+    let stored = |b: &Bus| {
+        acs::identity::stored_identity(&b.conn, acs::types::OPERATOR_ID)
+            .unwrap()
+            .unwrap()
+            .0
+    };
+    let before = stored(&bus);
+    std::fs::remove_file(&token).unwrap();
+    assert!(!ensure_operator(&bus).unwrap());
+    assert_eq!(stored(&bus), before, "the operator token must not rotate");
+    assert!(!token.exists(), "no new token file is written");
+
+    let mut app = App::new(bus, DEFAULT_STALL_MIN * 60_000).unwrap();
+    app.ui.width = 80;
+    app.ui.height = 24;
+    keys(&mut app, &[Key::Char('1')]);
+    typed(&mut app, "looks good");
+    keys(&mut app, &[Key::Enter]);
+    let status = text(&app).last().unwrap().clone();
+    assert!(status.contains("x FAILED / no token file"), "{status}");
+    let bus = Bus::open(Some(&db)).unwrap();
+    assert_eq!(bus.get_task(3).unwrap().task.state, "submitted");
 }

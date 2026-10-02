@@ -11,7 +11,7 @@ pub mod view;
 
 use crate::bus::{Bus, CreateTaskInput, SendInput};
 use crate::error::{BusError, Result};
-use crate::identity::Identity;
+use crate::identity::{self, Identity};
 use crate::types::OPERATOR_ID;
 use crate::watcher::{ChangeWatcher, ChangeWatcherOptions};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -218,8 +218,7 @@ impl App {
             self.note("a reason is required / it goes on the event");
             return Ok(());
         }
-        let op = self.operator()?;
-        let result = match p.kind {
+        let result = self.operator().and_then(|op| match p.kind {
             PendingKind::Accept => self
                 .bus
                 .review_task(&op, p.task_id, true, &reason)
@@ -240,7 +239,7 @@ impl App {
                 .bus
                 .cancel_task(&op, p.task_id, Some("cancelled by the operator in aos"))
                 .map(|_| "cancelled"),
-        };
+        });
         self.ui.pending = None;
         match result {
             Ok(what) => {
@@ -302,10 +301,9 @@ impl App {
                 }
             }
             "send" if rest.len() >= 2 => {
-                let op = self.operator()?;
                 let body = rest[1..].join(" ");
                 let subject: String = body.chars().take(60).collect();
-                match self.bus.send(&op, SendInput { to: rest[0].into(), subject: Some(subject), body, msg_type: None, thread: None, task_id: None, refs: None, requires_ack: false }) {
+                match self.operator().and_then(|op| self.bus.send(&op, SendInput { to: rest[0].into(), subject: Some(subject), body, msg_type: None, thread: None, task_id: None, refs: None, requires_ack: false })) {
                     Ok(msgs) => {
                         let seq = msgs.first().map(|m| m.seq).unwrap_or(0);
                         self.ui.out.push(vec![("[ ok ]".into(), Role::Bold), (format!(" sent #{seq} to {}", rest[0]), Role::Plain)]);
@@ -314,9 +312,8 @@ impl App {
                 }
             }
             "task" if rest.first() == Some(&"add") && rest.len() >= 2 => {
-                let op = self.operator()?;
                 let title = rest[1..].join(" ");
-                match self.bus.create_task(&op, CreateTaskInput { title, ..Default::default() }) {
+                match self.operator().and_then(|op| self.bus.create_task(&op, CreateTaskInput { title, ..Default::default() })) {
                     Ok(t) => self.ui.out.push(vec![("[ ok ]".into(), Role::Bold), (format!(" task #{} created / {}", t.id, t.state), Role::Plain)]),
                     Err(e) => self.ui.out.push(vec![("x FAILED".into(), Role::Err), (format!(" / {}", e.message), Role::Plain)]),
                 }
@@ -679,11 +676,27 @@ fn term_err(e: impl std::fmt::Display) -> BusError {
     BusError::invalid(format!("terminal: {e}"))
 }
 
+const READ_ONLY_NOTE: &str = "read only / operator token missing or not this bus's / see AOS.md";
+
+/// Make sure the operator can write. A bus with no operator yet gets one
+/// (`init`, which creates or adopts the token). A bus whose operator token file
+/// is missing or does not match is left alone: rotating it here would break
+/// whatever holds the current token (qagent, an MCP config). Returns false when
+/// writes will be refused.
+pub fn ensure_operator(bus: &Bus) -> Result<bool> {
+    if bus.identify(Some(OPERATOR_ID)).is_ok() {
+        return Ok(true);
+    }
+    if identity::stored_identity(&bus.conn, OPERATOR_ID)?.is_some() {
+        return Ok(false);
+    }
+    bus.init()?;
+    Ok(bus.identify(Some(OPERATOR_ID)).is_ok())
+}
+
 pub fn run(db_path: &Path, tier: Tier, stall_ms: i64) -> Result<i32> {
     let bus = Bus::open(Some(db_path))?;
-    if bus.identify(Some(OPERATOR_ID)).is_err() {
-        bus.init()?;
-    }
+    let writable = ensure_operator(&bus)?;
     let watcher = ChangeWatcher::new(
         &bus.db_path,
         ChangeWatcherOptions {
@@ -693,6 +706,9 @@ pub fn run(db_path: &Path, tier: Tier, stall_ms: i64) -> Result<i32> {
         },
     )?;
     let mut app = App::new(bus, stall_ms)?;
+    if !writable {
+        app.note(READ_ONLY_NOTE);
+    }
     let mut seq = app.frame.seq;
 
     enable_raw_mode().map_err(term_err)?;
@@ -770,7 +786,7 @@ usage:
   aos --print WxH [ROUTE]    print one frame as plain text and exit
                              (routes: swarm goal evidence retro providers memory keys home gate)
 
-The bus defaults to ~/.agent-bus/bus.db (or QAGENT_DB), the same file qagent and acs use.
+The bus defaults to ~/.agent-bus/bus.db (or $QAGENT_BUS_DB, or bus.db in $QAGENT_HOME), the same file qagent and acs use.
 NO_COLOR, TERM=dumb and --color none give plain text with markers and state words.
 Press ? inside for keys.";
 

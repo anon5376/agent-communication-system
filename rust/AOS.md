@@ -32,7 +32,7 @@ aos demo
 `aos demo` writes a sample bus to a temporary directory (`$TMPDIR/aos-demo/bus.db`) with five agents and tasks in every state the screens draw: a running lead, a stalled claim, two results waiting for your review, one with a failing check, a request for changes and an offline agent. It is a real bus written through the bus API, so you can accept, revise, requeue and cancel there without touching your own work. Run it again to reopen the same sample; delete the directory to start over.
 
 ```sh
-aos                       # your bus: ~/.agent-bus/bus.db, or $QAGENT_DB
+aos                       # your bus: ~/.agent-bus/bus.db, $QAGENT_BUS_DB, or bus.db in $QAGENT_HOME
 aos --db /path/to/bus.db
 aos --color none          # also NO_COLOR=1 or TERM=dumb
 aos --stall-min 45        # when an idle claim counts as stuck (default 30)
@@ -40,6 +40,8 @@ aos --print 80x24 gate    # print one screen as plain text and exit
 ```
 
 The terminal must be at least 60x20. Under 80 columns `aos` shows one object at a time.
+
+On a bus with no operator yet, `aos` creates one the way `qagent init` does. It never rotates an existing operator token: if the token file in the bus home is missing or does not match, `aos` opens read only, says so on the status line, and every write fails with the reason. Put the right `operator.token` back, or run `qagent init` yourself, which rotates the token and means updating anything that held the old one.
 
 ## Keys
 
@@ -57,7 +59,7 @@ The terminal must be at least 60x20. Under 80 columns `aos` shows one object at 
 | `p` | providers (harnesses in use) |
 | `f` | follow the newest events in retro |
 | `?` | every key |
-| `q`, `ctrl-c` | leave; agents keep running |
+| `q` then `y`, or `ctrl-c` twice | leave; agents keep running |
 | `n` `b` `m` | under 80 columns: next, back, more |
 
 ## Gates
