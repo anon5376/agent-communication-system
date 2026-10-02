@@ -1,14 +1,31 @@
-# Agent Communication System
+<h1 align="center">
+  <img src="docs/assets/banner.png" alt="Agent Communication System: one SQLite file to coordinate every coding agent on your machine" width="100%">
+</h1>
 
-**One SQLite file to coordinate every coding agent on your machine — no daemon, no cloud.**
+<p align="center">
+  <a href="https://github.com/anon5376/agent-communication-system/actions/workflows/universal-harness-ci.yml"><img src="https://github.com/anon5376/agent-communication-system/actions/workflows/universal-harness-ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-6aa0ff" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/node-%E2%89%A522.13-6aa0ff" alt="Node.js 22.13 or newer">
+  <img src="https://img.shields.io/badge/MCP-stdio%20server-6aa0ff" alt="MCP stdio server">
+  <a href="https://github.com/anon5376/agent-communication-system/stargazers"><img src="https://img.shields.io/github/stars/anon5376/agent-communication-system?style=flat&color=6aa0ff" alt="GitHub stars"></a>
+</p>
 
-Agent Communication System gives local coding agents durable mail, task handoffs, review gates, and optional automatic wake-ups. The command is `qagent`; `agent-bus` remains as a compatibility alias.
+<p align="center">
+  <b>Durable mail, task handoffs and review gates for Claude Code, Codex, Gemini, Hermes and any other agent CLI.<br>No daemon, no cloud, no broker.</b>
+</p>
 
-Coordination lives in one SQLite file. The CLI and MCP server open it directly, so ordinary messaging and task work need no broker or background daemon. An optional supervisor can wake agent CLIs, and an optional local dashboard shows activity.
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="docs/FULL-GUIDE.md">Full guide</a> ·
+  <a href="#terminal-ui">Terminal UI</a> ·
+  <a href="docs/security.md">Security</a>
+</p>
+
+The command is `qagent` (`agent-bus` remains as a compatibility alias). The CLI and MCP server open one SQLite file directly, so messaging and task work need no background process. An optional supervisor wakes agent CLIs when work arrives, and an optional local dashboard shows activity.
 
 ![acs terminal UI demo](docs/assets/acs-demo.gif)
 
-*The `acs` terminal UI (Rust, `rust-port` branch; not part of the npm package or this branch's build). See [Terminal UI](#terminal-ui).*
+*The `acs` terminal UI, from the Rust implementation on the `rust-port` branch. See [Terminal UI](#terminal-ui).*
 
 **Why not…**
 
@@ -62,7 +79,7 @@ qagent mcp-config --agent codex --client codex
 
 ## Terminal UI
 
-The `acs` terminal UI in the demo above is part of the Rust implementation on the `rust-port` branch. It is not built by this branch and is not in the npm package. It opens the same `bus.db`, tokens, and signal files as the TypeScript `qagent`, so both can drive one bus. To build it, follow the install steps in the [`rust-port` README](https://github.com/anon5376/agent-communication-system/blob/rust-port/README.md) (Rust toolchain, then `./rust/install.sh`). The two implementations differ in some commands; see [Implementation differences](docs/FULL-GUIDE.md#implementation-differences).
+The `acs` terminal UI in the demo is the Rust implementation on the `rust-port` branch; it is not built from this branch. It opens the same `bus.db`, tokens and signal files as `qagent`, so both can drive one bus. Install steps are in the [`rust-port` README](https://github.com/anon5376/agent-communication-system/blob/rust-port/README.md); command differences are in [Implementation differences](docs/FULL-GUIDE.md#implementation-differences).
 
 ## Documentation
 
@@ -96,22 +113,17 @@ The dashboard binds only to `127.0.0.1:11511`. It prints a single-use sign-in li
 
 ## Development
 
-```bash
-npm run audit:public
-npm run build
-npm run test:unit
-npm run test:lifecycle
-npm run test:browser
-npm run check
-```
-
-`npm run audit:public:history` also checks commit metadata and every reachable revision. Run it before publishing a repository or release archive.
+Build, test and public-release checks are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Security
 
 The bus protects identities from accidental impersonation by another agent. It is not a security boundary against a hostile process running as the same operating-system user. Messages, task briefs, and results are stored in plaintext in `bus.db`; protect the bus directory accordingly.
 
 Report vulnerabilities through [GitHub Security Advisories](https://github.com/anon5376/agent-communication-system/security/advisories/new), not a public issue.
+
+## Feedback
+
+Bug reports, harness requests and "this didn't work for me" stories go in [issues](https://github.com/anon5376/agent-communication-system/issues). If ACS saves you from copy-pasting briefs between terminals, a star helps other people find it.
 
 ## License
 
