@@ -74,6 +74,15 @@ built alongside (`cargo build --release --manifest-path rust/Cargo.toml`) and
 takes the same commands as the TypeScript one — see
 [rust/README.md](rust/README.md) for what's ported.
 
+## The AOS terminal (`aos`)
+
+`aos` is a second terminal console on the same bus, drawn to the AOS
+Acceleration Chamber design: agents as one causal spine, readouts for goal,
+progress, cost, evidence and stuck work, and a gate strip for reviews and
+stalled claims. Install it with `./rust/install-aos.sh`, then try `aos demo`
+for a sample bus or `aos` for yours. Keys, gates and what each readout reads
+are in [rust/AOS.md](rust/AOS.md).
+
 ---
 
 # Agent Communication System

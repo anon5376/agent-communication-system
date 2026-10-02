@@ -5,6 +5,7 @@
 //! with one opened by `qagent` on Node.
 
 pub mod adapters;
+pub mod aos;
 pub mod app;
 pub mod bus;
 pub mod cli;
