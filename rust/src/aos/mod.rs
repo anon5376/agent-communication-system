@@ -5,6 +5,7 @@
 //! sources: AOS draft #5 (Chamber handoff 0, TERMINAL-FRAMES.md) and the terminal
 //! contract in AOS `codex/cli-foundation` (TERMINAL-DESIGN.md).
 
+pub mod crew;
 pub mod demo;
 pub mod frame;
 pub mod view;
@@ -107,22 +108,52 @@ pub struct App {
     pub ui: Ui,
     pub stall_ms: i64,
     pub quit: bool,
+    pub paths: crew::Paths,
+    /// Agent CLIs found on this computer, once something asked.
+    pub found: Vec<crew::Found>,
 }
 
 impl App {
     pub fn new(bus: Bus, stall_ms: i64) -> Result<App> {
         let frame = Frame::load(&bus, stall_ms)?;
-        Ok(App {
+        let paths = crew::Paths::for_db(&bus.db_path);
+        let mut app = App {
             bus,
             frame,
             ui: Ui::default(),
             stall_ms,
             quit: false,
-        })
+            paths,
+            found: Vec::new(),
+        };
+        app.refresh()?;
+        Ok(app)
+    }
+
+    /// First run: no crew file and nobody on the bus but the operator.
+    pub fn first_run(&self) -> bool {
+        !self.frame.crew.configured && self.frame.agents.is_empty()
+    }
+
+    /// Look for agent CLIs (runs each one's --version) and show the result.
+    pub fn detect(&mut self) -> Result<()> {
+        self.found = crew::detect();
+        self.refresh()
     }
 
     pub fn refresh(&mut self) -> Result<()> {
         self.frame = Frame::load(&self.bus, self.stall_ms)?;
+        self.frame.crew = crew::gather(&self.paths, self.found.clone());
+        // The bus only learns an agent went away after its staleness window;
+        // the crew's pid files know now.
+        for a in self.frame.agents.iter_mut() {
+            if let Some(m) = self.frame.crew.members.iter().find(|m| m.id == a.id) {
+                if m.pid.is_none() && a.st != frame::St::Disconnected {
+                    a.st = frame::St::Disconnected;
+                    a.phrase = "stopped / c, then start".into();
+                }
+            }
+        }
         let n = view::spine_len(&self.frame, &self.ui);
         if self.ui.sel >= n {
             self.ui.sel = n.saturating_sub(1);
@@ -216,6 +247,7 @@ impl App {
             kind,
             task_id,
             typed: String::new(),
+            text: None,
         });
     }
 
@@ -278,6 +310,7 @@ impl App {
                     kind,
                     task_id: id,
                     typed: String::new(),
+                    text: None,
                 })
             }
             None => {
@@ -296,6 +329,25 @@ impl App {
                 self.note(format!("type {word} exactly, or esc to cancel"));
                 return Ok(());
             }
+        }
+        if matches!(p.kind, PendingKind::Goal | PendingKind::Trust) {
+            self.ui.pending = None;
+            if p.kind == PendingKind::Trust {
+                let cwd = std::env::current_dir()?;
+                crew::trust(&self.paths, &cwd)?;
+                self.ui.out.push(vec![
+                    ("[ ok ]".into(), Role::Bold),
+                    (format!(" trusted {}", crew::Paths::show(&cwd)), Role::Plain),
+                ]);
+                if p.text.is_none() {
+                    self.start_crew(&[])?;
+                    return self.refresh();
+                }
+            }
+            if let Some((mission, goal)) = p.text {
+                self.start_goal(&mission, &goal, None)?;
+            }
+            return self.refresh();
         }
         let reason = p.typed.trim().to_string();
         if p.needs_reason() && reason.is_empty() {
@@ -323,6 +375,7 @@ impl App {
                 .bus
                 .cancel_task(&op, p.task_id, Some("cancelled by the operator in aos"))
                 .map(|_| "cancelled".to_string()),
+            PendingKind::Goal | PendingKind::Trust => unreachable!("handled above"),
             PendingKind::Stop => self.stop_goal(&op, p.task_id).map(|n| {
                 format!(
                     "stopped / {n} task{} cancelled",
@@ -396,29 +449,33 @@ impl App {
             "evidence" | "results" => Some(Route::Evidence),
             "memory" => Some(Route::Memory),
             "retro" | "log" => Some(Route::Retro),
-            "providers" => Some(Route::Providers),
+            "providers" | "crew" => Some(Route::Providers),
             "keys" => Some(Route::Help),
             _ => None,
         };
-        if let Some(r) = route {
+        if let Some(r) = route.filter(|_| rest.is_empty()) {
             self.go(r);
             return Ok(());
         }
         let out = |s: String| vec![(s, Role::Dim)];
         match w {
-            "help" => {
+            "help" if rest.is_empty() => {
                 for l in [
-                    "run <goal> [--to agent]           start a goal as a top-level task",
-                    "task add <title> [--to agent] [--under #] [--review]",
+                    "<anything>        type what you want done; the lead takes it as a goal",
+                    "fix|build|research|review|explain|docs <what>   start from a mission",
+                    "missions          list mission templates (your own files, editable)",
+                    "start [agent]     start the crew here   stop agents|<agent>   stop it",
+                    "setup [--force]   find agent CLIs, make the crew   doctor   check all",
                     "accept # <reason>   revise # <feedback>   requeue # [reason]",
-                    "cancel #   stop [#]                 both ask for a typed word",
+                    "cancel #   stop [#]   cancel a task, or a goal and all under it",
                     "send <agent|all> <message>   reply <msg#> <text>   ack <msg#>   read",
-                    "status   swarm goal evidence retro providers memory keys",
+                    "task add <title> [--to agent] [--under #] [--review]   status",
+                    "screens: swarm goal evidence retro crew memory keys",
                 ] {
                     self.ui.out.push(out(l.into()));
                 }
             }
-            "status" => {
+            "status" if rest.is_empty() => {
                 let f = &self.frame;
                 let line = format!(
                     "{} agents / {} running / {} open tasks / {} reviews / {} stalled / event #{}",
@@ -431,7 +488,7 @@ impl App {
                 );
                 self.ui.out.push(vec![(line, Role::Plain)]);
             }
-            "gate" => {
+            "gate" if rest.is_empty() => {
                 if self.frame.gates.is_empty() {
                     self.ui.out.push(out("no gate is open".into()));
                 } else {
@@ -515,7 +572,7 @@ impl App {
                     .and_then(|n| self.operator().and_then(|op| self.bus.ack(&op, n)));
                 self.outcome(r, |_| format!("acknowledged {}", rest[0]));
             }
-            "read" => {
+            "read" if rest.is_empty() => {
                 let r = self
                     .operator()
                     .and_then(|op| self.bus.inbox(&op, false, Some(500)));
@@ -525,30 +582,55 @@ impl App {
             }
             "run" if !rest.is_empty() => {
                 let (args, to, _, _) = task_flags(&rest);
-                let title = args.join(" ");
-                if title.is_empty() {
-                    self.ui
-                        .out
-                        .push(out("usage: run <goal> [--to agent]".into()));
-                } else {
-                    let r = self.operator().and_then(|op| {
-                        self.bus.create_task(
-                            &op,
-                            CreateTaskInput {
-                                title,
-                                to,
-                                ..Default::default()
-                            },
-                        )
-                    });
-                    self.outcome(r, |t| {
-                        format!(
-                            "goal #{} started / {}{}",
-                            t.id,
-                            t.state,
-                            t.assignee.map(|a| format!(" for {a}")).unwrap_or_default()
-                        )
-                    });
+                let goal = args.join(" ");
+                self.start_goal("run", &goal, to)?;
+            }
+            "setup" if rest.iter().all(|w| *w == "--force") => {
+                let force = rest.contains(&"--force");
+                self.setup(force)?;
+            }
+            "start"
+                if rest.iter().all(|w| {
+                    matches!(*w, "all" | "agents" | "crew")
+                        || self.frame.crew.members.iter().any(|m| m.id == *w)
+                }) =>
+            {
+                let only: Vec<String> = rest
+                    .iter()
+                    .filter(|w| !matches!(**w, "all" | "agents" | "crew"))
+                    .map(|w| w.to_string())
+                    .collect();
+                self.start_crew(&only)?;
+            }
+            "stop" if rest.first().is_some_and(|w| matches!(*w, "agents" | "all" | "crew")) => {
+                self.stop_crew(&[])?;
+            }
+            "stop"
+                if rest.len() == 1
+                    && self.frame.crew.members.iter().any(|m| m.id == rest[0]) =>
+            {
+                self.stop_crew(&[rest[0].to_string()])?;
+            }
+            "missions" if rest.is_empty() => {
+                for m in crew::missions(&self.paths) {
+                    let usage = format!("{} <...>", m.name);
+                    self.ui.out.push(vec![
+                        (view::pad(&usage, 16), Role::Plain),
+                        (m.summary, Role::Dim),
+                    ]);
+                }
+                self.say(dim_line(format!(
+                    "edit or add .md files in {}",
+                    crew::Paths::show(&self.paths.missions())
+                )));
+            }
+            "doctor" if rest.is_empty() => {
+                for c in crew::doctor(&self.bus.db_path) {
+                    self.ui.out.push(vec![
+                        (format!("{} ", c.mark()), if c.ok == Some(false) { Role::Err } else { Role::Dim }),
+                        (view::pad(&c.label, 10), Role::Bold),
+                        (c.detail, Role::Plain),
+                    ]);
                 }
             }
             "task" if rest.first() == Some(&"add") && rest.len() >= 2 => {
@@ -619,14 +701,33 @@ impl App {
                 }
             }
             "send" | "task" | "run" | "reply" | "ack" | "accept" | "revise" | "requeue"
-            | "cancel" | "stop" => self.ui.out.push(out(format!("usage for {w}: type help"))),
-            other => self.ui.out.push(vec![
+            | "cancel" | "stop"
+                if rest.len() < 2 =>
+            {
+                self.ui.out.push(out(format!("usage for {w}: type help")))
+            }
+            m if self.frame.crew.missions.iter().any(|(n, _)| n == m) => {
+                let goal = rest.join(" ");
+                self.start_goal(m, &goal, None)?;
+            }
+            other if rest.is_empty() => self.ui.out.push(vec![
                 ("? UNKNOWN".into(), Role::Dim),
                 (
-                    format!(" / no command \"{}\" / type help", view::trunc(other, 20)),
+                    format!(
+                        " / no command \"{}\" / type help, or a whole sentence to start a goal",
+                        view::trunc(other, 20)
+                    ),
                     Role::Plain,
                 ),
             ]),
+            _ => {
+                self.ui.pending = Some(Pending {
+                    kind: PendingKind::Goal,
+                    task_id: 0,
+                    typed: String::new(),
+                    text: Some(("run".into(), input.to_string())),
+                });
+            }
         }
         self.refresh()?;
         Ok(())
@@ -661,6 +762,7 @@ impl App {
                     p.typed.pop();
                 }
                 Key::Enter => self.commit()?,
+                Key::Char(_) if matches!(p.kind, PendingKind::Goal | PendingKind::Trust) => {}
                 Key::Char(c) if p.needs_word().is_some() => {
                     if p.typed.len() < 12 {
                         p.typed.push(c.to_ascii_uppercase());
@@ -685,6 +787,36 @@ impl App {
                 _ => {}
             }
             self.ui.sel = 0;
+            return Ok(());
+        }
+        if self.ui.route == Route::Welcome && self.frame.crew.configured {
+            self.ui.route = Route::Swarm;
+        }
+        if self.ui.route == Route::Welcome {
+            match k {
+                Key::Enter => {
+                    self.setup(false)?;
+                    if self.frame.crew.configured {
+                        // Welcome is done for good: home replaces it, esc leads to swarm.
+                        self.ui.prev.clear();
+                        self.ui.route = Route::Home;
+                    } else {
+                        self.note("nothing to set up yet / install a CLI marked - , then r");
+                    }
+                }
+                Key::Char('r') => {
+                    self.detect()?;
+                    self.note(format!(
+                        "looked again / {} agent CLIs found",
+                        self.found.iter().filter(|f| f.path.is_some()).count()
+                    ));
+                }
+                Key::Char('c') => self.go(Route::Home),
+                Key::Char('q') => self.ui.quit_prompt = true,
+                Key::Char('?') => self.go(Route::Help),
+                Key::Esc => self.go(Route::Swarm),
+                _ => {}
+            }
             return Ok(());
         }
         if self.ui.route == Route::Home {
@@ -903,6 +1035,234 @@ impl App {
     }
 }
 
+
+// ------------------------------------------------------------------ the crew
+
+fn ok_line(text: impl Into<String>) -> Vec<(String, Role)> {
+    vec![("[ ok ]".into(), Role::Bold), (format!(" {}", text.into()), Role::Plain)]
+}
+
+fn fail_line(text: impl Into<String>) -> Vec<(String, Role)> {
+    vec![("x FAILED".into(), Role::Err), (format!(" / {}", text.into()), Role::Plain)]
+}
+
+fn dim_line(text: impl Into<String>) -> Vec<(String, Role)> {
+    vec![(text.into(), Role::Dim)]
+}
+
+impl App {
+    fn say(&mut self, l: Vec<(String, Role)>) {
+        self.ui.out.push(l);
+    }
+
+    /// Detect CLIs, write the crew and presets, put the crew on the bus.
+    pub fn setup(&mut self, force: bool) -> Result<()> {
+        self.found = crew::detect();
+        match crew::setup(&self.bus, &self.paths, &self.found, force) {
+            Ok(rep) => {
+                let who = rep
+                    .members
+                    .iter()
+                    .map(|(id, cli)| format!("{id} {cli}"))
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+                self.say(ok_line(if rep.wrote_crew {
+                    format!("crew ready: {who}")
+                } else {
+                    format!("kept your crew.json: {who} (setup --force rewrites it)")
+                }));
+                self.say(dim_line(format!(
+                    "prompts and missions are plain files in {}",
+                    crew::Paths::show(&self.paths.dir)
+                )));
+                self.say(dim_line(
+                    "now type what you want done, e.g. fix the failing test in parser.rs",
+                ));
+                self.say(dim_line(format!(
+                    "or start from a mission: {} <what>",
+                    crew::missions(&self.paths)
+                        .iter()
+                        .filter(|m| m.name != "run")
+                        .map(|m| m.name.clone())
+                        .collect::<Vec<_>>()
+                        .join("|")
+                )));
+            }
+            Err(e) => self.say(fail_line(e.message)),
+        }
+        self.refresh()
+    }
+
+    fn crew_config(&mut self) -> Option<crate::config::BusConfig> {
+        match crew::load_crew(&self.paths) {
+            Ok(Some(c)) => Some(c),
+            Ok(None) => {
+                self.say(fail_line("no crew yet / type setup to make one from the CLIs on this computer"));
+                None
+            }
+            Err(e) => {
+                self.say(fail_line(format!(
+                    "crew.json does not load: {} / fix it, or setup --force",
+                    e.message
+                )));
+                None
+            }
+        }
+    }
+
+    /// The folder agents work in: where the crew already runs, else here.
+    fn workdir(&self) -> Result<std::path::PathBuf> {
+        if self.frame.crew.running() > 0 {
+            if let Some(d) = crew::crew_workdir(&self.paths) {
+                return Ok(d);
+            }
+        }
+        Ok(std::env::current_dir()?)
+    }
+
+    /// Start crew members (all when `only` is empty). Asks to trust the folder
+    /// first. Returns false when it stopped to ask.
+    fn start_crew(&mut self, only: &[String]) -> Result<bool> {
+        let Some(config) = self.crew_config() else {
+            return Ok(false);
+        };
+        let ids: Vec<String> = if only.is_empty() {
+            crew::member_ids(&config)
+        } else {
+            only.to_vec()
+        };
+        if let Some(bad) = ids.iter().find(|id| !config.agents.contains_key(*id)) {
+            self.say(fail_line(format!(
+                "{bad} is not in your crew / crew lists who is"
+            )));
+            return Ok(false);
+        }
+        let dir = self.workdir()?;
+        if let Some(why) = crew::unsafe_workdir(&dir) {
+            self.say(fail_line(why));
+            return Ok(false);
+        }
+        if !crew::is_trusted(&self.paths, &dir) {
+            self.ui.pending = Some(Pending {
+                kind: PendingKind::Trust,
+                task_id: 0,
+                typed: String::new(),
+                text: None,
+            });
+            return Ok(false);
+        }
+        crew::sync_bus(&self.bus, &config)?;
+        for (id, r) in crew::start(&self.bus.db_path, &self.paths, &ids, &dir) {
+            match r {
+                Ok(pid) => self.say(ok_line(format!("{id} running / pid {pid}"))),
+                Err(e) => self.say(fail_line(format!("{id} did not start: {}", e.message))),
+            }
+        }
+        self.say(dim_line(format!("agents work in {}", crew::Paths::show(&dir))));
+        self.say(dim_line("they keep running after you leave aos / stop agents stops them"));
+        self.refresh()?;
+        Ok(true)
+    }
+
+    fn stop_crew(&mut self, only: &[String]) -> Result<()> {
+        let ids: Vec<String> = if only.is_empty() {
+            self.frame.crew.members.iter().map(|m| m.id.clone()).collect()
+        } else {
+            only.to_vec()
+        };
+        for (id, r) in crew::stop(&self.paths, &ids) {
+            match r {
+                Ok(true) => self.say(ok_line(format!("{id} stopped"))),
+                Ok(false) => self.say(dim_line(format!("{id} was not running"))),
+                Err(e) => self.say(fail_line(e.message)),
+            }
+        }
+        self.refresh()
+    }
+
+    /// Start a goal from a mission template and hand it to the lead, starting
+    /// the crew first if nobody is running.
+    fn start_goal(&mut self, mission: &str, goal: &str, to: Option<String>) -> Result<()> {
+        let goal = goal.trim();
+        if goal.is_empty() {
+            self.say(dim_line(format!("usage: {mission} <what you want done>")));
+            return Ok(());
+        }
+        let Some(m) = crew::missions(&self.paths).into_iter().find(|m| m.name == mission) else {
+            self.say(fail_line(format!("no mission {mission} / missions lists them")));
+            return Ok(());
+        };
+        let (title, brief, acceptance) = crew::expand(&m, goal);
+        if !self.frame.crew.configured {
+            // A bus without an aos crew (agents run by qagent supervise, or none
+            // yet): write the goal and leave starting agents to the operator.
+            let r = self.operator().and_then(|op| {
+                self.bus.create_task(
+                    &op,
+                    CreateTaskInput {
+                        title,
+                        brief: Some(brief),
+                        acceptance: Some(acceptance).filter(|a| !a.is_empty()),
+                        to,
+                        ..Default::default()
+                    },
+                )
+            });
+            self.outcome(r, |t| {
+                format!(
+                    "goal #{} started / {}{}",
+                    t.id,
+                    t.state,
+                    t.assignee.map(|a| format!(" for {a}")).unwrap_or_default()
+                )
+            });
+            if self.frame.agents.is_empty() {
+                self.say(dim_line("no agents yet, so it waits / setup makes a crew"));
+            }
+            return self.refresh();
+        }
+        let Some(config) = self.crew_config() else {
+            return Ok(());
+        };
+        let lead = to.or_else(|| crew::member_ids(&config).into_iter().next());
+        if self.frame.crew.running() == 0 {
+            let started = self.start_crew(&[])?;
+            if !started {
+                if let Some(p) = self.ui.pending.as_mut() {
+                    p.text = Some((mission.to_string(), goal.to_string()));
+                }
+                return Ok(());
+            }
+        }
+        let r = self.operator().and_then(|op| {
+            self.bus.create_task(
+                &op,
+                CreateTaskInput {
+                    title,
+                    brief: Some(brief),
+                    acceptance: Some(acceptance).filter(|a| !a.is_empty()),
+                    to: lead.clone(),
+                    reviewer: Some(OPERATOR_ID.into()),
+                    ..Default::default()
+                },
+            )
+        });
+        match r {
+            Ok(t) => {
+                self.say(ok_line(format!(
+                    "goal #{} started / {} is on it",
+                    t.id,
+                    lead.unwrap_or_else(|| "the first free agent".into())
+                )));
+                self.say(dim_line("watch it: esc, then s swarm or g goal"));
+                self.say(dim_line("the result comes to your gate to accept or send back"));
+            }
+            Err(e) => self.say(fail_line(e.message)),
+        }
+        self.refresh()
+    }
+}
+
 // ------------------------------------------------------------------ painting
 
 const VOID: Color = Color::Rgb(0x05, 0x05, 0x09);
@@ -1038,6 +1398,9 @@ pub fn run(db_path: &Path, tier: Tier, stall_ms: i64) -> Result<i32> {
     let mut app = App::new(bus, stall_ms)?;
     if !writable {
         app.note(READ_ONLY_NOTE);
+    } else if app.first_run() {
+        app.detect()?;
+        app.ui.route = Route::Welcome;
     }
     let mut seq = app.frame.seq;
 
@@ -1108,17 +1471,145 @@ pub fn run(db_path: &Path, tier: Tier, stall_ms: i64) -> Result<i32> {
     Ok(0)
 }
 
-const USAGE: &str = "aos - the AOS terminal over the ACS bus
+const USAGE: &str = "aos - mission control for a team of AI coding agents
 
-usage:
-  aos [--db PATH] [--color truecolor|16|none] [--stall-min N]
-  aos demo [--db PATH]       seed a sample bus, then open it
-  aos --print WxH [ROUTE]    print one frame as plain text and exit
-                             (routes: swarm goal evidence retro providers memory keys home gate)
+  aos                       open aos in this folder; the first time, it sets up your crew
+  aos \"<what you want>\"     hand a goal to your crew and return
+  aos fix <what is broken>  start from a mission: build, fix, research, review,
+                            explain, docs, or any mission file you add
+  aos start | aos stop      start the crew in this folder (it keeps running) / stop it
+  aos setup [--force]       find agent CLIs on this computer and write your crew
+  aos doctor                check everything and say what to fix
+  aos missions              list the mission templates
+  aos demo                  try aos on a sample team; nothing real runs
 
-The bus defaults to ~/.agent-bus/bus.db (or $QAGENT_BUS_DB, or bus.db in $QAGENT_HOME), the same file qagent and acs use.
-NO_COLOR, TERM=dumb and --color none give plain text with markers and state words.
-Press ? inside for keys.";
+options: --db PATH   --color truecolor|16|none   --stall-min N   --print WxH [screen]
+         --yes       allow agents to work in this folder without asking
+
+Your crew, role prompts and missions are plain files in ~/.agent-bus/aos.
+Every qagent command works too: aos task list, aos log --follow, aos mcp.
+Inside aos: press ? for keys, or c and type help.";
+
+/// qagent commands `aos` hands to the CLI unchanged, so one binary does both.
+const QAGENT_COMMANDS: &[&str] = &[
+    "init", "agent", "token", "whoami", "status", "send", "inbox", "ack", "wait", "task", "log",
+    "trace", "import", "mcp", "mcp-config", "supervise", "dashboard", "fake-harness",
+];
+
+/// Positional words, skipping flags and their values.
+fn positionals(argv: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < argv.len() {
+        let a = &argv[i];
+        if a == "--" {
+            out.extend(argv[i + 1..].iter().cloned());
+            break;
+        }
+        if let Some(name) = a.strip_prefix("--") {
+            if !a.contains('=')
+                && matches!(name, "db" | "color" | "stall-min" | "print" | "as" | "config")
+            {
+                i += 1;
+            }
+        } else {
+            out.push(a.clone());
+        }
+        i += 1;
+    }
+    out
+}
+
+fn line_text(segs: &[(String, Role)]) -> String {
+    segs.iter().map(|(t, _)| t.as_str()).collect::<String>()
+}
+
+fn ask_yes(question: &str) -> bool {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return false;
+    }
+    eprint!("{question} [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    let _ = std::io::stdin().read_line(&mut answer);
+    matches!(answer.trim(), "y" | "Y" | "yes" | "YES")
+}
+
+/// `aos <words>` from the shell: the same command home line aos runs inside,
+/// with its transcript printed and its questions asked on the terminal.
+fn shell_line(db_path: &Path, words: &[String], yes: bool, stall_ms: i64) -> i32 {
+    let bus = match Bus::open(Some(db_path)) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("aos: {}", e.message);
+            return 1;
+        }
+    };
+    if let Err(e) = ensure_operator(&bus) {
+        eprintln!("aos: {}", e.message);
+        return 1;
+    }
+    let mut app = match App::new(bus, stall_ms) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("aos: {}", e.message);
+            return 1;
+        }
+    };
+    app.ui.out.clear();
+    // From the shell, a bare `aos stop` means the agents, not the goal.
+    let line = if words.len() == 1 && words[0] == "stop" {
+        "stop agents".to_string()
+    } else {
+        words.join(" ")
+    };
+    let run = |app: &mut App| -> Result<()> {
+        app.command_line(&line)?;
+        // A whole sentence typed at the shell is meant as a goal: no second ask.
+        if app.ui.pending.as_ref().is_some_and(|p| p.kind == PendingKind::Goal) {
+            app.commit()?;
+        }
+        if app.ui.pending.as_ref().is_some_and(|p| p.kind == PendingKind::Trust) {
+            let dir = std::env::current_dir()
+                .map(|d| crew::Paths::show(&d))
+                .unwrap_or_default();
+            if yes
+                || ask_yes(&format!(
+                    "aos: agents will run commands and edit files in {dir}. Allow?"
+                ))
+            {
+                app.commit()?;
+            } else {
+                app.ui.pending = None;
+                app.say(fail_line(format!(
+                    "not started / agents need your OK to work in {dir}: answer y, or pass --yes"
+                )));
+            }
+        }
+        if let Some(p) = app.ui.pending.take() {
+            let word = p.needs_word().unwrap_or("it");
+            app.say(fail_line(format!(
+                "nothing written / this needs you to type {word}: open aos, press c and run it there"
+            )));
+        }
+        Ok(())
+    };
+    let r = run(&mut app);
+    let mut failed = r.is_err();
+    for l in app.ui.out.iter().skip(1) {
+        let t = line_text(l);
+        failed |= t.starts_with("x FAILED") || t.starts_with("? UNKNOWN");
+        println!("{}", t.trim_end());
+    }
+    if let Err(e) = r {
+        eprintln!("aos: {}", e.message);
+    }
+    if line.trim() == "doctor" {
+        failed = crew::doctor(db_path).iter().any(|c| c.ok == Some(false));
+    }
+    i32::from(failed)
+}
 
 /// `#12` or `12`.
 fn parse_id(s: &str) -> Option<i64> {
@@ -1169,6 +1660,8 @@ fn route_named(name: &str) -> Option<Route> {
         "keys" | "help" => Route::Help,
         "home" => Route::Home,
         "gate" => Route::Gate,
+        "crew" => Route::Providers,
+        "welcome" => Route::Welcome,
         _ => return None,
     })
 }
@@ -1186,6 +1679,9 @@ pub fn print_frame(
     app.ui.width = w;
     app.ui.height = h;
     app.ui.route = route;
+    if route == Route::Welcome {
+        app.detect()?;
+    }
     let mut s = String::new();
     for l in app.screen() {
         s.push_str(l.text().trim_end());
@@ -1196,11 +1692,24 @@ pub fn print_frame(
 
 pub fn main() -> i32 {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    if argv.iter().any(|a| a == "--help" || a == "-h") {
+    let words = positionals(&argv);
+    if let Some(first) = words.first() {
+        if QAGENT_COMMANDS.contains(&first.as_str()) {
+            let mut io = crate::cli::Io::default();
+            return crate::cli::run(&argv, &mut io);
+        }
+    }
+    if argv.iter().any(|a| a == "--help" || a == "-h")
+        || words.first().is_some_and(|w| w == "help")
+    {
         println!("{USAGE}");
         return 0;
     }
-    let demo = argv.first().is_some_and(|a| a == "demo");
+    if argv.iter().any(|a| a == "--version" || a == "-V") {
+        println!("aos {}", env!("CARGO_PKG_VERSION"));
+        return 0;
+    }
+    let demo = words.first().is_some_and(|a| a == "demo");
     let db_flag = flag(&argv, "--db");
     let db_path = if demo && db_flag.is_none() {
         crate::db::absolutize(&std::env::temp_dir().join("aos-demo").join("bus.db"))
@@ -1212,6 +1721,10 @@ pub fn main() -> i32 {
         .unwrap_or(DEFAULT_STALL_MIN)
         .max(1)
         * 60_000;
+    if !demo && !words.is_empty() && flag(&argv, "--print").is_none() {
+        let yes = argv.iter().any(|a| a == "--yes" || a == "-y");
+        return shell_line(&db_path, &words, yes, stall_ms);
+    }
     if demo {
         match demo::seed(&db_path) {
             Ok(true) => eprintln!("aos: seeded a sample bus at {}", db_path.display()),

@@ -376,6 +376,19 @@ pub fn build_brief(
     lines.join("\n")
 }
 
+/// An agent's role prompt (its `instructions` file, read on every turn) goes
+/// before the brief, so the agent knows how to work before it reads what to do.
+pub fn with_role_prompt(role: Option<String>, brief: String) -> String {
+    match role {
+        Some(text) if !text.trim().is_empty() => format!(
+            "=== how you work (your role prompt) ===\n{}\n\n{}",
+            text.trim(),
+            brief
+        ),
+        _ => brief,
+    }
+}
+
 fn cancellation_only(messages: &[Message]) -> bool {
     !messages.is_empty()
         && messages
@@ -538,9 +551,10 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
             )));
         }
         let bus_agent = bus_agent.unwrap();
-        let config = load_config(&options.config_path.clone().unwrap_or_else(|| {
+        let config_path = options.config_path.clone().unwrap_or_else(|| {
             config_path_from_project(&workdir, &|name| std::env::var(name).ok())
-        }))?;
+        });
+        let config = load_config(&config_path)?;
         let agent = resolve_agent(&config, &options.agent_id)?;
         if !agent.agent.enabled {
             return Err(BusError::invalid(format!(
@@ -685,7 +699,10 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
             let context = AdapterContext {
                 agent: &agent,
                 qagent_bin: qagent_bin.clone(),
-                prompt: build_brief(&agent, &messages, &tasks, managed),
+                prompt: with_role_prompt(
+                    crate::aos::crew::role_prompt(&config_path, &agent.agent.id),
+                    build_brief(&agent, &messages, &tasks, managed),
+                ),
                 session_id: session.session_id.clone(),
                 pinned_session_id: pinned_session_id.clone(),
                 workdir: workdir.display().to_string(),

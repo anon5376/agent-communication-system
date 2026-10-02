@@ -49,6 +49,7 @@ const ROUTES: &[Route] = &[
     Route::Help,
     Route::Home,
     Route::Gate,
+    Route::Welcome,
 ];
 
 #[test]

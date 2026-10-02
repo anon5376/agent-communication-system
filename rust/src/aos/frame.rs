@@ -182,6 +182,8 @@ pub struct Frame {
     pub events: Vec<BusEvent>,
     pub mail: Vec<Message>,
     pub operator_unread: i64,
+    /// The aos crew around the bus: filled in by the app, empty in tests and --print of a bare bus.
+    pub crew: super::crew::CrewInfo,
 }
 
 const CLOSED_RECENT: i64 = 40;
@@ -212,9 +214,30 @@ impl Frame {
             tasks.push(bus.get_task(id)?.task);
         }
         tasks.sort_by_key(|t| t.id);
+        // A lead waiting on its team is not stuck: a claim counts as stalled only
+        // when nothing open under it has moved inside the window either.
+        let cutoff = now - stall_ms.max(0);
+        let busy_under = |id: i64| -> bool {
+            let mut stack = vec![id];
+            let mut seen = 0;
+            while let Some(p) = stack.pop() {
+                seen += 1;
+                if seen > 1000 {
+                    break;
+                }
+                for c in open.iter().filter(|t| t.parent_id == Some(p)) {
+                    if c.updated_ms >= cutoff {
+                        return true;
+                    }
+                    stack.push(c.id);
+                }
+            }
+            false
+        };
         let stalled: BTreeSet<i64> = bus
             .stalled_tasks(stall_ms)?
             .into_iter()
+            .filter(|t| !busy_under(t.id))
             .map(|t| t.id)
             .collect();
 
@@ -281,6 +304,7 @@ impl Frame {
             events,
             mail,
             operator_unread,
+            crew: Default::default(),
         })
     }
 
