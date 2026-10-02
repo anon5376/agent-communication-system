@@ -25,6 +25,8 @@ aos
 
 The first time, aos shows what it found on this computer and the crew it proposes:
 
+![aos first run at 80x24](../docs/assets/aos-welcome-80x24.png)
+
 - **lead**: plans the goal, hands out tasks, checks results and hands the goal back to you;
 - **builder**: makes the changes and runs the checks;
 - **reviewer**: checks every change before you see it. With two CLIs installed the reviewer uses a different model family from the builder, so every change gets an independent second opinion.
@@ -32,6 +34,8 @@ The first time, aos shows what it found on this computer and the crew it propose
 Press Enter to set it up. Then type what you want done, in plain words, and press Enter. The first time in a folder aos asks whether agents may work there: they can run commands and edit files in it. aos refuses to start agents in your home folder or `/`.
 
 The crew starts in the background, the lead takes the goal, and you watch it on the swarm (`s`) and goal tree (`g`). When the lead hands the goal back, it lands on your gate: `1` accept, `2` send back with feedback. Agents keep running after you leave aos; `stop agents` (or `aos stop`) stops them.
+
+![a goal back on the operator's gate](../docs/assets/aos-goal-gate-80x24.png)
 
 ## Missions
 
