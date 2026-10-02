@@ -80,6 +80,8 @@ aos fix "login crashes on an empty password"
 aos start | aos stop             # start the crew in this folder / stop it
 aos resume                       # start the crew again and carry on with what is open
 aos history                      # your past goals and how each ended
+aos pause builder | aos resume builder   # no new turns until resumed
+aos budget all 20 turns 60 min   # each agent pauses itself when it reaches its budget
 aos setup [--force]              # detect CLIs, write the crew
 aos doctor                       # check everything; exits 1 if something needs fixing
 aos missions
@@ -142,6 +144,9 @@ Press `c` for command home. It lists the operator's latest mail with message num
 | `start [agent]`, `stop agents`, `stop <agent>` | nothing on the bus: starts or stops crew supervisors |
 | `resume` | nothing on the bus: starts any stopped crew members; they pick up the open goal where it was |
 | `history` | nothing: your last 12 goals, each as open, at your gate, done, failed or stopped |
+| `pause <agent\|all> [why]` | pauses the agent: it finishes any turn it is in, then starts no new one |
+| `resume <agent\|all>` | lifts the pause; a budget starts a fresh allowance |
+| `budget <agent\|all> 20 turns 60 min $2`, `budget <agent\|all> off`, `budget` | sets, clears or lists budgets. Turns and minutes are always counted; dollars only as each CLI reports them, so a CLI that reports none counts as $0. An agent that reaches its budget pauses itself and writes to you |
 | `setup [--force]`, `doctor`, `missions`, `crew` | nothing |
 | `task add <title> [--to agent] [--under #] [--review]` | a task; `--review` makes you its reviewer, so its result comes to your gate |
 | `accept # <reason>`, `revise # <feedback>` | a review |
@@ -155,7 +160,7 @@ Press `c` for command home. It lists the operator's latest mail with message num
 
 ## What aos cannot do yet
 
-These are in the design but have no ACS verb, so aos does not fake them: pausing or resuming an agent (you can stop and start its process), rerouting an agent to another harness or model from inside aos (edit `crew.json`), run budgets, and handing a task straight to a named agent (requeue returns it to the pool; `--to` works only when creating).
+These are in the design but have no ACS verb, so aos does not fake them: rerouting an agent to another harness or model from inside aos (edit `crew.json`), and handing a task straight to a named agent (requeue returns it to the pool; `--to` works only when creating).
 
 ## Where each readout comes from
 

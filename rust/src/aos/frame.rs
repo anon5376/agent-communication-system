@@ -141,6 +141,10 @@ pub struct AgentView {
     pub depth: usize,
     /// For drawing the spine: is this the last child at each ancestor level.
     pub lasts: Vec<bool>,
+    /// Set while the agent is paused: why, in words.
+    pub paused: Option<String>,
+    /// Its budget and what it has used, when it has one.
+    pub budget: Option<crate::control::Budget>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -409,7 +413,24 @@ fn agent_tree(
                 _ => (St::Waiting, "idle".into(), None),
             }
         };
+        let paused = crate::control::paused(&a.meta).map(|p| {
+            if !p.reason.is_empty() {
+                p.reason
+            } else if p.by == OPERATOR_ID {
+                "by you".to_string()
+            } else {
+                format!("by {}", p.by)
+            }
+        });
+        let (st, phrase) = match &paused {
+            Some(_) if st == St::Running => (st, "pausing after this turn".to_string()),
+            Some(why) => (St::Blocked, format!("paused / {why}")),
+            None => (st, phrase),
+        };
+        let budget = bus.budget_of(&a);
         flat.push(AgentView {
+            paused,
+            budget,
             id: a.id.clone(),
             role: a.role.clone(),
             harness: a.harness.clone(),

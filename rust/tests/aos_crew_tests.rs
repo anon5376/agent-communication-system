@@ -192,3 +192,51 @@ fn up_brings_back_earlier_lines_after_a_restart() {
     app.key(Key::Down).unwrap();
     assert_eq!(app.ui.prompt, "");
 }
+
+#[test]
+fn pause_resume_and_budget_from_command_home() {
+    let db = temp_db("budget");
+    assert!(demo::seed(&db).unwrap());
+    let mut app = app_on(&db);
+    app.ui.route = Route::Home;
+    let id = app.frame.agents[0].id.clone();
+    app.command_line(&format!("budget {id} 20 turns 1 h $2"))
+        .unwrap();
+    assert!(
+        text(&app).contains(&format!("{id} budget: 20 turns, 60 min, $2.00")),
+        "{}",
+        text(&app)
+    );
+    app.command_line(&format!("pause {id} lunch")).unwrap();
+    let a = app.frame.agents.iter().find(|a| a.id == id).unwrap();
+    assert_eq!(a.paused.as_deref(), Some("lunch"));
+    assert_eq!(
+        a.budget.as_ref().unwrap().line(),
+        "0/20 turns  0/60 min  $0.00/$2.00"
+    );
+    app.command_line(&format!("resume {id}")).unwrap();
+    assert!(app
+        .frame
+        .agents
+        .iter()
+        .find(|a| a.id == id)
+        .unwrap()
+        .paused
+        .is_none());
+    app.command_line(&format!("budget {id} off")).unwrap();
+    assert!(app
+        .frame
+        .agents
+        .iter()
+        .find(|a| a.id == id)
+        .unwrap()
+        .budget
+        .is_none());
+    // A sentence that starts with a command word is still a goal.
+    app.command_line("pause the release until the tests pass")
+        .unwrap();
+    assert_eq!(
+        app.ui.pending.as_ref().map(|p| p.kind),
+        Some(PendingKind::Goal)
+    );
+}

@@ -517,6 +517,7 @@ impl App {
                     "fix|build|research|review|explain|docs <what>   start from a mission",
                     "missions          list mission templates (your own files, editable)",
                     "history           past goals   resume   start the crew and carry on",
+                    "pause <agent|all> [why]   resume <agent|all>   budget [<agent|all> 20 turns 60 min | off]",
                     "start [agent]     start the crew here   stop agents|<agent>   stop it",
                     "setup [--force]   find agent CLIs, make the crew   doctor   check all",
                     "accept # <reason>   revise # <feedback>   requeue # [reason]",
@@ -688,6 +689,69 @@ impl App {
                         None => self.say(dim_line(
                             "nothing open to carry on / type what you want done",
                         )),
+                    }
+                    let paused: Vec<(String, String)> = self
+                        .frame
+                        .agents
+                        .iter()
+                        .filter_map(|a| a.paused.clone().map(|p| (a.id.clone(), p)))
+                        .collect();
+                    for (id, why) in paused {
+                        self.say(dim_line(format!(
+                            "{id} is paused ({why}) / resume {id} lifts it"
+                        )));
+                    }
+                }
+            }
+            "pause" if !rest.is_empty() && self.is_target(rest[0]) => {
+                let reason = rest[1..].join(" ");
+                for id in self.targets(rest[0]) {
+                    let r = self.operator().and_then(|op| {
+                        self.bus
+                            .pause_agent(&op, &id, Some(reason.as_str()).filter(|r| !r.is_empty()))
+                    });
+                    self.outcome(r, |_| {
+                        format!("{id} paused / it finishes any turn it is in, then starts no new one")
+                    });
+                }
+            }
+            "resume" | "continue" if rest.len() == 1 && self.is_target(rest[0]) => {
+                for id in self.targets(rest[0]) {
+                    let r = self
+                        .operator()
+                        .and_then(|op| self.bus.resume_agent(&op, &id));
+                    self.outcome(r, |a| {
+                        let fresh = if a.meta.get("budget").is_some() {
+                            " / its budget starts again"
+                        } else {
+                            ""
+                        };
+                        format!("{id} resumed{fresh}")
+                    });
+                }
+            }
+            "budget" if rest.is_empty() => self.budgets(),
+            "budget" if rest.len() >= 2 && self.is_target(rest[0]) => {
+                let limits = if rest[1..] == ["off"] {
+                    Ok(None)
+                } else {
+                    parse_limits(&rest[1..]).map(Some)
+                };
+                match limits {
+                    Err(e) => self.say(fail_line(e)),
+                    Ok(limits) => {
+                        for id in self.targets(rest[0]) {
+                            let r = self
+                                .operator()
+                                .and_then(|op| self.bus.set_budget(&op, &id, limits));
+                            self.outcome(r, |_| match limits {
+                                Some(l) => format!("{id} budget: {}, counted from now", l.describe()),
+                                None => format!("{id} has no budget now"),
+                            });
+                        }
+                        if limits.is_some_and(|l| l.usd.is_some()) {
+                            self.say(dim_line(USD_NOTE));
+                        }
                     }
                 }
             }
@@ -1298,6 +1362,60 @@ impl App {
 
     /// Start a goal from a mission template and hand it to the lead, starting
     /// the crew first if nobody is running.
+    /// An agent id on the bus, or all.
+    fn is_target(&self, word: &str) -> bool {
+        word == "all" || self.frame.agents.iter().any(|a| a.id == word)
+    }
+
+    /// The agents a word names: one agent, or with all the crew (or every agent when there is no crew).
+    fn targets(&self, word: &str) -> Vec<String> {
+        if word != "all" {
+            return vec![word.to_string()];
+        }
+        if self.frame.crew.configured {
+            self.frame
+                .crew
+                .members
+                .iter()
+                .map(|m| m.id.clone())
+                .collect()
+        } else {
+            self.frame.agents.iter().map(|a| a.id.clone()).collect()
+        }
+    }
+
+    /// Every agent's budget, and what a budget can measure.
+    fn budgets(&mut self) {
+        let rows: Vec<(String, String)> = self
+            .frame
+            .agents
+            .iter()
+            .map(|a| {
+                let text = match &a.budget {
+                    Some(b) => format!(
+                        "{}{}",
+                        b.line(),
+                        b.over().map(|_| " / used up").unwrap_or_default()
+                    ),
+                    None => "no budget".into(),
+                };
+                (a.id.clone(), text)
+            })
+            .collect();
+        for (id, text) in rows {
+            self.ui
+                .out
+                .push(vec![(view::pad(&id, 11), Role::Bold), (text, Role::Plain)]);
+        }
+        self.say(dim_line(
+            "set one: budget <agent|all> 20 turns 60 min $2 / budget <agent|all> off",
+        ));
+        self.say(dim_line(
+            "an agent that reaches its budget pauses itself and writes to you",
+        ));
+        self.say(dim_line(USD_NOTE));
+    }
+
     /// The goals the operator started, newest first, and how each one ended.
     fn history(&mut self) -> Result<()> {
         let ids: Vec<i64> = {
@@ -1656,6 +1774,8 @@ const USAGE: &str = "aos - mission control for a team of AI coding agents
   aos start | aos stop      start the crew in this folder (it keeps running) / stop it
   aos resume                start the crew again and carry on with what is open
   aos history               your past goals and how each ended
+  aos pause <agent|all>     no new turns until  aos resume <agent|all>
+  aos budget all 20 turns 60 min   limits per agent; budget lists them, off clears
   aos setup [--force]       find agent CLIs on this computer and write your crew
   aos doctor                check everything and say what to fix
   aos missions              list the mission templates
@@ -1816,6 +1936,40 @@ fn shell_line(db_path: &Path, words: &[String], yes: bool, stall_ms: i64) -> i32
         failed = crew::doctor(db_path).iter().any(|c| c.ok == Some(false));
     }
     i32::from(failed)
+}
+
+const USD_NOTE: &str = "turns and minutes are always counted; dollars only as each CLI reports them, and a CLI that reports none counts as $0";
+
+/// "20 turns 60 min $2" (also "1 h", "2 usd") into budget limits.
+fn parse_limits(words: &[&str]) -> std::result::Result<crate::control::Limits, String> {
+    let usage = "usage: budget <agent|all> 20 turns 60 min $2, or budget <agent|all> off";
+    let mut l = crate::control::Limits::default();
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i].to_lowercase();
+        if let Some(n) = w.strip_prefix('$') {
+            l.usd = Some(n.parse().map_err(|_| usage.to_string())?);
+            i += 1;
+            continue;
+        }
+        let n: f64 = w.parse().map_err(|_| usage.to_string())?;
+        let unit = words
+            .get(i + 1)
+            .map(|u| u.to_lowercase())
+            .unwrap_or_default();
+        match unit.as_str() {
+            "turn" | "turns" => l.turns = Some(n),
+            "min" | "mins" | "minute" | "minutes" | "m" => l.minutes = Some(n),
+            "h" | "hour" | "hours" => l.minutes = Some(n * 60.0),
+            "usd" | "dollar" | "dollars" | "$" => l.usd = Some(n),
+            _ => return Err(usage.to_string()),
+        }
+        i += 2;
+    }
+    if l.is_empty() {
+        return Err(usage.to_string());
+    }
+    Ok(l)
 }
 
 /// `#12` or `12`.

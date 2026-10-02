@@ -1172,6 +1172,25 @@ fn agent_facts(f: &Frame, a: &AgentView, w: usize, max: usize) -> Vec<VLine> {
             },
         ));
     }
+    if let Some(why) = &a.paused {
+        v.push(lvs(
+            "paused",
+            trunc(&format!("{why} / c, then resume {}", a.id), w - 12),
+        ));
+    }
+    if let Some(b) = &a.budget {
+        v.push(lvs(
+            "budget",
+            trunc(
+                &format!(
+                    "{}{}",
+                    b.line(),
+                    b.over().map(|_| " / used up").unwrap_or_default()
+                ),
+                w - 12,
+            ),
+        ));
+    }
     v.extend([
         lvs("state", a.phrase.clone()),
         lvs("role", a.role.clone()),
@@ -1881,6 +1900,20 @@ pub fn crew(f: &Frame, ui: &Ui) -> Vec<VLine> {
                 seg(pad(&m.cli, 9), Role::Plain),
                 seg(trunc(&m.description, w.saturating_sub(32)), Role::Dim),
             ]));
+            let view = f.agents.iter().find(|a| a.id == m.id);
+            let mut notes: Vec<String> = Vec::new();
+            if let Some(why) = view.and_then(|a| a.paused.as_ref()) {
+                notes.push(format!("paused: {why}"));
+            }
+            if let Some(b) = view.and_then(|a| a.budget.as_ref()) {
+                notes.push(format!("budget {}", b.line()));
+            }
+            if !notes.is_empty() {
+                body.push(line(vec![
+                    seg(pad("", 11), Role::Plain),
+                    seg(trunc(&notes.join(" / "), w.saturating_sub(11)), Role::Dim),
+                ]));
+            }
             if let (None, Some(last)) = (m.pid, &m.last_words) {
                 body.push(line(vec![
                     seg(pad("", 11), Role::Plain),
@@ -1916,7 +1949,7 @@ pub fn crew(f: &Frame, ui: &Ui) -> Vec<VLine> {
     }
     body.push(rule(w));
     body.push(dim(
-        "start / stop agents / setup / doctor: type them in command home (c)",
+        "start / stop agents / pause / resume / budget: type them in command home (c)",
     ));
     compose(f, ui, "crew", body)
 }
@@ -2019,8 +2052,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("help", "help", "every command on one screen"),
     (
         "resume",
-        "resume",
-        "start the crew again and carry on with open goals",
+        "resume [agent|all]",
+        "carry on: start the crew, or lift a pause",
     ),
     ("history", "history", "your past goals and how each ended"),
     ("start", "start [agent]", "start the crew in this folder"),
@@ -2028,6 +2061,16 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
         "stop",
         "stop agents | stop [#]",
         "stop the crew, or a goal and all under it",
+    ),
+    (
+        "pause",
+        "pause <agent|all> [why]",
+        "no new turns until you resume it",
+    ),
+    (
+        "budget",
+        "budget <agent|all> 20 turns 60 min",
+        "limits per agent; off clears",
     ),
     ("status", "status", "agents, open tasks, reviews, stalls"),
     ("gate", "gate", "open the result waiting for your decision"),
