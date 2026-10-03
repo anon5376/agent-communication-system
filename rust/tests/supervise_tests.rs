@@ -507,3 +507,92 @@ fn supervise_fails_task_on_malformed_output() {
     stop.store(true, Ordering::SeqCst);
     handle.join().unwrap().unwrap();
 }
+
+#[test]
+fn supervise_pauses_on_budget_and_resumes() {
+    let e = e2e("w1", "");
+    let config_path = e.workdir.join("agent-bus.config.json");
+    // One turn allowed: the first task is worked, then the supervisor pauses itself.
+    e.bus
+        .set_budget(
+            &e.operator,
+            "w1",
+            Some(acs::control::Limits {
+                turns: Some(1.0),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = {
+        let stop = Arc::clone(&stop);
+        let db_path = e.home.join("bus.db");
+        let workdir = e.workdir.display().to_string();
+        std::thread::spawn(move || {
+            supervise(SuperviseOptions {
+                agent_id: "w1".to_string(),
+                workdir,
+                db_path,
+                config_path: Some(config_path),
+                stop,
+                wait_ms: Some(1_000),
+                fake_harness_path: Some("fake-harness".to_string()),
+                qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
+                log: Some(Box::new(|_| {})),
+            })
+        })
+    };
+    let add = |title: &str| {
+        e.bus
+            .create_task(
+                &e.operator,
+                CreateTaskInput {
+                    title: title.to_string(),
+                    to: Some("w1".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id
+    };
+    let first = add("first");
+    wait_for(Duration::from_secs(20), "first task submitted", || {
+        e.bus
+            .get_task(first)
+            .map(|t| t.task.state == "submitted")
+            .unwrap_or(false)
+    });
+    let paused = || {
+        e.bus
+            .get_agent("w1")
+            .unwrap()
+            .and_then(|a| acs::control::paused(&a.meta))
+    };
+    wait_for(Duration::from_secs(20), "budget pause", || {
+        paused().is_some()
+    });
+    assert_eq!(paused().unwrap().reason, "budget reached: 1 of 1 turns");
+    let mail = e.bus.inbox(&e.operator, true, None).unwrap().messages;
+    assert!(
+        mail.iter()
+            .any(|m| m.subject == "w1 paused: budget reached (1 of 1 turns)"),
+        "{mail:?}"
+    );
+
+    // Paused: new work waits.
+    let second = add("second");
+    std::thread::sleep(Duration::from_millis(2_500));
+    assert_eq!(e.bus.get_task(second).unwrap().task.state, "open");
+
+    // Resumed with a fresh allowance of one turn: the waiting task is worked.
+    e.bus.resume_agent(&e.operator, "w1").unwrap();
+    wait_for(Duration::from_secs(20), "second task submitted", || {
+        e.bus
+            .get_task(second)
+            .map(|t| t.task.state == "submitted")
+            .unwrap_or(false)
+    });
+
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap().unwrap();
+}

@@ -10,6 +10,7 @@ pub mod app;
 pub mod bus;
 pub mod cli;
 pub mod config;
+pub mod control;
 pub mod dashboard;
 pub mod db;
 pub mod error;

@@ -141,6 +141,10 @@ pub struct AgentView {
     pub depth: usize,
     /// For drawing the spine: is this the last child at each ancestor level.
     pub lasts: Vec<bool>,
+    /// Set while the agent is paused: why, in words.
+    pub paused: Option<String>,
+    /// Its budget and what it has used, when it has one.
+    pub budget: Option<crate::control::Budget>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +186,8 @@ pub struct Frame {
     pub events: Vec<BusEvent>,
     pub mail: Vec<Message>,
     pub operator_unread: i64,
+    /// The aos crew around the bus: filled in by the app, empty in tests and --print of a bare bus.
+    pub crew: super::crew::CrewInfo,
 }
 
 const CLOSED_RECENT: i64 = 40;
@@ -212,9 +218,30 @@ impl Frame {
             tasks.push(bus.get_task(id)?.task);
         }
         tasks.sort_by_key(|t| t.id);
+        // A lead waiting on its team is not stuck: a claim counts as stalled only
+        // when nothing open under it has moved inside the window either.
+        let cutoff = now - stall_ms.max(0);
+        let busy_under = |id: i64| -> bool {
+            let mut stack = vec![id];
+            let mut seen = 0;
+            while let Some(p) = stack.pop() {
+                seen += 1;
+                if seen > 1000 {
+                    break;
+                }
+                for c in open.iter().filter(|t| t.parent_id == Some(p)) {
+                    if c.updated_ms >= cutoff {
+                        return true;
+                    }
+                    stack.push(c.id);
+                }
+            }
+            false
+        };
         let stalled: BTreeSet<i64> = bus
             .stalled_tasks(stall_ms)?
             .into_iter()
+            .filter(|t| !busy_under(t.id))
             .map(|t| t.id)
             .collect();
 
@@ -281,6 +308,7 @@ impl Frame {
             events,
             mail,
             operator_unread,
+            crew: Default::default(),
         })
     }
 
@@ -385,7 +413,24 @@ fn agent_tree(
                 _ => (St::Waiting, "idle".into(), None),
             }
         };
+        let paused = crate::control::paused(&a.meta).map(|p| {
+            if !p.reason.is_empty() {
+                p.reason
+            } else if p.by == OPERATOR_ID {
+                "by you".to_string()
+            } else {
+                format!("by {}", p.by)
+            }
+        });
+        let (st, phrase) = match &paused {
+            Some(_) if st == St::Running => (st, "pausing after this turn".to_string()),
+            Some(why) => (St::Blocked, format!("paused / {why}")),
+            None => (st, phrase),
+        };
+        let budget = bus.budget_of(&a);
         flat.push(AgentView {
+            paused,
+            budget,
             id: a.id.clone(),
             role: a.role.clone(),
             harness: a.harness.clone(),

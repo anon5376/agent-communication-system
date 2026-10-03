@@ -376,6 +376,19 @@ pub fn build_brief(
     lines.join("\n")
 }
 
+/// An agent's role prompt (its `instructions` file, read on every turn) goes
+/// before the brief, so the agent knows how to work before it reads what to do.
+pub fn with_role_prompt(role: Option<String>, brief: String) -> String {
+    match role {
+        Some(text) if !text.trim().is_empty() => format!(
+            "=== how you work (your role prompt) ===\n{}\n\n{}",
+            text.trim(),
+            brief
+        ),
+        _ => brief,
+    }
+}
+
 fn cancellation_only(messages: &[Message]) -> bool {
     !messages.is_empty()
         && messages
@@ -456,6 +469,41 @@ fn read_session(path: &Path) -> SessionRecord {
 }
 
 pub type LogFn = dyn Fn(&str) + Send;
+
+/// True while this agent is paused. When its budget has run out, the agent pauses
+/// itself here and tells the operator, once.
+fn hold_for_pause(bus: &Bus, me: &crate::identity::Identity, log: &dyn Fn(&str)) -> Result<bool> {
+    let Some(agent) = bus.get_agent(&me.agent_id)? else {
+        return Ok(false);
+    };
+    if crate::control::paused(&agent.meta).is_some() {
+        return Ok(true);
+    }
+    let Some(over) = bus.budget_of(&agent).and_then(|b| b.over()) else {
+        return Ok(false);
+    };
+    let id = &me.agent_id;
+    bus.pause_agent(me, id, Some(&format!("budget reached: {over}")))?;
+    bus.send(
+        me,
+        crate::bus::SendInput {
+            to: crate::types::OPERATOR_ID.into(),
+            subject: Some(format!("{id} paused: budget reached ({over})")),
+            body: format!(
+                "{id} used its budget ({over}) and paused itself before starting another turn. \
+                 Open work stays where it is. To carry on: resume {id} in aos (or qagent agent resume {id}). \
+                 To change the budget: budget {id} 20 turns 60 min in aos, or budget {id} off."
+            ),
+            msg_type: Some("info".into()),
+            thread: None,
+            task_id: None,
+            refs: None,
+            requires_ack: false,
+        },
+    )?;
+    log(&format!("paused: budget reached ({over})"));
+    Ok(true)
+}
 
 pub struct SuperviseOptions {
     pub agent_id: String,
@@ -538,9 +586,10 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
             )));
         }
         let bus_agent = bus_agent.unwrap();
-        let config = load_config(&options.config_path.clone().unwrap_or_else(|| {
+        let config_path = options.config_path.clone().unwrap_or_else(|| {
             config_path_from_project(&workdir, &|name| std::env::var(name).ok())
-        }))?;
+        });
+        let config = load_config(&config_path)?;
         let agent = resolve_agent(&config, &options.agent_id)?;
         if !agent.agent.enabled {
             return Err(BusError::invalid(format!(
@@ -599,7 +648,29 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
             }
         ));
 
+        let mut paused_since: Option<Instant> = None;
+        let mut last_beat = Instant::now();
         while !options.stop.load(Ordering::SeqCst) {
+            // Pause and budget come first, so a paused agent's mail stays unread for later.
+            if hold_for_pause(&bus, &me, &log)? {
+                if paused_since.is_none() {
+                    log("paused; no new turn until the operator resumes this agent");
+                    bus.set_status(&me, "idle")?;
+                    paused_since = Some(Instant::now());
+                }
+                if last_beat.elapsed() >= Duration::from_secs(60) {
+                    bus.heartbeat(&me)?;
+                    last_beat = Instant::now();
+                }
+                let until = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < until && !options.stop.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                continue;
+            }
+            if paused_since.take().is_some() {
+                log("resumed");
+            }
             let waited = crate::wait::wait_for_mail(
                 &bus,
                 &me,
@@ -610,6 +681,9 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                 break;
             }
             if waited.status == "timeout" {
+                continue;
+            }
+            if hold_for_pause(&bus, &me, &log)? {
                 continue;
             }
 
@@ -685,7 +759,10 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
             let context = AdapterContext {
                 agent: &agent,
                 qagent_bin: qagent_bin.clone(),
-                prompt: build_brief(&agent, &messages, &tasks, managed),
+                prompt: with_role_prompt(
+                    crate::aos::crew::role_prompt(&config_path, &agent.agent.id),
+                    build_brief(&agent, &messages, &tasks, managed),
+                ),
                 session_id: session.session_id.clone(),
                 pinned_session_id: pinned_session_id.clone(),
                 workdir: workdir.display().to_string(),

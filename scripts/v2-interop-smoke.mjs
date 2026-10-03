@@ -69,6 +69,20 @@ try {
   assert.equal(shown.assignee, "alpha");
   assert.equal(shown.state, "claimed");
 
+  // Pause and budgets live in agent meta, so either side reads what the other wrote.
+  const agentIn = (impl, id) => jsonOut(impl, null, ["status"]).agents.find((a) => a.id === id);
+  ok("ts", null, ["agent", "pause", "alpha", "lunch"]);
+  assert.equal(agentIn("rs", "alpha").meta.paused.reason, "lunch");
+  ok("rs", null, ["agent", "budget", "alpha", "--turns", "5", "--minutes", "30"]);
+  const budget = jsonOut("ts", null, ["agent", "budget", "alpha"]);
+  assert.equal(budget.limits.turns, 5);
+  assert.equal(budget.limits.minutes, 30);
+  assert.equal(budget.over, null);
+  ok("rs", null, ["agent", "resume", "alpha"]);
+  assert.equal(agentIn("ts", "alpha").meta.paused, undefined);
+  ok("ts", null, ["agent", "budget", "alpha", "--clear"]);
+  assert.equal(jsonOut("rs", null, ["agent", "budget", "alpha"]).limits, null);
+
   // Rust `wait` is woken by a TS send (signal file + data_version poll cross over).
   const waiter = spawn(QAGENT_RS, ["wait", "--seconds", "10"], { env: env("beta") });
   await new Promise((resolve) => setTimeout(resolve, 300));

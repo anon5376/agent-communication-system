@@ -13,7 +13,8 @@ import { fileURLToPath } from "node:url";
 import { getHarnessAdapter } from "./adapters.js";
 import { configPathFromProject, loadConfig, resolveAgent } from "./config.js";
 import { Bus } from "./core/bus.js";
-import { BusError, DEFAULT_WAIT_SEC } from "./core/types.js";
+import { budgetOver, pausedOf } from "./core/control.js";
+import { BusError, DEFAULT_WAIT_SEC, OPERATOR_ID } from "./core/types.js";
 /** First non-empty environment variable among `names` (new name first, old name second). */
 function envValue(...names) {
     for (const name of names) {
@@ -117,6 +118,46 @@ function readSession(path) {
     catch {
         return emptySession();
     }
+}
+/**
+ * True while this agent is paused. When its budget has run out, the agent pauses
+ * itself here and tells the operator, once. Mirror of hold_for_pause in rust/src/supervisor.rs.
+ */
+function holdForPause(bus, me, log) {
+    const agent = bus.getAgent(me.agentId);
+    if (!agent)
+        return false;
+    if (pausedOf(agent.meta))
+        return true;
+    const budget = bus.budgetOf(agent);
+    const over = budget ? budgetOver(budget) : null;
+    if (!over)
+        return false;
+    const id = me.agentId;
+    bus.pauseAgent(me, id, `budget reached: ${over}`);
+    bus.send(me, {
+        to: OPERATOR_ID,
+        subject: `${id} paused: budget reached (${over})`,
+        body: `${id} used its budget (${over}) and paused itself before starting another turn. `
+            + `Open work stays where it is. To carry on: resume ${id} in aos (or qagent agent resume ${id}). `
+            + `To change the budget: budget ${id} 20 turns 60 min in aos, or budget ${id} off.`,
+        type: "info",
+    });
+    log(`paused: budget reached (${over})`);
+    return true;
+}
+function sleepUnlessAborted(ms, signal) {
+    return new Promise((resolveSleep) => {
+        if (signal?.aborted)
+            return resolveSleep();
+        const timer = setTimeout(done, ms);
+        function done() {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", done);
+            resolveSleep();
+        }
+        signal?.addEventListener("abort", done, { once: true });
+    });
 }
 /** The MCP launch line handed to the vendor CLI: `qagent mcp` as this agent, on this database. */
 export function mcpCommandFor(agentId, dbPath, qagentBin = DEFAULT_QAGENT_BIN) {
@@ -283,11 +324,33 @@ export async function supervise(options) {
         const waitMs = options.waitMs ?? DEFAULT_WAIT_SEC * 1000;
         let consecutiveFailures = 0;
         log(`supervising ${agent.id} via ${agent.harnessDefinition.id} in ${workdir} (bus ${bus.dbPath}${managed ? ", supervisor-managed tasks" : ""})`);
+        let pausedSince = null;
+        let lastBeat = Date.now();
         while (!options.signal?.aborted) {
+            // Pause and budget come first, so a paused agent's mail stays unread for later.
+            if (holdForPause(bus, me, log)) {
+                if (pausedSince === null) {
+                    log("paused; no new turn until the operator resumes this agent");
+                    bus.setStatus(me, "idle");
+                    pausedSince = Date.now();
+                }
+                if (Date.now() - lastBeat >= 60_000) {
+                    bus.heartbeat(me);
+                    lastBeat = Date.now();
+                }
+                await sleepUnlessAborted(2000, options.signal);
+                continue;
+            }
+            if (pausedSince !== null) {
+                pausedSince = null;
+                log("resumed");
+            }
             const waited = await bus.waitForMail(me, { timeoutMs: waitMs, signal: options.signal });
             if (options.signal?.aborted)
                 break;
             if (waited.status === "timeout")
+                continue;
+            if (holdForPause(bus, me, log))
                 continue;
             // Consume what the wait saw, so the next wait does not deliver it again.
             const messages = waited.status === "mail" ? bus.inbox(me, { limit: 50 }).messages : [];

@@ -264,3 +264,27 @@ test("the brief and MCP command carry the agent's own identity and no bus_wait",
   assert.match(native, /Do NOT call bus_wait/);
   assert.match(buildBrief(agent, [message], [], true), /supervisor has claimed/);
 });
+
+test("a supervisor pauses its agent when the budget runs out, holds new work, and carries on after resume", { timeout: 60_000 }, async (t) => {
+  const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
+  const configPath = writeConfig(f.home, () => {});
+  f.json("operator", ["agent", "budget", "fake-small", "--turns", "1"]);
+  const supervisor = startSupervisor(f, "fake-small", configPath);
+  t.after(() => killAll([supervisor]));
+  const log = () => supervisorLog(f, "fake-small");
+
+  const first = f.json("operator", ["task", "add", "first", "--to", "fake-small"]);
+  await until("the first task to be submitted", 20_000, () => f.bus.getTask(first.id).state === "submitted", log);
+  const paused = await until("the budget pause", 20_000, () => f.bus.getAgent("fake-small")?.meta.paused as { reason: string } | undefined, log);
+  assert.equal(paused.reason, "budget reached: 1 of 1 turns");
+  const mail = f.bus.getMessages({}).filter((message) => message.recipient === "operator").map((message) => message.subject);
+  assert.ok(mail.includes("fake-small paused: budget reached (1 of 1 turns)"), mail.join("\n"));
+
+  const second = f.json("operator", ["task", "add", "second", "--to", "fake-small"]);
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  assert.equal(f.bus.getTask(second.id).state, "open", "a paused agent starts no turn");
+
+  f.json("operator", ["agent", "resume", "fake-small"]);
+  await until("the second task to be submitted", 20_000, () => f.bus.getTask(second.id).state === "submitted", log);
+  assert.equal(await stop(supervisor), 0, log());
+});

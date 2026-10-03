@@ -422,6 +422,136 @@ impl Bus {
         Ok(token_path)
     }
 
+    // ----------------------------------------------------- pause and budgets
+    // Stored in agents.meta_json; see control.rs for the shape.
+
+    fn update_agent_meta(
+        &self,
+        id: &str,
+        f: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+    ) -> Result<()> {
+        let raw: Option<String> = self
+            .conn
+            .prepare_cached("SELECT meta_json FROM agents WHERE id = ?")?
+            .query_row([id], |row| row.get(0))
+            .optional()?;
+        let Some(raw) = raw else {
+            return Err(BusError::not_found(format!("unknown agent: {id}")));
+        };
+        let mut meta = serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        f(&mut meta);
+        self.conn
+            .prepare_cached("UPDATE agents SET meta_json = ? WHERE id = ?")?
+            .execute(params![serde_json::Value::Object(meta).to_string(), id])?;
+        Ok(())
+    }
+
+    /// Pause an agent: its supervisor starts no new turn until it is resumed. The
+    /// operator may pause anyone; an agent may pause itself (a supervisor does when
+    /// a budget runs out). A turn already running finishes.
+    pub fn pause_agent(&self, actor: &Identity, id: &str, reason: Option<&str>) -> Result<Agent> {
+        if actor.authority != "operator" && actor.agent_id != id {
+            return Err(BusError::forbidden(format!(
+                "only the operator or {id} itself may pause {id}"
+            )));
+        }
+        let reason = bounded_string(reason, "reason", limits::REASON, false)?;
+        self.write(|bus| {
+            let now = bus.now();
+            bus.update_agent_meta(id, |meta| {
+                meta.insert(
+                    "paused".into(),
+                    json!({"atMs": now, "by": actor.agent_id, "reason": reason}),
+                );
+            })?;
+            bus.event(
+                &actor.agent_id,
+                "agent_paused",
+                "agent",
+                id,
+                json!({"reason": reason}),
+            )?;
+            Ok(())
+        })?;
+        Ok(self.get_agent(id)?.expect("agent exists"))
+    }
+
+    /// Resume a paused agent. A budget, if set, starts a fresh allowance of the same size.
+    pub fn resume_agent(&self, actor: &Identity, id: &str) -> Result<Agent> {
+        identity::require_operator(actor, "resume agents")?;
+        let usage = crate::control::session_usage(&self.home, id);
+        self.write(|bus| {
+            let now = bus.now();
+            bus.update_agent_meta(id, |meta| {
+                meta.remove("paused");
+                if let Some(b) = meta.get_mut("budget").filter(|b| b.is_object()) {
+                    b["base"] = usage.to_json();
+                    b["setMs"] = json!(now);
+                }
+            })?;
+            bus.event(&actor.agent_id, "agent_resumed", "agent", id, json!({}))?;
+            Ok(())
+        })?;
+        Ok(self.get_agent(id)?.expect("agent exists"))
+    }
+
+    /// Set an agent's budget, counted from now, or clear it with None.
+    pub fn set_budget(
+        &self,
+        actor: &Identity,
+        id: &str,
+        limits: Option<crate::control::Limits>,
+    ) -> Result<Agent> {
+        identity::require_operator(actor, "set budgets")?;
+        if let Some(l) = &limits {
+            if l.is_empty() {
+                return Err(BusError::invalid(
+                    "a budget needs --turns, --minutes or --usd (or --clear)",
+                ));
+            }
+            for (v, name) in [(l.turns, "turns"), (l.minutes, "minutes"), (l.usd, "usd")] {
+                if v.is_some_and(|v| !v.is_finite() || v <= 0.0) {
+                    return Err(BusError::invalid(format!("--{name} must be above 0")));
+                }
+            }
+        }
+        let usage = crate::control::session_usage(&self.home, id);
+        self.write(|bus| {
+            let now = bus.now();
+            bus.update_agent_meta(id, |meta| match limits {
+                Some(l) => {
+                    meta.insert("budget".into(), crate::control::budget_json(l, usage, now));
+                }
+                None => {
+                    meta.remove("budget");
+                }
+            })?;
+            let data = match limits {
+                Some(l) => json!({"turns": l.turns, "minutes": l.minutes, "usd": l.usd}),
+                None => json!({"cleared": true}),
+            };
+            bus.event(&actor.agent_id, "agent_budget", "agent", id, data)?;
+            Ok(())
+        })?;
+        Ok(self.get_agent(id)?.expect("agent exists"))
+    }
+
+    /// The agent's budget with what it has used, if it has one.
+    pub fn budget_of(&self, agent: &Agent) -> Option<crate::control::Budget> {
+        crate::control::budget(
+            &agent.meta,
+            crate::control::session_usage(&self.home, &agent.id),
+        )
+    }
+
+    /// Mark the caller as seen without changing its status or writing an event.
+    pub fn heartbeat(&self, actor: &Identity) -> Result<()> {
+        self.write(|bus| bus.touch(&actor.agent_id, None))
+    }
+
     // --------------------------------------------------------------- agents
 
     fn agent_exists(&self, id: &str) -> Result<bool> {

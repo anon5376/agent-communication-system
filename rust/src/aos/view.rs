@@ -52,6 +52,8 @@ pub enum Route {
     Providers,
     Help,
     Home,
+    /// First run: what was found on this computer and the crew aos proposes.
+    Welcome,
 }
 
 impl Route {
@@ -64,9 +66,10 @@ impl Route {
             Route::Evidence => "evidence",
             Route::Memory => "memory",
             Route::Retro => "retro",
-            Route::Providers => "providers",
+            Route::Providers => "crew",
             Route::Help => "keys",
             Route::Home => "home",
+            Route::Welcome => "welcome",
         }
     }
 }
@@ -91,6 +94,10 @@ pub enum PendingKind {
     Cancel,
     /// Cancel the goal and every open task under it.
     Stop,
+    /// Start a typed line that is not a command as a goal.
+    Goal,
+    /// Let agents work in the current folder, then start the crew.
+    Trust,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +105,8 @@ pub struct Pending {
     pub kind: PendingKind,
     pub task_id: i64,
     pub typed: String,
+    /// For Goal and Trust: the mission and the goal waiting on this choice.
+    pub text: Option<(String, String)>,
 }
 
 /// The actions the operator can take on a task in its current state, as
@@ -122,6 +131,8 @@ fn option_word(k: PendingKind) -> &'static str {
         PendingKind::Requeue => "REQUEUE",
         PendingKind::Cancel => "CANCEL",
         PendingKind::Stop => "STOP",
+        PendingKind::Goal => "START",
+        PendingKind::Trust => "TRUST",
     }
 }
 
@@ -201,7 +212,7 @@ impl Default for Ui {
             more: false,
             prompt: String::new(),
             out: vec![vec![(
-                "type help for commands, or a screen name".into(),
+                "type what you want done and press enter, or help".into(),
                 Role::Dim,
             )]],
             flash: None,
@@ -454,7 +465,11 @@ fn keys_line(f: &Frame, ui: &Ui) -> VLine {
         ]);
     }
     if let Some(p) = &ui.pending {
-        let t = if let Some(word) = p.needs_word() {
+        let t = if p.kind == PendingKind::Goal {
+            "enter start the goal  esc cancel".to_string()
+        } else if p.kind == PendingKind::Trust {
+            "enter trust this folder and start the crew  esc cancel".to_string()
+        } else if let Some(word) = p.needs_word() {
             format!("type {word}  enter confirm  esc cancel")
         } else if p.needs_reason() {
             "type the reason  enter confirm  esc cancel".into()
@@ -468,11 +483,16 @@ fn keys_line(f: &Frame, ui: &Ui) -> VLine {
         Route::Inspect => "1-3 act  w message  esc back  j/k next  tab gate  ? keys",
         Route::Gate => "1-3 choose  esc back  ? keys",
         Route::Help => "esc back  q leave",
-        Route::Home => "type a command  enter run  esc back",
+        Route::Home => "type a goal or a command  tab complete  up/down earlier lines  esc back",
         Route::Goal => "j/k move  enter inspect  s swarm  esc back  ? keys",
         Route::Evidence => "j/k move  enter inspect  s swarm  esc back  ? keys",
         Route::Retro => "j/k scroll  a all events  f follow  esc back  ? keys",
-        Route::Memory | Route::Providers => "s swarm  g goal  esc back  ? keys  q leave",
+        Route::Memory => "s swarm  g goal  esc back  ? keys  q leave",
+        Route::Providers => "c commands (start, stop, setup)  s swarm  esc back  ? keys",
+        Route::Welcome if super::crew::plan(&f.crew.found).is_empty() => {
+            "r look again  ? keys  q leave"
+        }
+        Route::Welcome => "enter set up this crew  r look again  c commands  q leave",
         Route::Swarm if narrow => {
             if gate_open(f) {
                 "n next  b back  m more  1-3 choose  ? keys"
@@ -616,7 +636,7 @@ fn readouts(f: &Frame) -> Vec<VLine> {
         None => lv(
             "goal",
             vec![seg(
-                "no open top-level task / c, then task add <title>",
+                "no goal yet / c, then type what you want done",
                 Role::Dim,
             )],
         ),
@@ -632,21 +652,26 @@ fn readouts(f: &Frame) -> Vec<VLine> {
         goal,
         lvs(
             "run",
-            format!(
-                "{} of {} agents running / {} open tasks / {} waiting on you",
-                f.running(),
-                f.agents.len(),
-                f.open_tasks,
-                f.reviews()
-            ),
+            if f.crew.configured && f.crew.error.is_none() {
+                format!(
+                    "{} of {} crew up / {} working / {} open tasks / {} waiting on you",
+                    f.crew.running(),
+                    f.crew.members.len(),
+                    f.running(),
+                    f.open_tasks,
+                    f.reviews()
+                )
+            } else {
+                format!(
+                    "{} of {} agents running / {} open tasks / {} waiting on you",
+                    f.running(),
+                    f.agents.len(),
+                    f.open_tasks,
+                    f.reviews()
+                )
+            },
         ),
-        lv(
-            "cost",
-            vec![
-                seg("? UNKNOWN", Role::Dim),
-                seg(" / ACS records no token or cost usage yet", Role::Plain),
-            ],
-        ),
+        cost_line(f),
         lvs(
             "evidence",
             format!(
@@ -672,6 +697,61 @@ fn readouts(f: &Frame) -> Vec<VLine> {
     ]
 }
 
+pub fn tokens_text(n: f64) -> String {
+    if n >= 1_000_000.0 {
+        format!("{:.1}M", n / 1_000_000.0)
+    } else if n >= 1_000.0 {
+        format!("{:.1}k", n / 1_000.0)
+    } else {
+        format!("{n:.0}")
+    }
+}
+
+/// Cost as the CLIs reported it to the supervisor; never estimated.
+fn cost_line(f: &Frame) -> VLine {
+    let c = &f.crew;
+    if c.cost_usd > 0.0 {
+        lv(
+            "cost",
+            vec![seg(
+                format!(
+                    "${:.2} / {} tokens, as the CLIs reported them, all time",
+                    c.cost_usd,
+                    tokens_text(c.tokens)
+                ),
+                Role::Plain,
+            )],
+        )
+    } else if c.tokens > 0.0 {
+        lv(
+            "cost",
+            vec![seg(
+                format!(
+                    "{} tokens reported / no price reported by the CLIs",
+                    tokens_text(c.tokens)
+                ),
+                Role::Plain,
+            )],
+        )
+    } else if c.configured {
+        lv(
+            "cost",
+            vec![
+                seg("- NONE YET", Role::Dim),
+                seg(" / nothing reported by the CLIs yet", Role::Plain),
+            ],
+        )
+    } else {
+        lv(
+            "cost",
+            vec![
+                seg("? UNKNOWN", Role::Dim),
+                seg(" / no aos crew, so no usage is recorded", Role::Plain),
+            ],
+        )
+    }
+}
+
 fn current_gate(f: &Frame, ui: &Ui) -> Option<usize> {
     if f.gates.is_empty() {
         None
@@ -690,6 +770,28 @@ fn confirm_line(p: &Pending) -> VLine {
             "confirm",
             "type STOP to cancel the goal and its open tasks: ",
         ),
+        PendingKind::Goal => {
+            let goal = p.text.as_ref().map(|(_, g)| g.as_str()).unwrap_or("");
+            return lv(
+                "start?",
+                vec![
+                    seg("start this as a goal: ", Role::Plain),
+                    seg(format!("\"{}\"", trunc(goal, 120)), Role::Bold),
+                ],
+            );
+        }
+        PendingKind::Trust => {
+            let dir = std::env::current_dir()
+                .map(|d| super::crew::Paths::show(&d))
+                .unwrap_or_default();
+            return lv(
+                "trust?",
+                vec![seg(
+                    format!("agents will run commands and edit files in {dir}"),
+                    Role::Gate,
+                )],
+            );
+        }
     };
     lv(
         label,
@@ -887,7 +989,7 @@ pub fn swarm(f: &Frame, ui: &Ui) -> Vec<VLine> {
     let budget = spine_budget(ui);
     if agents.is_empty() {
         sp.push(dim(if ui.filter.is_empty() {
-            "+-- no agents yet / qagent agent add <id> --role worker"
+            "+-- no agents yet / c, then setup"
         } else {
             "+-- no agent matches the filter"
         }));
@@ -1059,7 +1161,37 @@ fn narrow(f: &Frame, ui: &Ui) -> Vec<VLine> {
 }
 
 fn agent_facts(f: &Frame, a: &AgentView, w: usize, max: usize) -> Vec<VLine> {
-    let mut v = vec![
+    let mut v = Vec::new();
+    if let Some(m) = f.crew.members.iter().find(|m| m.id == a.id) {
+        v.push(lvs(
+            "process",
+            match (m.pid, &m.last_words) {
+                (Some(pid), _) => format!("running / pid {pid} / {} CLI", m.cli),
+                (None, Some(last)) => trunc(&format!("stopped / last: {last}"), w - 12),
+                (None, None) => "stopped / c, then start".into(),
+            },
+        ));
+    }
+    if let Some(why) = &a.paused {
+        v.push(lvs(
+            "paused",
+            trunc(&format!("{why} / c, then resume {}", a.id), w - 12),
+        ));
+    }
+    if let Some(b) = &a.budget {
+        v.push(lvs(
+            "budget",
+            trunc(
+                &format!(
+                    "{}{}",
+                    b.line(),
+                    b.over().map(|_| " / used up").unwrap_or_default()
+                ),
+                w - 12,
+            ),
+        ));
+    }
+    v.extend([
         lvs("state", a.phrase.clone()),
         lvs("role", a.role.clone()),
         lvs("authority", a.authority.clone()),
@@ -1106,7 +1238,7 @@ fn agent_facts(f: &Frame, a: &AgentView, w: usize, max: usize) -> Vec<VLine> {
                 .map(|e| format!("#{} {} / {}", e.seq, e.kind, age(Some(e.ts_ms), f.now)))
                 .unwrap_or_else(|| "none in the last 400".into()),
         ),
-    ];
+    ]);
     v.truncate(max);
     v
 }
@@ -1155,7 +1287,7 @@ pub fn inspect(f: &Frame, ui: &Ui) -> Vec<VLine> {
             ]));
             let next = match a.st {
                 St::Blocked => "claim is stalled / 1 requeue or 3 cancel below",
-                St::Disconnected => "agent is offline / qagent supervise to wake it",
+                St::Disconnected => "agent is offline / c, then start to wake the crew",
                 _ => "nothing needs you on this agent",
             };
             body.push(lvs("next", next));
@@ -1683,72 +1815,204 @@ pub fn retro(f: &Frame, ui: &Ui) -> Vec<VLine> {
     compose(f, ui, "retro", body)
 }
 
-pub fn providers(f: &Frame, ui: &Ui) -> Vec<VLine> {
-    let w = ui.width;
-    let mut groups: std::collections::BTreeMap<String, Vec<&AgentView>> =
-        std::collections::BTreeMap::new();
-    for a in &f.agents {
-        groups
-            .entry(if a.harness.is_empty() {
-                "unset".into()
-            } else {
-                a.harness.clone()
-            })
-            .or_default()
-            .push(a);
+fn proc_seg(m: &super::crew::MemberInfo) -> (String, Role) {
+    match m.pid {
+        Some(_) => seg(pad("* RUNNING", 12), Role::Run),
+        None => seg(pad("- STOPPED", 12), Role::Dim),
     }
-    let mut body = vec![rule(w)];
-    body.push(lvs(
-        "harnesses",
-        format!("{} in use / credentials are never printed", groups.len()),
-    ));
-    body.push(rule(w));
-    for (h, list) in &groups {
-        let running = list.iter().filter(|a| a.st == St::Running).count();
-        let offline = list.iter().filter(|a| a.st == St::Disconnected).count();
-        let mut models: Vec<String> = list
-            .iter()
-            .map(|a| {
-                if a.model.is_empty() {
-                    "-".into()
-                } else {
-                    a.model.clone()
-                }
-            })
-            .collect();
-        models.sort();
-        models.dedup();
-        let st = if running > 0 {
-            St::Running
-        } else if offline == list.len() {
-            St::Disconnected
-        } else {
-            St::Waiting
-        };
-        body.push(line(vec![
-            seg(pad(&trunc(h, 11), 12), Role::Plain),
-            st_seg(st, 16),
-            seg(
-                trunc(
-                    &format!(
-                        "{} agents / {} running / {} offline / {}",
-                        list.len(),
-                        running,
-                        offline,
-                        models.join(", ")
-                    ),
-                    w.saturating_sub(28),
+}
+
+/// One line per CLI found, plus the crew-ready ones that are missing.
+fn found_lines(found: &[super::crew::Found], w: usize) -> Vec<VLine> {
+    let mut v = Vec::new();
+    for f in found {
+        let (mark, role, what) = match (&f.path, f.cli.crew_ready) {
+            (Some(_), true) => (
+                "+",
+                Role::Ok,
+                format!(
+                    "{} / can join your crew",
+                    f.version.clone().unwrap_or_else(|| f.cli.name.into())
                 ),
+            ),
+            (Some(_), false) => (
+                "~",
+                Role::Dim,
+                format!("{} found / can't join a crew from aos yet", f.cli.name),
+            ),
+            (None, true) => ("-", Role::Dim, format!("not installed / {}", f.cli.install)),
+            (None, false) => continue,
+        };
+        v.push(line(vec![
+            seg(format!("  {mark} "), role),
+            seg(pad(f.cli.id, 9), Role::Bold),
+            seg(trunc(&what, w.saturating_sub(13)), Role::Plain),
+        ]));
+    }
+    v
+}
+
+pub fn crew(f: &Frame, ui: &Ui) -> Vec<VLine> {
+    let w = ui.width;
+    let c = &f.crew;
+    let mut body = vec![rule(w)];
+    if !c.configured {
+        body.push(lv(
+            "crew",
+            vec![
+                seg("- NONE YET", Role::Dim),
+                seg(
+                    " / c, then setup, makes one from the CLIs on this computer",
+                    Role::Plain,
+                ),
+            ],
+        ));
+    } else if let Some(e) = &c.error {
+        body.push(lv(
+            "crew",
+            vec![
+                seg("x FAILED", Role::Err),
+                seg(format!(" / crew.json does not load: {e}"), Role::Plain),
+            ],
+        ));
+        body.push(lvs(
+            "fix",
+            "edit it, or c then setup --force to write a fresh one",
+        ));
+    } else {
+        body.push(lvs(
+            "crew",
+            format!(
+                "{} agents / {} running{}",
+                c.members.len(),
+                c.running(),
+                c.workdir
+                    .as_ref()
+                    .map(|d| format!(" / works in {d}"))
+                    .unwrap_or_default()
+            ),
+        ));
+        body.push(rule(w));
+        for m in &c.members {
+            body.push(line(vec![
+                seg(pad(&m.id, 11), Role::Bold),
+                proc_seg(m),
+                seg(pad(&m.cli, 9), Role::Plain),
+                seg(trunc(&m.description, w.saturating_sub(32)), Role::Dim),
+            ]));
+            let view = f.agents.iter().find(|a| a.id == m.id);
+            let mut notes: Vec<String> = Vec::new();
+            if let Some(why) = view.and_then(|a| a.paused.as_ref()) {
+                notes.push(format!("paused: {why}"));
+            }
+            if let Some(b) = view.and_then(|a| a.budget.as_ref()) {
+                notes.push(format!("budget {}", b.line()));
+            }
+            if !notes.is_empty() {
+                body.push(line(vec![
+                    seg(pad("", 11), Role::Plain),
+                    seg(trunc(&notes.join(" / "), w.saturating_sub(11)), Role::Dim),
+                ]));
+            }
+            if let (None, Some(last)) = (m.pid, &m.last_words) {
+                body.push(line(vec![
+                    seg(pad("", 11), Role::Plain),
+                    seg(
+                        trunc(&format!("last: {last}"), w.saturating_sub(11)),
+                        Role::Dim,
+                    ),
+                ]));
+            }
+        }
+    }
+    body.push(rule(w));
+    body.push(cost_line(f));
+    body.push(lvs(
+        "files",
+        format!("{}  crew.json  roles/  missions/", c.dir),
+    ));
+    body.push(lvs(
+        "missions",
+        trunc(
+            &c.missions
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            w - 12,
+        ),
+    ));
+    if !c.found.is_empty() {
+        body.push(rule(w));
+        body.push(dim("on this computer"));
+        body.extend(found_lines(&c.found, w));
+    }
+    body.push(rule(w));
+    body.push(dim(
+        "start / stop agents / pause / resume / budget: type them in command home (c)",
+    ));
+    compose(f, ui, "crew", body)
+}
+
+pub fn welcome(f: &Frame, ui: &Ui) -> Vec<VLine> {
+    let w = ui.width;
+    let c = &f.crew;
+    let mut body = vec![
+        rule(w),
+        line(vec![
+            seg("welcome to aos", Role::Bold),
+            seg(
+                "  mission control for a team of AI coding agents",
+                Role::Dim,
+            ),
+        ]),
+    ];
+    for l in wrap(
+        "You type a goal. A lead agent plans it, a builder does the work, a reviewer checks it, and the result comes back to you to accept or send back. Nothing is accepted without you.",
+        w,
+        3,
+    ) {
+        body.push(plain(l));
+    }
+    body.push(rule(w));
+    body.push(dim("found on this computer"));
+    if c.found.is_empty() {
+        body.push(dim("  looking..."));
+    }
+    body.extend(found_lines(&c.found, w));
+    body.push(rule(w));
+    let members = super::crew::plan(&c.found);
+    if members.is_empty() {
+        body.push(line(vec![
+            seg("no crew yet", Role::Bold),
+            seg(
+                " / install one CLI marked - above, sign in to it, then press r",
                 Role::Plain,
             ),
         ]));
+        body.push(dim("or try a sample team first: q, then aos demo"));
+    } else {
+        body.push(dim("your crew"));
+        for m in &members {
+            body.push(line(vec![
+                seg(pad(&format!("  {}", m.id), 12), Role::Bold),
+                seg(pad(m.cli.id, 9), Role::Plain),
+                seg(trunc(m.description, w.saturating_sub(21)), Role::Dim),
+            ]));
+        }
+        if members
+            .iter()
+            .all(|m| m.cli.family == members[0].cli.family)
+        {
+            for l in wrap("one CLI, so the reviewer uses the same model family. Install a second CLI for independent reviews.", w, 2) {
+                body.push(dim(l));
+            }
+        }
+        for l in wrap("Agents work in the folder you start aos in, and can run commands and edit files there.", w, 2) {
+            body.push(line(vec![seg(l, Role::Gate)]));
+        }
     }
-    if groups.is_empty() {
-        body.push(dim("no agents yet"));
-    }
-    body.push(rule(w));
-    body.push(dim("adapter health: qagent doctor <agent> <project>"));
-    compose(f, ui, "providers", body)
+    compose(f, ui, "welcome", body)
 }
 
 pub fn help(f: &Frame, ui: &Ui) -> Vec<VLine> {
@@ -1763,8 +2027,8 @@ pub fn help(f: &Frame, ui: &Ui) -> Vec<VLine> {
         ("d", "expand or collapse hidden agents"),
         ("f", "follow the newest events"),
         ("g s e m r", "goal, swarm, evidence, memory, retro"),
-        ("c", "command home: run, stop, task add, send, reply"),
-        ("p", "providers"),
+        ("c", "command home: type a goal, start, stop, send, reply"),
+        ("p", "crew: who is on the team, running or stopped"),
         ("q  ctrl-c", "leave aos (agents keep running)"),
         ("n b m", "under 80 columns: next, back, more"),
     ];
@@ -1780,6 +2044,80 @@ pub fn help(f: &Frame, ui: &Ui) -> Vec<VLine> {
         body.push(line(vec![seg(pad(k, 14), Role::Plain), seg(d, Role::Dim)]));
     }
     compose(f, ui, "keys", body)
+}
+
+/// Command-home words, for the suggestions under the prompt and for tab.
+/// (word, how to use it, what it does). Missions are added from their files.
+pub const COMMANDS: &[(&str, &str, &str)] = &[
+    ("help", "help", "every command on one screen"),
+    (
+        "resume",
+        "resume [agent|all]",
+        "carry on: start the crew, or lift a pause",
+    ),
+    ("history", "history", "your past goals and how each ended"),
+    ("start", "start [agent]", "start the crew in this folder"),
+    (
+        "stop",
+        "stop agents | stop [#]",
+        "stop the crew, or a goal and all under it",
+    ),
+    (
+        "pause",
+        "pause <agent|all> [why]",
+        "no new turns until you resume it",
+    ),
+    (
+        "budget",
+        "budget <agent|all> 20 turns 60 min",
+        "limits per agent; off clears",
+    ),
+    ("status", "status", "agents, open tasks, reviews, stalls"),
+    ("gate", "gate", "open the result waiting for your decision"),
+    ("accept", "accept # <reason>", "accept a result"),
+    (
+        "revise",
+        "revise # <feedback>",
+        "send a result back for changes",
+    ),
+    ("send", "send <agent|all> <message>", "write to an agent"),
+    ("reply", "reply <msg#> <text>", "answer a message"),
+    ("read", "read", "mark the operator's mail read"),
+    ("missions", "missions", "list mission templates"),
+    (
+        "setup",
+        "setup [--force]",
+        "find agent CLIs and write your crew",
+    ),
+    ("doctor", "doctor", "check everything and say what to fix"),
+    ("swarm", "swarm", "the live view of agents and work"),
+    ("goal", "goal", "the open goal as a tree"),
+    ("evidence", "evidence", "submitted results"),
+    ("crew", "crew", "who is on the team, running or stopped"),
+    ("retro", "retro", "the event log"),
+];
+
+/// Up to `max` commands and missions whose word starts with what is typed.
+/// Only while the first word is still being typed; a leading / is allowed.
+pub fn suggestions(f: &Frame, typed: &str, max: usize) -> Vec<(String, String)> {
+    let t = typed.trim_start().trim_start_matches('/');
+    if typed.trim().is_empty() || t.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    let t = t.to_lowercase();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (name, summary) in &f.crew.missions {
+        if name.starts_with(&t) && name != "run" {
+            out.push((format!("{name} <what>"), summary.clone()));
+        }
+    }
+    for (word, usage, what) in COMMANDS {
+        if word.starts_with(&t) && !out.iter().any(|(u, _)| u.split(' ').next() == Some(word)) {
+            out.push((usage.to_string(), what.to_string()));
+        }
+    }
+    out.truncate(max);
+    out
 }
 
 pub fn home(f: &Frame, ui: &Ui) -> Vec<VLine> {
@@ -1815,7 +2153,12 @@ pub fn home(f: &Frame, ui: &Ui) -> Vec<VLine> {
         body.push(dim("no mail for the operator"));
     }
     body.push(rule(w));
-    let room = ui.height.saturating_sub(4 + body.len() + 1);
+    let hints = if ui.pending.is_none() {
+        suggestions(f, &ui.prompt, 5)
+    } else {
+        Vec::new()
+    };
+    let room = ui.height.saturating_sub(4 + body.len() + 1 + hints.len());
     let out: Vec<_> = ui
         .out
         .iter()
@@ -1825,8 +2168,15 @@ pub fn home(f: &Frame, ui: &Ui) -> Vec<VLine> {
     for segs in out {
         body.push(line(segs));
     }
-    while body.len() < ui.height.saturating_sub(4 + 1) {
+    while body.len() < ui.height.saturating_sub(4 + 1 + hints.len()) {
         body.push(blank());
+    }
+    for (i, (usage, what)) in hints.iter().enumerate() {
+        body.push(line(vec![
+            seg(if i == 0 { "tab " } else { "    " }, Role::Dim),
+            seg(pad(usage, 28), Role::Plain),
+            seg(trunc(what, w.saturating_sub(32)), Role::Dim),
+        ]));
     }
     body.push(match &ui.pending {
         Some(p) => confirm_line(p),
@@ -1865,7 +2215,8 @@ pub fn screen(f: &Frame, ui: &Ui) -> Vec<VLine> {
         Route::Evidence => evidence(f, ui),
         Route::Memory => memory(f, ui),
         Route::Retro => retro(f, ui),
-        Route::Providers => providers(f, ui),
+        Route::Providers => crew(f, ui),
+        Route::Welcome => welcome(f, ui),
         Route::Help => help(f, ui),
         Route::Home => home(f, ui),
     }

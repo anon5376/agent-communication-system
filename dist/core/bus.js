@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { ChangeWatcher } from "./changes.js";
+import { budgetJson, budgetOf, limitsEmpty, sessionUsage, usageJson } from "./control.js";
 import { appendEvent, homeFor, latestEventSeq, openDatabase, resolveDbPath, transaction } from "./db.js";
 import { adoptToken, agentIdFromEnv, assertSafeAgentId, ensurePrivateDirectories, hashToken, operatorTokenPath, readTokenFile, requireOperator, resolveIdentity, storedIdentity, storeNewToken, tokenPathFor, writePrivateToken, } from "./identity.js";
 import { boundedString, BusError, CLAIM_TTL_MS, CLOSED_STATES, contextReferences, LIMITS, MESSAGE_TYPES, OPERATOR_ID, PRIORITIES, STALE_AGENT_MS, TASK_STATES, } from "./types.js";
@@ -200,6 +201,89 @@ export class Bus {
             this.event(actor.agentId, "token_rotated", "agent", id);
         });
         return { tokenPath };
+    }
+    // ------------------------------------------------------- pause and budgets
+    // Stored in agents.meta_json; see control.ts for the shape.
+    updateAgentMeta(id, fn) {
+        const row = this.db.prepare("SELECT meta_json FROM agents WHERE id = ?").get(id);
+        if (!row)
+            throw new BusError("not_found", `unknown agent: ${id}`);
+        let meta = {};
+        try {
+            const parsed = JSON.parse(row.meta_json);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+                meta = parsed;
+        }
+        catch { /* treat unreadable meta as empty */ }
+        fn(meta);
+        this.db.prepare("UPDATE agents SET meta_json = ? WHERE id = ?").run(JSON.stringify(meta), id);
+    }
+    /**
+     * Pause an agent: its supervisor starts no new turn until it is resumed. The operator
+     * may pause anyone; an agent may pause itself (a supervisor does when a budget runs out).
+     * A turn already running finishes.
+     */
+    pauseAgent(actor, id, reason) {
+        if (actor.authority !== "operator" && actor.agentId !== id)
+            throw new BusError("forbidden", `only the operator or ${id} itself may pause ${id}`);
+        const text = boundedString(reason ?? undefined, "reason", LIMITS.reason);
+        this.write(() => {
+            const now = this.now();
+            this.updateAgentMeta(id, (meta) => { meta.paused = { atMs: now, by: actor.agentId, reason: text }; });
+            this.event(actor.agentId, "agent_paused", "agent", id, { reason: text });
+        });
+        return this.getAgent(id);
+    }
+    /** Resume a paused agent. A budget, if set, starts a fresh allowance of the same size. */
+    resumeAgent(actor, id) {
+        requireOperator(actor, "resume agents");
+        const usage = sessionUsage(this.home, id);
+        this.write(() => {
+            const now = this.now();
+            this.updateAgentMeta(id, (meta) => {
+                delete meta.paused;
+                const budget = meta.budget;
+                if (budget && typeof budget === "object" && !Array.isArray(budget)) {
+                    budget.base = usageJson(usage);
+                    budget.setMs = now;
+                }
+            });
+            this.event(actor.agentId, "agent_resumed", "agent", id);
+        });
+        return this.getAgent(id);
+    }
+    /** Set an agent's budget, counted from now, or clear it with null. */
+    setBudget(actor, id, limits) {
+        requireOperator(actor, "set budgets");
+        if (limits) {
+            if (limitsEmpty(limits))
+                throw new BusError("invalid", "a budget needs --turns, --minutes or --usd (or --clear)");
+            for (const name of ["turns", "minutes", "usd"]) {
+                const value = limits[name];
+                if (value !== undefined && (!Number.isFinite(value) || value <= 0))
+                    throw new BusError("invalid", `--${name} must be above 0`);
+            }
+        }
+        const usage = sessionUsage(this.home, id);
+        this.write(() => {
+            const now = this.now();
+            this.updateAgentMeta(id, (meta) => {
+                if (limits)
+                    meta.budget = budgetJson(limits, usage, now);
+                else
+                    delete meta.budget;
+            });
+            this.event(actor.agentId, "agent_budget", "agent", id, limits ? { turns: limits.turns ?? null, minutes: limits.minutes ?? null, usd: limits.usd ?? null } : { cleared: true });
+        });
+        return this.getAgent(id);
+    }
+    /** The agent's budget with what it has used, if it has one. */
+    budgetOf(agent) {
+        return budgetOf(agent.meta, sessionUsage(this.home, agent.id));
+    }
+    /** Mark the caller as seen without changing its status or writing an event. */
+    heartbeat(actor) {
+        this.write(() => this.touch(actor.agentId));
     }
     // ------------------------------------------------------------------ agents
     agentRow(id) {
