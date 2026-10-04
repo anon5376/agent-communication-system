@@ -33,6 +33,9 @@ pub struct Cli {
     pub crew_ready: bool,
     pub install: &'static str,
     pub sign_in: &'static str,
+    /// Its adapter reads a dollar cost from every turn. Without it a dollar
+    /// budget cannot stop the agent; turns and minutes still can.
+    pub reports_cost: bool,
 }
 
 /// Crew-ready CLIs first, in the order aos prefers them.
@@ -47,6 +50,7 @@ pub const CLIS: &[Cli] = &[
         crew_ready: true,
         install: "curl -fsSL https://claude.ai/install.sh | bash",
         sign_in: "run claude once and sign in",
+        reports_cost: true,
     },
     Cli {
         id: "codex",
@@ -58,6 +62,7 @@ pub const CLIS: &[Cli] = &[
         crew_ready: true,
         install: "npm install -g @openai/codex",
         sign_in: "run codex login",
+        reports_cost: false,
     },
     Cli {
         id: "cursor",
@@ -69,6 +74,7 @@ pub const CLIS: &[Cli] = &[
         crew_ready: true,
         install: "curl https://cursor.com/install -fsS | bash",
         sign_in: "run cursor-agent login",
+        reports_cost: false,
     },
     Cli {
         id: "gemini",
@@ -80,6 +86,7 @@ pub const CLIS: &[Cli] = &[
         crew_ready: false,
         install: "npm install -g @google/gemini-cli",
         sign_in: "run gemini once and sign in",
+        reports_cost: false,
     },
     Cli {
         id: "hermes",
@@ -91,6 +98,7 @@ pub const CLIS: &[Cli] = &[
         crew_ready: false,
         install: "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
         sign_in: "run hermes setup",
+        reports_cost: false,
     },
     Cli {
         id: "opencode",
@@ -102,6 +110,7 @@ pub const CLIS: &[Cli] = &[
         crew_ready: false,
         install: "see opencode.ai",
         sign_in: "run opencode auth login",
+        reports_cost: false,
     },
     Cli {
         id: "kimi",
@@ -113,6 +122,7 @@ pub const CLIS: &[Cli] = &[
         crew_ready: false,
         install: "see the Kimi Code docs",
         sign_in: "run kimi once and sign in",
+        reports_cost: false,
     },
     Cli {
         id: "grok",
@@ -124,6 +134,7 @@ pub const CLIS: &[Cli] = &[
         crew_ready: false,
         install: "see the Grok CLI docs",
         sign_in: "run grok login",
+        reports_cost: false,
     },
 ];
 
@@ -555,7 +566,7 @@ pub fn crew_json(members: &[Member], found: &[Found]) -> Value {
             json!({"id": c.id, "adapter": c.adapter, "command": command, "providers": [c.provider],
                    "features": {"headless": true, "resume": true, "mcp": true, "structuredOutput": true,
                                 "streaming": true, "cancellation": true, "modelSelection": true,
-                                "reasoningControl": c.id != "cursor", "usageReporting": true},
+                                "reasoningControl": c.id != "cursor", "usageReporting": c.reports_cost},
                    "probeArgs": ["--version"], "enabled": true}),
         );
         models.insert(
@@ -1492,6 +1503,14 @@ mod tests {
     #[test]
     fn cli_that_cannot_join_is_never_planned() {
         assert!(plan(&found(&["hermes", "gemini"])).is_empty());
+    }
+
+    #[test]
+    fn only_a_cli_that_reports_cost_claims_usage_reporting() {
+        let f = found(&["claude", "codex"]);
+        let v = crew_json(&plan(&f), &f);
+        assert_eq!(v["harnesses"]["claude"]["features"]["usageReporting"], true);
+        assert_eq!(v["harnesses"]["codex"]["features"]["usageReporting"], false);
     }
 
     #[test]

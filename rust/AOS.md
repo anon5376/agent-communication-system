@@ -164,7 +164,7 @@ Press `c` for command home. It lists the operator's latest mail with message num
 | `history` | nothing: your last 12 goals, each as open, at your gate, done, failed or stopped |
 | `pause <agent\|all> [why]` | pauses the agent: it finishes any turn it is in, then starts no new one |
 | `resume <agent\|all>` | lifts the pause; a budget starts a fresh allowance |
-| `budget <agent\|all> 20 turns 60 min $2`, `budget <agent\|all> off`, `budget` | sets, clears or lists budgets. Turns and minutes are always counted; dollars only as each CLI reports them, so a CLI that reports none counts as $0. An agent that reaches its budget pauses itself and writes to you |
+| `budget <agent\|all> 20 turns 60 min $2`, `budget <agent\|all> off`, `budget` | sets, clears or lists budgets. Turns and minutes are always counted. Dollars are counted only from CLIs that report a cost per turn (Claude Code); Codex CLI and Cursor CLI report none, so a `$` limit does not stop them, and their crew entries say `"usageReporting": false`. Dollars are checked between turns, so one long turn can pass a `$` limit. An agent that reaches its budget pauses itself and writes to you |
 | `setup [--force]`, `doctor`, `missions`, `crew` | nothing |
 | `task add <title> [--to agent] [--under #] [--review]` | a task; `--review` makes you its reviewer, so its result comes to your gate |
 | `accept # <reason>`, `revise # <feedback>` | a review |
