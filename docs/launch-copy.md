@@ -87,6 +87,7 @@ Topics: `mcp` `mcp-server` `model-context-protocol` `ai-agents` `multi-agent` `a
 | Other adapters exist | `ADAPTERS` in `src/adapters.ts`; unit tests only, no live run recorded | 2026-10-04 |
 | TS and Rust share one bus | `scripts/v2-interop-smoke.mjs` in `rust-port` CI | 2026-10-04 |
 | CLI call ~2 ms (Rust) vs ~77 ms (Node) | `inbox --peek`, mean of 20 calls, Linux container | 2026-10-04 |
+| Doctor, trace and dashboard list what needs the operator with reason, evidence, next command | `src/attention.ts`, merged in #31; `qagent doctor` output checked on a sample bus | 2026-10-04 |
 | Release binary size | `aos` x86_64 Linux: 5,242,048 bytes (earlier drafts said 3 or 4 MB, which was the older `acs` binary) | 2026-10-04 |
 
 Do not claim, until evidence exists: "works with every agent", Windows support, macOS tested by hand, a dollar cap (dollar budgets are checked between turns and only when a CLI reports cost), automatic crash recovery in `aos` before PR #28 merges, star counts or user numbers, or "first"/"only" anything.

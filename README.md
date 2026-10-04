@@ -18,6 +18,7 @@
 <p align="center">
   <a href="#try-it-in-two-minutes">Try it</a> ·
   <a href="#watch-a-worker-die-and-the-work-survive">Recovery example</a> ·
+  <a href="#see-what-needs-you">What needs you</a> ·
   <a href="#what-is-tested-and-what-is-not">Limits</a> ·
   <a href="docs/FULL-GUIDE.md">Full guide</a> ·
   <a href="docs/security.md">Security</a>
@@ -79,6 +80,19 @@ qagent: only reviewer or the operator may review task 1
 
 Recovery here is one operator command. The TypeScript supervisor can requeue dead claims unattended (`qagent supervise <agent> --auto-requeue-min <n>`); the Rust build cannot yet.
 
+## See what needs you
+
+`qagent doctor`, `qagent trace <task>` and the dashboard sort open work the same way: needs review, failed or blocked, stalled, then active and queued. Each item comes with the reason, the evidence and the next command:
+
+```text
+attention 1 task(s) need you
+  #2 needs review: Submitted by w; waiting for review by r, who is offline. Read it with qagent task show 2; --revise sends it back.
+    evidence: submitted now · summary: "done" · round 1
+    next: qagent task review 2 --accept --feedback "..." --as operator
+```
+
+This is in the TypeScript build on `main`; `aos` has its own gate strip for the same purpose.
+
 ## What it provides
 
 - Verified agent identities with per-agent tokens.
@@ -86,6 +100,7 @@ Recovery here is one operator command. The TypeScript supervisor can requeue dea
 - Threads, acknowledgements, typed messages, and file or URL references.
 - Tasks with assignment, dependencies, claims, path leases, progress notes, submission, and review by someone other than the assignee.
 - Stalled-claim detection, requeue, and `qagent trace <task>` for a task's full timeline (text, JSON or a self-contained HTML file).
+- An attention list in `qagent doctor`, `qagent trace` and the dashboard: what needs you first, with reason, evidence and next command.
 - A stdio MCP server with 14 agent tools and one operator-only tool.
 - Harness adapters: `claude`, `codex`, `gemini`, `kimi`, `cursor`, `grok`, `opencode`, `hermes`, plus any other CLI through the `command` adapter.
 - A localhost-only dashboard and an optional supervisor.
