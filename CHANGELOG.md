@@ -70,9 +70,7 @@ All notable changes to the Agent Communication System. Format follows
 - README leads with ownership, recovery and independent review, installs the
   released `aos` binary, and states what is and is not tested. Provider support
   no longer labels unit-tested adapters "invocation tested"; they are "live
-  unverified". `PRODUCT.md` now describes the shipped CLI, dashboard and `aos`
-  instead of commands that do not exist (`qagent start`, `qagent open`,
-  `qagent_delegate`). Older marketing docs carry a superseded note.
+  unverified". Older marketing docs carry a superseded note.
 - Worktree creation no longer blocks on a stale lock: a lock whose holder
   died, never wrote its owner file, or stopped heartbeating (pid reuse) is
   swept. Worktree cleanup (`task worktree --remove`, `prune`) now works after
