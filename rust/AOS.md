@@ -83,10 +83,15 @@ Agent logs are in `~/.agent-bus/logs/` (`<agent>.log` for the supervisor, `<agen
 | Gemini CLI | bus tools (a per-agent `GEMINI_CLI_SYSTEM_SETTINGS_PATH` file) | `connect gemini --auto-approve` |
 | Kimi Code | bus tools (`--mcp-config`) | `connect kimi --auto-approve` |
 | OpenCode | bus tools (`OPENCODE_CONFIG_CONTENT`) | `connect opencode --auto-approve` |
-| Hermes Agent, Grok CLI, Devin CLI | supervisor-managed | `connect devin --auto-approve` |
+| Qwen Code, Auggie (Augment) | bus tools (`--mcp-config`) | `connect qwen --auto-approve` |
+| GitHub Copilot CLI | bus tools (`--additional-mcp-config`) | `connect copilot --auto-approve` |
+| Amp | bus tools (`--mcp-config`; approvals off through a per-agent `--settings-file`) | `connect amp --auto-approve` |
+| Kilo CLI | bus tools (`KILO_CONFIG_CONTENT`) | `connect kilo --auto-approve` |
+| Goose | bus tools (`--with-extension`, this run only) | `connect goose --auto-approve` |
+| Hermes Agent, Grok CLI, Devin CLI, Crush, Mistral Vibe, Cline CLI, Continue CLI (`cn`), Aider, Amazon Q Developer CLI (`q`) | supervisor-managed | `connect aider --auto-approve` |
 | anything else | either; see below | `connect <name> -- <command line>` |
 
-Gemini, Kimi, OpenCode, Hermes, Grok and Devin run commands and edit files without asking you when they work unattended, so aos adds them only after you type `--auto-approve` once (kept in `aos/auto-approve`; delete the line to take it back). To keep their approval prompts instead, set `"autoApprove": false` under the harness's `options` in `crew.json`; a headless CLI then usually can't edit anything. A CLI without bus tools can't be the lead, because the lead hands out tasks through them.
+Every CLI in that table except Claude Code, Codex and Cursor runs commands and edits files without asking you when it works unattended, so aos adds them only after you type `--auto-approve` once (kept in `aos/auto-approve`; delete the line to take it back). To keep their approval prompts instead, set `"autoApprove": false` under the harness's `options` in `crew.json`; a headless CLI then usually can't edit anything. A CLI without bus tools can't be the lead, because the lead hands out tasks through them.
 
 `connect <cli> as <agent>` moves an existing seat (`lead`, `builder`, `reviewer`) onto that CLI; without `as`, a new teammate named after the CLI joins as a builder. For any other CLI give its command line after `--`, with placeholders the supervisor fills in on every turn:
 
@@ -106,7 +111,7 @@ aos disconnect mytool
 
 The command line is stored under `options.args` of the harness in `crew.json`, where you can also set `env`, `resumeArgs`, `timeoutMs` and `autoReport`. Arguments containing spaces need editing there. A CLI's reply is read from its last JSON line with a `result`, `text`, `content` or `message` field, and otherwise from its plain output.
 
-Only the stand-in CLIs in the tests have run through these paths; Gemini, Kimi, OpenCode, Hermes, Grok and Devin have not been run live. The TypeScript `qagent supervise` does not know `options` or `{mcpConfig}` yet, so run connected CLIs from aos.
+Only the stand-in CLIs in the tests have run through these paths; none of the CLIs above has been run live against a model. The flags for Qwen Code, Copilot, Amp, Auggie, Kilo, Goose, Crush, Vibe, Cline, Continue, Aider and Amazon Q were checked against each CLI's own `--help`. Crush's `run` has no approval flag, so how far it goes unattended depends on its own config. Factory Droid and Kiro CLI are not built in yet; connect them with `connect <name> -- <command line>`. The TypeScript `qagent supervise` does not know `options` or `{mcpConfig}` yet, so run connected CLIs from aos.
 
 ## From the shell
 

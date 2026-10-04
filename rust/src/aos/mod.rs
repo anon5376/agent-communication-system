@@ -1847,8 +1847,8 @@ const USAGE: &str = "aos - mission control for a team of AI coding agents
   aos doctor                check everything and say what to fix
   aos connect               list agent CLIs and how each reaches the bus
   aos connect <cli> [as <agent>] [--auto-approve]
-                            put a CLI aos knows in the crew (gemini, kimi, opencode,
-                            hermes, grok and devin need --auto-approve: they run tools unasked)
+                            put a CLI aos knows in the crew (all but claude, codex
+                            and cursor need --auto-approve: they run tools unasked)
   aos connect <name> [as <agent>] -- <command> {prompt}
                             put any other CLI in the crew; {mcpConfig} or {mcpJson}
                             in its command line hands it the bus tools

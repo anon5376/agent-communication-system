@@ -566,3 +566,172 @@ fn mcp_config_file_starts_a_bus_server_for_that_agent() {
     let _ = child.wait();
     assert!(whoami.contains("mcpcli"), "{whoami}");
 }
+
+/// The provider CLIs added after their --help output was checked: each one's
+/// one-shot flags, how it gets the bus, and the flag that skips approvals.
+#[test]
+fn provider_clis_run_one_shot_with_the_bus_and_ask_before_skipping_approvals() {
+    let dir = fresh_dir("providers");
+    let (bus, paths) = bus_in(&dir);
+    let workdir = fresh_dir("providers-work");
+    // (cli, seat, has bus tools, args that must appear when allowed, arg gone when not)
+    let cases: [(&str, &str, bool, &[&str], &str); 12] = [
+        ("qwen", "q1", true, &["--approval-mode", "yolo"], "yolo"),
+        (
+            "copilot",
+            "c1",
+            true,
+            &["-p", "do the work", "--allow-all-tools"],
+            "--allow-all-tools",
+        ),
+        (
+            "amp",
+            "a1",
+            true,
+            &["-x", "do the work", "--stream-json", "--settings-file"],
+            "--settings-file",
+        ),
+        (
+            "auggie",
+            "u1",
+            true,
+            &["--print", "--instruction", "do the work"],
+            "",
+        ),
+        ("kilo", "l1", true, &["run", "--auto"], "--auto"),
+        (
+            "goose",
+            "s1",
+            true,
+            &["run", "--no-session", "--text", "do the work"],
+            "",
+        ),
+        ("crush", "r1", false, &["run", "--quiet", "do the work"], ""),
+        (
+            "vibe",
+            "v1",
+            false,
+            &["-p", "do the work", "--auto-approve"],
+            "--auto-approve",
+        ),
+        ("cline", "n1", false, &["--auto-approve", "true"], "true"),
+        ("continue", "t1", false, &["-p", "--auto"], "--auto"),
+        (
+            "aider",
+            "i1",
+            false,
+            &["--message", "do the work", "--yes-always"],
+            "--yes-always",
+        ),
+        (
+            "amazonq",
+            "z1",
+            false,
+            &["chat", "--no-interactive", "--trust-all-tools"],
+            "--trust-all-tools",
+        ),
+    ];
+    let mut ids = vec!["claude"];
+    ids.extend(cases.iter().map(|c| c.0));
+    let found = only(&ids);
+    crew::setup(&bus, &paths, &found, false).unwrap();
+    for (cli, seat, ..) in cases {
+        let err = crew::connect(&bus, &paths, &found, &req(cli, Some(seat), &[], false));
+        assert!(err.is_err(), "{cli} joined without --auto-approve");
+        crew::connect(&bus, &paths, &found, &req(cli, Some(seat), &[], true)).unwrap();
+    }
+    let db = bus.db_path.clone();
+    let config = load_config(&paths.crew()).unwrap();
+
+    for (cli, seat, tools, wanted, _) in cases {
+        let resolved = resolve_agent(&config, seat).unwrap();
+        assert_eq!(resolved.harness.adapter, cli);
+        assert_eq!(supervisor_managed(&resolved), !tools, "{cli}");
+        let (inv, _) = invocation(&paths, &db, seat, &workdir);
+        let joined = inv.args.join("\u{1}");
+        assert!(
+            joined.contains(&wanted.join("\u{1}"))
+                || wanted.iter().all(|w| inv.args.contains(&w.to_string())),
+            "{cli}: {:?}",
+            inv.args
+        );
+        if !tools {
+            assert!(!joined.contains("mcpServers"), "{cli}: {:?}", inv.args);
+        }
+    }
+
+    // The bus server reaches each tool-using CLI as that agent.
+    for (seat, flag) in [
+        ("q1", "--mcp-config"),
+        ("c1", "--additional-mcp-config"),
+        ("a1", "--mcp-config"),
+        ("u1", "--mcp-config"),
+    ] {
+        let (inv, _) = invocation(&paths, &db, seat, &workdir);
+        let at = inv.args.iter().position(|a| a == flag).unwrap();
+        server_in(&serde_json::from_str(&inv.args[at + 1]).unwrap(), seat);
+    }
+    let (inv, _) = invocation(&paths, &db, "a1", &workdir);
+    let at = inv
+        .args
+        .iter()
+        .position(|a| a == "--settings-file")
+        .unwrap();
+    let settings: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&inv.args[at + 1]).unwrap()).unwrap();
+    assert_eq!(settings["amp.dangerouslyAllowAll"], true);
+    let (inv, _) = invocation(&paths, &db, "l1", &workdir);
+    let cfg: serde_json::Value =
+        serde_json::from_str(&inv.environment["KILO_CONFIG_CONTENT"]).unwrap();
+    assert_eq!(cfg["mcp"]["qagent"]["environment"]["QAGENT_AGENT_ID"], "l1");
+    let (inv, _) = invocation(&paths, &db, "s1", &workdir);
+    let at = inv
+        .args
+        .iter()
+        .position(|a| a == "--with-extension")
+        .unwrap();
+    assert_eq!(
+        inv.args[at + 1],
+        format!(
+            "qagent:QAGENT_AGENT_ID=s1 QAGENT_BUS_DB={} /opt/aos mcp",
+            db.display()
+        )
+    );
+    assert_eq!(inv.environment["GOOSE_MODE"], "auto");
+
+    // autoApprove false takes the approval skip away again.
+    let mut crew_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(paths.crew()).unwrap()).unwrap();
+    for (cli, ..) in cases {
+        crew_json["harnesses"][cli]["options"]["autoApprove"] = serde_json::json!(false);
+    }
+    fs::write(
+        paths.crew(),
+        serde_json::to_string_pretty(&crew_json).unwrap(),
+    )
+    .unwrap();
+    for (cli, seat, _, _, gone) in cases {
+        let (inv, _) = invocation(&paths, &db, seat, &workdir);
+        if !gone.is_empty() {
+            assert!(
+                !inv.args.contains(&gone.to_string()),
+                "{cli}: {:?}",
+                inv.args
+            );
+        }
+    }
+    let (inv, _) = invocation(&paths, &db, "q1", &workdir);
+    assert!(inv
+        .args
+        .windows(2)
+        .any(|w| w == ["--approval-mode", "default"]));
+    let (inv, _) = invocation(&paths, &db, "n1", &workdir);
+    assert!(inv
+        .args
+        .windows(2)
+        .any(|w| w == ["--auto-approve", "false"]));
+    let (inv, _) = invocation(&paths, &db, "u1", &workdir);
+    assert!(inv.args.contains(&"--ask".to_string()));
+    let (inv, _) = invocation(&paths, &db, "s1", &workdir);
+    assert!(!inv.environment.contains_key("GOOSE_MODE"));
+}
