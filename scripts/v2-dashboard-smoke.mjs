@@ -169,9 +169,9 @@ try {
   const narrow = await layout(375);
   assert.equal(narrow.innerWidth, 375);
   assert.ok(narrow.scrollWidth <= narrow.innerWidth, `horizontal scroll at 375 px: scrollWidth ${narrow.scrollWidth}`);
-  assert.deepEqual(narrow.sections, ["Agents", "Open tasks", "Recent messages", "Send a message"]);
+  assert.deepEqual(narrow.sections, ["Needs you", "Active and queued", "Agents", "Recent messages", "Send a message"]);
   for (const word of ["worker-with-a-rather-long-identifier", "Port the parser", "unassigned", "kickoff"]) assert.ok(narrow.text.includes(word), `page shows ${word}`);
-  process.stdout.write(`375 px: scrollWidth ${narrow.scrollWidth} <= innerWidth ${narrow.innerWidth}; four sections present\n`);
+  process.stdout.write(`375 px: scrollWidth ${narrow.scrollWidth} <= innerWidth ${narrow.innerWidth}; sections present in order\n`);
   await shot("dashboard-375.png");
 
   // An agent's CLI message appears without a reload.
