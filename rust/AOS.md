@@ -158,6 +158,19 @@ Press `c` for command home. It lists the operator's latest mail with message num
 | `ack <msg#>`, `read` | acknowledges one message; marks all your mail read |
 | `status`, `help`, a screen name | nothing |
 
+## Long unattended runs
+
+Each agent's supervisor is built to keep going for days without you:
+
+- A bus error (a locked database, a full disk) or a crash inside one round is logged and retried with backoff; it does not end the supervisor.
+- Mail is marked read only after a turn has used it, so a turn that fails or is stopped leaves its mail for the next turn.
+- After 5 failed turns in a row (a CLI that lost its login, a CLI missing from PATH) the agent pauses itself and writes to you, instead of using up every task. Fix the cause, then `resume <agent>`.
+- During a turn the supervisor renews the agent's task claims every minute, so a turn longer than the 2-hour claim window keeps its task.
+- `logs/<agent>.log` and `logs/<agent>.out` are capped at 10 MB each; the previous 10 MB is kept as `<file>.1`.
+- A pid file left from before a reboot that now names an unrelated process is ignored, so `aos stop` never signals that process.
+
+A budget (`budget all 20 turns 60 min`) is still the way to cap spend; nothing sets one for you.
+
 ## What aos cannot do yet
 
 These are in the design but have no ACS verb, so aos does not fake them: rerouting an agent to another harness or model from inside aos (edit `crew.json`), and handing a task straight to a named agent (requeue returns it to the pool; `--to` works only when creating).

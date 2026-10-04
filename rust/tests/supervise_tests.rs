@@ -1,7 +1,7 @@
 //! Supervisor tests — porting the expectations of tests/supervisor.test.ts
 //! plus the adapter parse checks from tests/adapters.test.ts.
 
-use acs::bus::{Bus, CreateTaskInput};
+use acs::bus::{Bus, CreateTaskInput, SendInput};
 use acs::config::{load_config, resolve_agent, BusConfig, ResolvedAgent};
 use acs::identity;
 use acs::supervisor::*;
@@ -351,6 +351,7 @@ fn supervise_fake_harness_claims_and_submits() {
                 config_path: Some(config_path),
                 stop,
                 wait_ms: Some(2_000),
+                retry_base_ms: None,
                 fake_harness_path: Some("fake-harness".to_string()),
                 qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
                 log: Some(Box::new(move |line| {
@@ -419,6 +420,7 @@ fn supervise_stop_kills_hung_process_group() {
                 config_path: Some(config_path),
                 stop,
                 wait_ms: Some(2_000),
+                retry_base_ms: None,
                 fake_harness_path: Some("fake-harness".to_string()),
                 qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
                 log: Some(Box::new(|_| {})),
@@ -474,6 +476,7 @@ fn supervise_fails_task_on_malformed_output() {
                 config_path: Some(config_path),
                 stop,
                 wait_ms: Some(2_000),
+                retry_base_ms: None,
                 fake_harness_path: Some("fake-harness".to_string()),
                 qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
                 log: Some(Box::new(|_| {})),
@@ -536,6 +539,7 @@ fn supervise_pauses_on_budget_and_resumes() {
                 config_path: Some(config_path),
                 stop,
                 wait_ms: Some(1_000),
+                retry_base_ms: None,
                 fake_harness_path: Some("fake-harness".to_string()),
                 qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
                 log: Some(Box::new(|_| {})),
@@ -595,4 +599,150 @@ fn supervise_pauses_on_budget_and_resumes() {
 
     stop.store(true, Ordering::SeqCst);
     handle.join().unwrap().unwrap();
+}
+
+#[test]
+fn supervise_pauses_after_repeated_failures_and_keeps_the_mail() {
+    let e = e2e("w4", "fail");
+    let config_path = e.workdir.join("agent-bus.config.json");
+    // A plain message (no task): every turn on it fails, and it must not be lost.
+    e.bus
+        .send(
+            &e.operator,
+            SendInput {
+                to: "w4".into(),
+                subject: Some("look at this".into()),
+                body: "please".into(),
+                msg_type: None,
+                thread: None,
+                task_id: None,
+                refs: None,
+                requires_ack: false,
+            },
+        )
+        .unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = {
+        let stop = Arc::clone(&stop);
+        let db_path = e.home.join("bus.db");
+        let workdir = e.workdir.display().to_string();
+        std::thread::spawn(move || {
+            supervise(SuperviseOptions {
+                agent_id: "w4".to_string(),
+                workdir,
+                db_path,
+                config_path: Some(config_path),
+                stop,
+                wait_ms: Some(1_000),
+                retry_base_ms: Some(20),
+                fake_harness_path: Some("fake-harness".to_string()),
+                qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
+                log: Some(Box::new(|_| {})),
+            })
+        })
+    };
+    let paused = || {
+        e.bus
+            .get_agent("w4")
+            .unwrap()
+            .and_then(|a| acs::control::paused(&a.meta))
+    };
+    wait_for(Duration::from_secs(30), "failure pause", || paused().is_some());
+    let reason = paused().unwrap().reason;
+    assert!(
+        reason.starts_with(&format!("{MAX_FAILED_TURNS} turns failed in a row")),
+        "{reason}"
+    );
+    let mail = e.bus.inbox(&e.operator, true, None).unwrap().messages;
+    assert!(
+        mail.iter()
+            .any(|m| m.subject == format!("w4 paused: {MAX_FAILED_TURNS} turns failed in a row")),
+        "{mail:?}"
+    );
+    let session: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(e.home.join("sessions/w4.json")).unwrap())
+            .unwrap();
+    assert_eq!(session["turns"].as_i64(), Some(MAX_FAILED_TURNS as i64));
+    // Paused, no further turns.
+    std::thread::sleep(Duration::from_millis(1_500));
+    let session: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(e.home.join("sessions/w4.json")).unwrap())
+            .unwrap();
+    assert_eq!(session["turns"].as_i64(), Some(MAX_FAILED_TURNS as i64));
+    // The message no turn managed to handle is still unread.
+    let w4 = e.bus.identify(Some("w4")).unwrap();
+    let unread = e.bus.inbox(&w4, true, None).unwrap().messages;
+    assert!(unread.iter().any(|m| m.subject == "look at this"), "{unread:?}");
+
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap().unwrap();
+}
+
+#[test]
+fn supervise_survives_a_locked_bus() {
+    let e = e2e("w5", "");
+    let config_path = e.workdir.join("agent-bus.config.json");
+    // Another process holds the write lock past the busy timeout.
+    let blocker = rusqlite::Connection::open(e.home.join("bus.db")).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let logs: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(vec![]));
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = {
+        let stop = Arc::clone(&stop);
+        let logs = Arc::clone(&logs);
+        let db_path = e.home.join("bus.db");
+        let workdir = e.workdir.display().to_string();
+        std::thread::spawn(move || {
+            supervise(SuperviseOptions {
+                agent_id: "w5".to_string(),
+                workdir,
+                db_path,
+                config_path: Some(config_path),
+                stop,
+                wait_ms: Some(1_000),
+                retry_base_ms: Some(50),
+                fake_harness_path: Some("fake-harness".to_string()),
+                qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
+                log: Some(Box::new(move |line| logs.lock().unwrap().push(line.to_string()))),
+            })
+        })
+    };
+    wait_for(Duration::from_secs(20), "a failed round", || {
+        logs.lock().unwrap().iter().any(|l| l.contains("round failed"))
+    });
+    assert!(!handle.is_finished(), "supervisor exited on a locked bus");
+    blocker.execute_batch("COMMIT").unwrap();
+
+    let task = e
+        .bus
+        .create_task(
+            &e.operator,
+            CreateTaskInput {
+                title: "after the lock".to_string(),
+                to: Some("w5".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    wait_for(Duration::from_secs(30), "task submitted", || {
+        e.bus
+            .get_task(task.id)
+            .map(|t| t.task.state == "submitted")
+            .unwrap_or(false)
+    });
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap().unwrap();
+}
+
+#[test]
+fn supervisor_alive_checks_the_command_line() {
+    assert!(supervisor_alive(std::process::id() as i32, "anyone"));
+    assert!(!supervisor_alive(0, "w1"));
+    // A live process that is not a supervisor (a reused pid after a reboot).
+    let mut other = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+    let pid = other.id() as i32;
+    assert!(!supervisor_alive(pid, "w1"));
+    other.kill().unwrap();
+    other.wait().unwrap();
+    assert!(!supervisor_alive(pid, "w1"));
 }

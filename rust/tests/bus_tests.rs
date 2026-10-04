@@ -816,3 +816,73 @@ fn unread_count_and_agent_summaries() {
     assert_eq!(message_summaries.len(), 2);
     assert_eq!(message_summaries[0].subject, "one");
 }
+
+#[test]
+fn renew_claims_keeps_a_long_claim_alive() {
+    let home = fresh_home();
+    let mut bus = Bus::open(Some(&home.join("bus.db"))).unwrap();
+    bus.init().unwrap();
+    bus.set_claim_ttl_ms(800);
+    let operator = bus.identify(Some(OPERATOR_ID)).unwrap();
+    let w = add_agent(&bus, "w1", "worker");
+    let task = bus
+        .create_task(
+            &operator,
+            CreateTaskInput {
+                title: "long".into(),
+                to: Some("w1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    bus.claim_task(&w, Some(task.id)).unwrap();
+    for _ in 0..3 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(bus.renew_claims(&w).unwrap(), 1);
+    }
+    // Any task write sweeps expired claims; this one has been renewed.
+    bus.note_task(&operator, task.id, "still yours?").unwrap();
+    let now = bus.get_task(task.id).unwrap().task;
+    assert_eq!(now.state, "claimed");
+    assert_eq!(now.assignee.as_deref(), Some("w1"));
+
+    // Without renewal the claim expires and the task reopens.
+    std::thread::sleep(std::time::Duration::from_millis(1_000));
+    bus.note_task(&operator, task.id, "and now?").unwrap();
+    assert_eq!(bus.get_task(task.id).unwrap().task.state, "open");
+}
+
+#[test]
+fn mark_read_through_only_moves_forward() {
+    let f = fixture();
+    let operator = f.bus.identify(Some(OPERATOR_ID)).unwrap();
+    let w = add_agent(&f.bus, "w1", "worker");
+    let send = |subject: &str| {
+        f.bus
+            .send(
+                &operator,
+                SendInput {
+                    to: "w1".into(),
+                    subject: Some(subject.into()),
+                    body: "b".into(),
+                    msg_type: None,
+                    thread: None,
+                    task_id: None,
+                    refs: None,
+                    requires_ack: false,
+                },
+            )
+            .unwrap()
+    };
+    send("one");
+    send("two");
+    let peeked = f.bus.inbox(&w, true, None).unwrap().messages;
+    assert_eq!(peeked.len(), 2);
+    f.bus.mark_read_through(&w, peeked[0].seq, 1).unwrap();
+    let left = f.bus.inbox(&w, true, None).unwrap().messages;
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].subject, "two");
+    f.bus.mark_read_through(&w, peeked[1].seq, 1).unwrap();
+    f.bus.mark_read_through(&w, peeked[0].seq, 1).unwrap();
+    assert!(f.bus.inbox(&w, true, None).unwrap().messages.is_empty());
+}

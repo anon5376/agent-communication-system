@@ -406,6 +406,192 @@ fn claimable_by(task: &Task, agent_id: &str, role: &str) -> bool {
             || (task.assignee.is_none() && (task.role.is_empty() || task.role == role)))
 }
 
+/// Turns that fail in a row before the agent pauses itself: a CLI that lost its
+/// login, or a task it cannot do, should not burn every task and the night.
+pub const MAX_FAILED_TURNS: u32 = 5;
+
+/// Size at which an agent's log (`logs/<agent>.log`) or captured output
+/// (`logs/<agent>.out`) is moved to `<file>.1`, keeping one older copy.
+pub const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
+
+fn rotated(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".1");
+    path.with_file_name(name)
+}
+
+fn rotate_log(path: &Path) {
+    if fs::metadata(path).map(|m| m.len() > MAX_LOG_BYTES).unwrap_or(false) {
+        let _ = fs::rename(path, rotated(path));
+    }
+}
+
+/// aos starts a supervisor with stdout and stderr appended to `logs/<agent>.out`,
+/// and every turn's CLI output is teed there. When that file is our stdout and
+/// has grown past the cap, copy it to `.out.1` and truncate it in place (the file
+/// is open in append mode, so writing carries on at the new end).
+fn cap_stdout_file(path: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = fs::metadata(path) else {
+        return;
+    };
+    if meta.len() <= MAX_LOG_BYTES {
+        return;
+    }
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(1, &mut st) } != 0
+        || st.st_dev as u64 != meta.dev()
+        || st.st_ino as u64 != meta.ino()
+    {
+        return;
+    }
+    let _ = std::io::stdout().flush();
+    if fs::copy(path, rotated(path)).is_ok() {
+        unsafe {
+            libc::ftruncate(1, 0);
+        }
+    }
+}
+
+/// While a turn runs, renew the claims the agent holds and mark it seen once a
+/// minute, so a turn longer than the claim TTL does not lose its task to another
+/// agent. Runs on its own connection; errors are retried on the next beat.
+struct Keepalive {
+    done: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Keepalive {
+    fn finish(mut self) {
+        self.done.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
+
+fn keep_claims_alive(db_path: &Path, me: &crate::identity::Identity) -> Keepalive {
+    let done = Arc::new(AtomicBool::new(false));
+    let handle = {
+        let done = Arc::clone(&done);
+        let db_path = db_path.to_path_buf();
+        let me = me.clone();
+        std::thread::spawn(move || {
+            let mut bus: Option<Bus> = None;
+            let mut next = Instant::now() + KEEPALIVE_INTERVAL;
+            while !done.load(Ordering::SeqCst) {
+                if Instant::now() < next {
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                next = Instant::now() + KEEPALIVE_INTERVAL;
+                if bus.is_none() {
+                    bus = Bus::open(Some(&db_path)).ok();
+                }
+                if let Some(b) = &bus {
+                    if b.renew_claims(&me).is_err() {
+                        bus = None;
+                    }
+                }
+            }
+        })
+    };
+    Keepalive {
+        done,
+        handle: Some(handle),
+    }
+}
+
+/// Pause this agent after too many failed turns in a row and tell the operator, once.
+fn pause_after_failures(
+    bus: &Bus,
+    me: &crate::identity::Identity,
+    failures: u32,
+    last_error: &str,
+    log: &dyn Fn(&str),
+) -> Result<()> {
+    let id = &me.agent_id;
+    let reason = format!("{failures} turns failed in a row; last: {last_error}");
+    bus.pause_agent(me, id, Some(&reason.chars().take(200).collect::<String>()))?;
+    bus.send(
+        me,
+        crate::bus::SendInput {
+            to: crate::types::OPERATOR_ID.into(),
+            subject: Some(format!("{id} paused: {failures} turns failed in a row")),
+            body: format!(
+                "{id} paused itself after {failures} failed turns in a row, so it stops using up tasks and spend. \
+                 The last one: {last_error}. Its log is logs/{id}.log under the bus folder. \
+                 Fix the cause (often the CLI's login, or the CLI missing from PATH), then resume {id} in aos \
+                 (or qagent agent resume {id})."
+            ),
+            msg_type: Some("info".into()),
+            thread: None,
+            task_id: None,
+            refs: None,
+            requires_ack: false,
+        },
+    )?;
+    log(&format!("paused: {reason}"));
+    Ok(())
+}
+
+/// Whether `pid` is a live supervisor for `agent_id`, not just any process: after
+/// a reboot a stale pid file can name an unrelated process that reused the pid.
+/// When the command line cannot be read, a live pid counts.
+pub fn supervisor_alive(pid: i32, agent_id: &str) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    let alive = unsafe { libc::kill(pid, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    if !alive {
+        return false;
+    }
+    if pid as u32 == std::process::id() {
+        return true;
+    }
+    let args: Option<Vec<String>> = if cfg!(target_os = "linux") {
+        fs::read(format!("/proc/{pid}/cmdline")).ok().map(|raw| {
+            raw.split(|b| *b == 0)
+                .map(|a| String::from_utf8_lossy(a).to_string())
+                .collect()
+        })
+    } else {
+        // No /proc: ask ps once per live pid (aos checks on every screen refresh).
+        static SEEN: Mutex<Option<HashMap<i32, Vec<String>>>> = Mutex::new(None);
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        let seen = seen.get_or_insert_with(HashMap::new);
+        if let Some(args) = seen.get(&pid) {
+            Some(args.clone())
+        } else {
+            let args = Command::new("ps")
+                .args(["-o", "command=", "-p", &pid.to_string()])
+                .stderr(Stdio::null())
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                });
+            if let Some(args) = &args {
+                seen.insert(pid, args.clone());
+            }
+            args
+        }
+    };
+    match args {
+        Some(args) if !args.is_empty() => {
+            args.iter().any(|a| a == "supervise") && args.iter().any(|a| a == agent_id)
+        }
+        _ => true,
+    }
+}
+
 /// One pid file per agent so two supervisors never drive the same CLI session.
 fn acquire_lock(dir: &Path, agent_id: &str) -> Result<impl FnOnce()> {
     fs::create_dir_all(dir)?;
@@ -416,9 +602,7 @@ fn acquire_lock(dir: &Path, agent_id: &str) -> Result<impl FnOnce()> {
         .unwrap_or(0);
     let my_pid = std::process::id() as i32;
     if holder != 0 && holder != my_pid {
-        let alive = unsafe { libc::kill(holder, 0) } == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-        if alive {
+        if supervisor_alive(holder, agent_id) {
             return Err(BusError::conflict(format!(
                 "a supervisor for {agent_id} is already running (pid {holder})"
             )));
@@ -470,6 +654,12 @@ fn read_session(path: &Path) -> SessionRecord {
 
 pub type LogFn = dyn Fn(&str) + Send;
 
+/// How one round of the supervise loop ended.
+enum Round {
+    Next,
+    Stop,
+}
+
 /// True while this agent is paused. When its budget has run out, the agent pauses
 /// itself here and tells the operator, once.
 fn hold_for_pause(bus: &Bus, me: &crate::identity::Identity, log: &dyn Fn(&str)) -> Result<bool> {
@@ -515,6 +705,8 @@ pub struct SuperviseOptions {
     pub stop: Arc<AtomicBool>,
     /// Length of each blocking wait before it is renewed. Default DEFAULT_WAIT_SEC.
     pub wait_ms: Option<u64>,
+    /// First retry delay after a failed turn or round, doubling up to 30x. Default 2000.
+    pub retry_base_ms: Option<u64>,
     pub fake_harness_path: Option<String>,
     /// The qagent binary MCP/fake harnesses run (tests inject the built binary).
     pub qagent_bin: Option<String>,
@@ -527,7 +719,7 @@ pub struct SuperviseOptions {
 pub fn supervise(options: SuperviseOptions) -> Result<()> {
     let workdir =
         std::fs::canonicalize(&options.workdir).unwrap_or_else(|_| PathBuf::from(&options.workdir));
-    let bus = Bus::open(Some(&options.db_path))?;
+    let mut bus = Bus::open(Some(&options.db_path))?;
     let home = home_for(&bus.db_path);
     let log_dir = home.join("logs");
     let session_dir = home.join("sessions");
@@ -538,6 +730,7 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
         .log
         .unwrap_or_else(|| Box::new(|line: &str| println!("{line}")));
     let log_path = log_dir.join(format!("{}.log", options.agent_id));
+    let out_path = log_dir.join(format!("{}.out", options.agent_id));
     let log = move |line: &str| {
         let stamped = format!(
             "[{}] {}",
@@ -545,6 +738,7 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
             line
         );
         write(&stamped);
+        rotate_log(&log_path);
         if let Ok(mut f) = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -635,6 +829,8 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
         };
         let wait_ms = options.wait_ms.unwrap_or(DEFAULT_WAIT_SEC as u64 * 1000);
         let mut consecutive_failures: u32 = 0;
+        let retry_base_ms = options.retry_base_ms.unwrap_or(2_000);
+        let backoff = |failures: u32| retry_delay_ms(failures) * retry_base_ms / 2_000;
         log(&format!(
             "supervising {} via {} in {} (bus {}{})",
             agent.agent.id,
@@ -650,270 +846,330 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
 
         let mut paused_since: Option<Instant> = None;
         let mut last_beat = Instant::now();
+        // Bus or file errors outside a turn (a locked database, a full disk) end
+        // the round, not the supervisor: it logs, backs off and tries again.
+        let mut error_streak: u32 = 0;
         while !options.stop.load(Ordering::SeqCst) {
-            // Pause and budget come first, so a paused agent's mail stays unread for later.
-            if hold_for_pause(&bus, &me, &log)? {
-                if paused_since.is_none() {
-                    log("paused; no new turn until the operator resumes this agent");
-                    bus.set_status(&me, "idle")?;
-                    paused_since = Some(Instant::now());
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Round> {
+                // Pause and budget come first, so a paused agent's mail stays unread for later.
+                if hold_for_pause(&bus, &me, &log)? {
+                    if paused_since.is_none() {
+                        log("paused; no new turn until the operator resumes this agent");
+                        bus.set_status(&me, "idle")?;
+                        paused_since = Some(Instant::now());
+                    }
+                    if last_beat.elapsed() >= Duration::from_secs(60) {
+                        bus.heartbeat(&me)?;
+                        last_beat = Instant::now();
+                    }
+                    let until = Instant::now() + Duration::from_secs(2);
+                    while Instant::now() < until && !options.stop.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    return Ok(Round::Next);
                 }
-                if last_beat.elapsed() >= Duration::from_secs(60) {
-                    bus.heartbeat(&me)?;
-                    last_beat = Instant::now();
+                if paused_since.take().is_some() {
+                    log("resumed");
+                    consecutive_failures = 0;
                 }
-                let until = Instant::now() + Duration::from_secs(2);
-                while Instant::now() < until && !options.stop.load(Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(100));
+                let waited = crate::wait::wait_for_mail(
+                    &bus,
+                    &me,
+                    Duration::from_millis(wait_ms),
+                    &options.stop,
+                )?;
+                if options.stop.load(Ordering::SeqCst) {
+                    return Ok(Round::Stop);
                 }
-                continue;
-            }
-            if paused_since.take().is_some() {
-                log("resumed");
-            }
-            let waited = crate::wait::wait_for_mail(
-                &bus,
-                &me,
-                Duration::from_millis(wait_ms),
-                &options.stop,
-            )?;
-            if options.stop.load(Ordering::SeqCst) {
-                break;
-            }
-            if waited.status == "timeout" {
-                continue;
-            }
-            if hold_for_pause(&bus, &me, &log)? {
-                continue;
-            }
+                if waited.status == "timeout" {
+                    return Ok(Round::Next);
+                }
+                if hold_for_pause(&bus, &me, &log)? {
+                    return Ok(Round::Next);
+                }
 
-            // Consume what the wait saw, so the next wait does not deliver it again.
-            let messages = if waited.status == "mail" {
-                bus.inbox(&me, false, Some(50))?.messages
-            } else {
-                Vec::new()
-            };
-            if cancellation_only(&messages) {
-                log("received cancellation control; no model turn started");
-                continue;
-            }
+                // Read what the wait saw without consuming it: the mail is marked read
+                // only once a turn has used it, so a turn that dies does not lose it.
+                let messages = if waited.status == "mail" {
+                    bus.inbox(&me, true, Some(50))?.messages
+                } else {
+                    Vec::new()
+                };
+                let mark_read = |bus: &Bus| -> Result<()> {
+                    match messages.last() {
+                        Some(last) => bus.mark_read_through(&me, last.seq, messages.len()),
+                        None => Ok(()),
+                    }
+                };
+                if cancellation_only(&messages) {
+                    mark_read(&bus)?;
+                    log("received cancellation control; no model turn started");
+                    return Ok(Round::Next);
+                }
 
-            let role = bus_agent.role.clone();
-            let mut task_ids: std::collections::BTreeSet<i64> = Default::default();
-            for message in &messages {
-                if let Some(task_id) = message.task_id {
-                    if (message.msg_type == "task" || message.msg_type == "feedback")
-                        && !message.subject.starts_with("[ACCEPTED")
-                    {
-                        task_ids.insert(task_id);
+                let role = bus_agent.role.clone();
+                let mut task_ids: std::collections::BTreeSet<i64> = Default::default();
+                for message in &messages {
+                    if let Some(task_id) = message.task_id {
+                        if (message.msg_type == "task" || message.msg_type == "feedback")
+                            && !message.subject.starts_with("[ACCEPTED")
+                        {
+                            task_ids.insert(task_id);
+                        }
                     }
                 }
-            }
-            let mut tasks: Vec<Task> = Vec::new();
-            if managed {
-                // Port of /task/start: claim for a CLI that has no bus tools.
-                for id in &task_ids {
-                    match bus.get_task(*id) {
-                        Ok(current) => {
-                            if claimable_by(&current.task, &me.agent_id, &role) {
-                                match bus.claim_task(&me, Some(*id)) {
-                                    Ok(task) => tasks.push(task),
-                                    Err(error) => {
-                                        log(&format!("claim of task #{id} failed: {error}"))
+                let mut tasks: Vec<Task> = Vec::new();
+                if managed {
+                    // Port of /task/start: claim for a CLI that has no bus tools.
+                    for id in &task_ids {
+                        match bus.get_task(*id) {
+                            Ok(current) => {
+                                if claimable_by(&current.task, &me.agent_id, &role) {
+                                    match bus.claim_task(&me, Some(*id)) {
+                                        Ok(task) => tasks.push(task),
+                                        Err(error) => {
+                                            log(&format!("claim of task #{id} failed: {error}"))
+                                        }
+                                    }
+                                } else if current.task.state == "claimed"
+                                    && current.task.assignee.as_deref() == Some(me.agent_id.as_str())
+                                {
+                                    tasks.push(current.task);
+                                }
+                            }
+                            Err(error) => log(&format!("claim of task #{id} failed: {error}")),
+                        }
+                    }
+                    if messages.is_empty() {
+                        match bus.claim_task(&me, None) {
+                            Ok(task) => tasks.push(task),
+                            Err(error) => {
+                                if error.code.as_str() != "not_found" {
+                                    return Err(error);
+                                }
+                            }
+                        }
+                    }
+                } else if messages.is_empty() {
+                    tasks.extend(
+                        bus.list_tasks(ListTasksInput {
+                            states: Some(vec!["open".to_string(), "changes_requested".to_string()]),
+                            limit: Some(50),
+                            ..Default::default()
+                        })?
+                        .into_iter()
+                        .filter(|task| claimable_by(task, &me.agent_id, &role)),
+                    );
+                }
+                if messages.is_empty() && tasks.is_empty() {
+                    return Ok(Round::Next);
+                }
+
+                let context = AdapterContext {
+                    agent: &agent,
+                    qagent_bin: qagent_bin.clone(),
+                    prompt: with_role_prompt(
+                        crate::aos::crew::role_prompt(&config_path, &agent.agent.id),
+                        build_brief(&agent, &messages, &tasks, managed),
+                    ),
+                    session_id: session.session_id.clone(),
+                    pinned_session_id: pinned_session_id.clone(),
+                    workdir: workdir.display().to_string(),
+                    mcp_server_path: "mcp".to_string(),
+                    fake_harness_path: options
+                        .fake_harness_path
+                        .clone()
+                        .unwrap_or_else(|| "fake-harness".to_string()),
+                    bus_environment: HashMap::from([
+                        ("QAGENT_AGENT_ID".to_string(), me.agent_id.clone()),
+                        (
+                            "QAGENT_BUS_DB".to_string(),
+                            bus.db_path.display().to_string(),
+                        ),
+                        ("QAGENT_BLOCK_SEC".to_string(), block_sec.to_string()),
+                        ("AGENT_BUS_BLOCK_SEC".to_string(), block_sec.to_string()),
+                    ]),
+                    mcp_command: Some(mcp_command.clone()),
+                };
+                if let Some(prepare) = adapter.prepare {
+                    prepare(&context)?;
+                }
+                let invocation = (adapter.build)(&context);
+                bus.set_status(&me, "working")?;
+                let keepalive = keep_claims_alive(&bus.db_path, &me);
+                let process_result = run_harness_process(
+                    &invocation.command,
+                    &invocation.args,
+                    &sanitized_environment(&agent, &invocation.environment),
+                    &workdir.display().to_string(),
+                    invocation.timeout_ms,
+                    &child_pid,
+                );
+                keepalive.finish();
+                cap_stdout_file(&out_path);
+                *child_pid.lock().unwrap() = None;
+                if bus
+                    .get_agent(&me.agent_id)?
+                    .map(|a| a.stored_status == "working")
+                    .unwrap_or(false)
+                {
+                    bus.set_status(&me, "idle")?;
+                }
+                if options.stop.load(Ordering::SeqCst) {
+                    log(&format!(
+                        "stopped during a turn; {} process group killed",
+                        agent.harness.id
+                    ));
+                    return Ok(Round::Stop);
+                }
+                let normalized = (adapter.parse)(&process_result.output, process_result.code);
+                let session_mismatch = resumed_unexpected_session(
+                    pinned_session_id.as_deref(),
+                    normalized.session_id.as_deref(),
+                );
+                session.turns += 1;
+                session.input_tokens += normalized.usage.input_tokens;
+                session.output_tokens += normalized.usage.output_tokens;
+                session.total_tokens += normalized.usage.total_tokens;
+                session.cost_usd += normalized.usage.cost_usd;
+                session.latency_ms += process_result.duration_ms as f64;
+                if let Some(pinned) = &pinned_session_id {
+                    session.session_id = Some(pinned.clone());
+                } else if let Some(id) = normalized.session_id.clone() {
+                    session.session_id = Some(id);
+                }
+                fs::write(
+                    &session_path,
+                    serde_json::to_string_pretty(&session).unwrap(),
+                )?;
+
+                let mut report_ids: std::collections::BTreeSet<i64> = task_ids;
+                report_ids.extend(tasks.iter().map(|t| t.id));
+                let failed = process_result.code != 0
+                    || process_result.timed_out
+                    || normalized.malformed
+                    || session_mismatch;
+                if failed {
+                    consecutive_failures += 1;
+                    let error = if process_result.timed_out {
+                        format!("harness timed out after {} ms", process_result.duration_ms)
+                    } else if session_mismatch {
+                        format!(
+                            "harness resumed unexpected session {}; expected {}",
+                            normalized.session_id.as_deref().unwrap_or(""),
+                            pinned_session_id.as_deref().unwrap_or("")
+                        )
+                    } else if normalized.malformed {
+                        "harness returned malformed output".to_string()
+                    } else {
+                        format!("harness exited {}", process_result.code)
+                    };
+                    // Each task this turn still holds is failed back (retry or escalate).
+                    let mut failed_back: std::collections::BTreeSet<i64> = Default::default();
+                    for id in &report_ids {
+                        match bus.get_task(*id) {
+                            Ok(task) => {
+                                if task.task.assignee.as_deref() == Some(me.agent_id.as_str())
+                                    && task.task.state == "claimed"
+                                {
+                                    match bus.fail_task(&me, *id, &format!("supervisor: {error}")) {
+                                        Ok(_) => {
+                                            failed_back.insert(*id);
+                                        }
+                                        Err(fail_error) => log(&format!(
+                                            "failure report on task #{id} rejected: {fail_error}"
+                                        )),
                                     }
                                 }
-                            } else if current.task.state == "claimed"
-                                && current.task.assignee.as_deref() == Some(me.agent_id.as_str())
-                            {
-                                tasks.push(current.task);
                             }
-                        }
-                        Err(error) => log(&format!("claim of task #{id} failed: {error}")),
-                    }
-                }
-                if messages.is_empty() {
-                    match bus.claim_task(&me, None) {
-                        Ok(task) => tasks.push(task),
-                        Err(error) => {
-                            if error.code.as_str() != "not_found" {
-                                return Err(error);
-                            }
+                            Err(fail_error) => log(&format!(
+                                "failure report on task #{id} rejected: {fail_error}"
+                            )),
                         }
                     }
+                    // Mail about tasks that were failed back is carried on by their
+                    // retry messages; anything else stays unread for the next turn.
+                    if messages
+                        .iter()
+                        .all(|m| m.task_id.is_some_and(|id| failed_back.contains(&id)))
+                    {
+                        mark_read(&bus)?;
+                    }
+                    if consecutive_failures >= MAX_FAILED_TURNS {
+                        pause_after_failures(&bus, &me, consecutive_failures, &error, &log)?;
+                        consecutive_failures = 0;
+                        return Ok(Round::Next);
+                    }
+                    let delay = backoff(consecutive_failures);
+                    log(&format!("{error}; backing off {}s", delay / 1000));
+                    sleep_interruptible(delay, &options.stop);
+                    return Ok(Round::Next);
                 }
-            } else if messages.is_empty() {
-                tasks.extend(
-                    bus.list_tasks(ListTasksInput {
-                        states: Some(vec!["open".to_string(), "changes_requested".to_string()]),
-                        limit: Some(50),
-                        ..Default::default()
-                    })?
-                    .into_iter()
-                    .filter(|task| claimable_by(task, &me.agent_id, &role)),
-                );
-            }
-            if messages.is_empty() && tasks.is_empty() {
-                continue;
-            }
 
-            let context = AdapterContext {
-                agent: &agent,
-                qagent_bin: qagent_bin.clone(),
-                prompt: with_role_prompt(
-                    crate::aos::crew::role_prompt(&config_path, &agent.agent.id),
-                    build_brief(&agent, &messages, &tasks, managed),
-                ),
-                session_id: session.session_id.clone(),
-                pinned_session_id: pinned_session_id.clone(),
-                workdir: workdir.display().to_string(),
-                mcp_server_path: "mcp".to_string(),
-                fake_harness_path: options
-                    .fake_harness_path
-                    .clone()
-                    .unwrap_or_else(|| "fake-harness".to_string()),
-                bus_environment: HashMap::from([
-                    ("QAGENT_AGENT_ID".to_string(), me.agent_id.clone()),
-                    (
-                        "QAGENT_BUS_DB".to_string(),
-                        bus.db_path.display().to_string(),
-                    ),
-                    ("QAGENT_BLOCK_SEC".to_string(), block_sec.to_string()),
-                    ("AGENT_BUS_BLOCK_SEC".to_string(), block_sec.to_string()),
-                ]),
-                mcp_command: Some(mcp_command.clone()),
-            };
-            if let Some(prepare) = adapter.prepare {
-                prepare(&context)?;
-            }
-            let invocation = (adapter.build)(&context);
-            bus.set_status(&me, "working")?;
-            let process_result = run_harness_process(
-                &invocation.command,
-                &invocation.args,
-                &sanitized_environment(&agent, &invocation.environment),
-                &workdir.display().to_string(),
-                invocation.timeout_ms,
-                &child_pid,
-            );
-            *child_pid.lock().unwrap() = None;
-            if bus
-                .get_agent(&me.agent_id)?
-                .map(|a| a.stored_status == "working")
-                .unwrap_or(false)
-            {
-                bus.set_status(&me, "idle")?;
-            }
-            if options.stop.load(Ordering::SeqCst) {
-                log(&format!(
-                    "stopped during a turn; {} process group killed",
-                    agent.harness.id
-                ));
-                break;
-            }
-            let normalized = (adapter.parse)(&process_result.output, process_result.code);
-            let session_mismatch = resumed_unexpected_session(
-                pinned_session_id.as_deref(),
-                normalized.session_id.as_deref(),
-            );
-            session.turns += 1;
-            session.input_tokens += normalized.usage.input_tokens;
-            session.output_tokens += normalized.usage.output_tokens;
-            session.total_tokens += normalized.usage.total_tokens;
-            session.cost_usd += normalized.usage.cost_usd;
-            session.latency_ms += process_result.duration_ms as f64;
-            if let Some(pinned) = &pinned_session_id {
-                session.session_id = Some(pinned.clone());
-            } else if let Some(id) = normalized.session_id.clone() {
-                session.session_id = Some(id);
-            }
-            fs::write(
-                &session_path,
-                serde_json::to_string_pretty(&session).unwrap(),
-            )?;
-
-            let mut report_ids: std::collections::BTreeSet<i64> = task_ids;
-            report_ids.extend(tasks.iter().map(|t| t.id));
-            let failed = process_result.code != 0
-                || process_result.timed_out
-                || normalized.malformed
-                || session_mismatch;
-            if failed {
-                consecutive_failures += 1;
-                let error = if process_result.timed_out {
-                    format!("harness timed out after {} ms", process_result.duration_ms)
-                } else if session_mismatch {
-                    format!(
-                        "harness resumed unexpected session {}; expected {}",
-                        normalized.session_id.as_deref().unwrap_or(""),
-                        pinned_session_id.as_deref().unwrap_or("")
-                    )
-                } else if normalized.malformed {
-                    "harness returned malformed output".to_string()
-                } else {
-                    format!("harness exited {}", process_result.code)
-                };
-                // Each task this turn still holds is failed back (retry or escalate).
-                for id in &report_ids {
-                    match bus.get_task(*id) {
-                        Ok(task) => {
-                            if task.task.assignee.as_deref() == Some(me.agent_id.as_str())
-                                && task.task.state == "claimed"
-                            {
-                                if let Err(fail_error) =
-                                    bus.fail_task(&me, *id, &format!("supervisor: {error}"))
+                consecutive_failures = 0;
+                mark_read(&bus)?;
+                if invocation.auto_report {
+                    let structured = normalized.structured.unwrap_or(serde_json::json!({}));
+                    for id in &report_ids {
+                        match bus.get_task(*id) {
+                            Ok(task) => {
+                                // A CLI that submitted through its own bus tools leaves nothing to report.
+                                if task.task.assignee.as_deref() != Some(me.agent_id.as_str())
+                                    || task.task.state != "claimed"
                                 {
-                                    log(&format!(
-                                        "failure report on task #{id} rejected: {fail_error}"
-                                    ));
+                                    continue;
+                                }
+                                if let Err(error) = bus.submit_task(&me, *id, SubmitInput {
+                                    summary: normalized.text.chars().take(20_000).collect(),
+                                    details: Some(
+                                        "auto-submitted by the supervisor for a harness without bus tool calls".to_string(),
+                                    ),
+                                    changed_files: structured_array(&structured["changedFiles"])
+                                        .iter()
+                                        .map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))
+                                        .collect(),
+                                    artifacts: Some(serde_json::Value::Array(structured_array(&structured["artifacts"]))),
+                                    validation: Some(serde_json::Value::Array(structured_array(&structured["validation"]))),
+                                }) {
+                                    log(&format!("auto-submit failed for task #{id}: {error}"));
                                 }
                             }
+                            Err(error) => log(&format!("auto-submit failed for task #{id}: {error}")),
                         }
-                        Err(fail_error) => log(&format!(
-                            "failure report on task #{id} rejected: {fail_error}"
-                        )),
                     }
                 }
-                let delay = retry_delay_ms(consecutive_failures);
-                log(&format!("{error}; backing off {}s", delay / 1000));
-                sleep_interruptible(delay, &options.stop);
-                continue;
-            }
-
-            consecutive_failures = 0;
-            if invocation.auto_report {
-                let structured = normalized.structured.unwrap_or(serde_json::json!({}));
-                for id in &report_ids {
-                    match bus.get_task(*id) {
-                        Ok(task) => {
-                            // A CLI that submitted through its own bus tools leaves nothing to report.
-                            if task.task.assignee.as_deref() != Some(me.agent_id.as_str())
-                                || task.task.state != "claimed"
-                            {
-                                continue;
-                            }
-                            if let Err(error) = bus.submit_task(&me, *id, SubmitInput {
-                                summary: normalized.text.chars().take(20_000).collect(),
-                                details: Some(
-                                    "auto-submitted by the supervisor for a harness without bus tool calls".to_string(),
-                                ),
-                                changed_files: structured_array(&structured["changedFiles"])
-                                    .iter()
-                                    .map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))
-                                    .collect(),
-                                artifacts: Some(serde_json::Value::Array(structured_array(&structured["artifacts"]))),
-                                validation: Some(serde_json::Value::Array(structured_array(&structured["validation"]))),
-                            }) {
-                                log(&format!("auto-submit failed for task #{id}: {error}"));
-                            }
-                        }
-                        Err(error) => log(&format!("auto-submit failed for task #{id}: {error}")),
+                log(&format!(
+                    "turn complete in {} ms",
+                    process_result.duration_ms
+                ));
+                Ok(Round::Next)
+            }));
+            match outcome {
+                Ok(Ok(Round::Next)) => error_streak = 0,
+                Ok(Ok(Round::Stop)) => break,
+                Ok(Err(error)) => {
+                    error_streak += 1;
+                    let delay = backoff(error_streak);
+                    log(&format!("round failed: {error}; retrying in {}s", delay / 1000));
+                    sleep_interruptible(delay, &options.stop);
+                }
+                Err(panic) => {
+                    error_streak += 1;
+                    let delay = backoff(error_streak);
+                    let what = panic
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "unknown panic".into());
+                    log(&format!("round panicked: {what}; reopening the bus, retrying in {}s", delay / 1000));
+                    sleep_interruptible(delay, &options.stop);
+                    // A panic can leave a transaction half open on this connection.
+                    match Bus::open(Some(&options.db_path)) {
+                        Ok(fresh) => bus = fresh,
+                        Err(error) => log(&format!("could not reopen the bus: {error}")),
                     }
                 }
             }
-            log(&format!(
-                "turn complete in {} ms",
-                process_result.duration_ms
-            ));
         }
         Ok(())
     })();

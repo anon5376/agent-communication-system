@@ -976,6 +976,7 @@ fn supervise_command(ctx: &mut Context) -> Result<i32> {
         config_path: config_flag,
         stop,
         wait_ms: None,
+        retry_base_ms: None,
         fake_harness_path: None,
         qagent_bin: None,
         log: None,

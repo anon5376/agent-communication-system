@@ -703,7 +703,7 @@ pub fn running_pid(paths: &Paths, agent: &str) -> Option<i32> {
         .trim()
         .parse()
         .ok()?;
-    alive(pid).then_some(pid)
+    crate::supervisor::supervisor_alive(pid, agent).then_some(pid)
 }
 
 pub fn crew_workdir(paths: &Paths) -> Option<PathBuf> {
