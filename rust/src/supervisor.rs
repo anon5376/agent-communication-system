@@ -60,6 +60,70 @@ pub fn sanitized_environment(
     env
 }
 
+/// Credentials an unattended agent has no business holding: code hosting, package
+/// registries, cloud accounts, and the SSH agent (which would let it push or log in
+/// anywhere the operator can). The agent's own model provider keys are not here.
+pub const GUARDED_SECRETS: &[&str] = &[
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITLAB_TOKEN",
+    "GL_TOKEN",
+    "BITBUCKET_TOKEN",
+    "NPM_TOKEN",
+    "NODE_AUTH_TOKEN",
+    "CARGO_REGISTRY_TOKEN",
+    "PYPI_TOKEN",
+    "TWINE_PASSWORD",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AZURE_CLIENT_SECRET",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "CLOUDFLARE_API_TOKEN",
+    "DIGITALOCEAN_ACCESS_TOKEN",
+    "HEROKU_API_KEY",
+    "VERCEL_TOKEN",
+    "NETLIFY_AUTH_TOKEN",
+    "FLY_API_TOKEN",
+    "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    "OP_SERVICE_ACCOUNT_TOKEN",
+    "VAULT_TOKEN",
+    "SLACK_BOT_TOKEN",
+    "DOCKER_AUTH_CONFIG",
+    "SSH_AUTH_SOCK",
+];
+
+/// Whether this agent runs with the guard (the default). `"guard": false` in the
+/// agent's harnessOptions turns it off.
+pub fn guarded(agent: &ResolvedAgent) -> bool {
+    agent.agent.harness_options["guard"].as_bool() != Some(false)
+}
+
+/// The guard for an unattended agent's environment: drop the credentials in
+/// GUARDED_SECRETS, make every `git push` fail (an empty pushInsteadOf rewrites
+/// every push URL to a scheme git cannot reach; fetch and pull still work), and
+/// never let git wait on a password prompt. This is a guardrail against mistakes
+/// and injected instructions, not a sandbox: a determined agent with a shell can
+/// still read files the operator can.
+pub fn guard_environment(env: &mut HashMap<String, String>) {
+    for key in GUARDED_SECRETS {
+        env.remove(*key);
+    }
+    env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+    let n: usize = env
+        .get("GIT_CONFIG_COUNT")
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+    env.insert(
+        format!("GIT_CONFIG_KEY_{n}"),
+        "url.aos-blocked-git-push-ask-the-operator:///.pushInsteadOf".into(),
+    );
+    env.insert(format!("GIT_CONFIG_VALUE_{n}"), String::new());
+    env.insert("GIT_CONFIG_COUNT".into(), (n + 1).to_string());
+}
+
 pub fn retry_delay_ms(consecutive_failures: u32) -> u64 {
     60_000.min(2_000 * 2u64.saturating_pow(consecutive_failures.saturating_sub(1)))
 }
@@ -1001,10 +1065,14 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                 let invocation = (adapter.build)(&context);
                 bus.set_status(&me, "working")?;
                 let keepalive = keep_claims_alive(&bus.db_path, &me);
+                let mut environment = sanitized_environment(&agent, &invocation.environment);
+                if guarded(&agent) {
+                    guard_environment(&mut environment);
+                }
                 let process_result = run_harness_process(
                     &invocation.command,
                     &invocation.args,
-                    &sanitized_environment(&agent, &invocation.environment),
+                    &environment,
                     &workdir.display().to_string(),
                     invocation.timeout_ms,
                     &child_pid,

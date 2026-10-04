@@ -488,6 +488,11 @@ fn claude_build(context: &AdapterContext) -> HarnessInvocation {
         "--allowedTools".to_string(),
         "mcp__qagent,Bash,Read,Write,Edit,Glob,Grep".to_string(),
     ];
+    if crate::supervisor::guarded(context.agent) {
+        // Refused before they run; the supervisor's environment guard backs these up.
+        args.push("--disallowedTools".to_string());
+        args.push("Bash(git push:*),Bash(sudo:*)".to_string());
+    }
     if let Some(session) = &context.session_id {
         args.push("--resume".to_string());
         args.push(session.clone());

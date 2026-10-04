@@ -746,3 +746,83 @@ fn supervisor_alive_checks_the_command_line() {
     other.wait().unwrap();
     assert!(!supervisor_alive(pid, "w1"));
 }
+
+#[test]
+fn guard_drops_credentials_and_blocks_git_push_only() {
+    let mut env: HashMap<String, String> = std::env::vars().collect();
+    env.insert("GITHUB_TOKEN".into(), "ghp_x".into());
+    env.insert("SSH_AUTH_SOCK".into(), "/tmp/agent.sock".into());
+    env.insert("ANTHROPIC_API_KEY".into(), "kept".into());
+    env.insert("GIT_CONFIG_COUNT".into(), "1".into());
+    env.insert("GIT_CONFIG_KEY_0".into(), "user.name".into());
+    env.insert("GIT_CONFIG_VALUE_0".into(), "Agent".into());
+    guard_environment(&mut env);
+    assert!(!env.contains_key("GITHUB_TOKEN"));
+    assert!(!env.contains_key("SSH_AUTH_SOCK"));
+    assert_eq!(env.get("ANTHROPIC_API_KEY").map(String::as_str), Some("kept"));
+    assert_eq!(env.get("GIT_CONFIG_COUNT").map(String::as_str), Some("2"));
+    assert_eq!(env.get("GIT_CONFIG_KEY_0").map(String::as_str), Some("user.name"));
+    assert_eq!(env.get("GIT_TERMINAL_PROMPT").map(String::as_str), Some("0"));
+
+    // A real repository: push is refused, fetch still works.
+    let dir = fresh_dir("guard-git");
+    let git = |args: &[&str], cwd: &std::path::Path, env: Option<&HashMap<String, String>>| {
+        let mut c = std::process::Command::new("git");
+        c.args(args).current_dir(cwd);
+        if let Some(env) = env {
+            c.env_clear().envs(env);
+        }
+        c.output().unwrap()
+    };
+    assert!(git(&["init", "-q", "--bare", "remote.git"], &dir, None).status.success());
+    assert!(git(&["clone", "-q", "remote.git", "work"], &dir, None).status.success());
+    let work = dir.join("work");
+    assert!(git(
+        &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "x"],
+        &work,
+        None
+    )
+    .status
+    .success());
+    let pushed = git(&["push", "-q", "origin", "HEAD"], &work, Some(&env));
+    assert!(!pushed.status.success(), "push must be refused");
+    assert!(String::from_utf8_lossy(&pushed.stderr).contains("aos-blocked-git-push"));
+    assert!(git(&["fetch", "-q", "origin"], &work, Some(&env)).status.success());
+    // Unguarded, the same push goes through.
+    assert!(git(&["push", "-q", "origin", "HEAD"], &work, None).status.success());
+}
+
+#[test]
+fn guard_is_on_unless_the_agent_turns_it_off() {
+    let dir = fresh_dir("guard-flag");
+    let config_path = write_config(&dir, &[("c1", "claude-model")], "");
+    let mut raw: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    let config = load_config(&config_path).unwrap();
+    let agent = fixture(&config, "c1");
+    assert!(guarded(&agent));
+    let context = acs::adapters::AdapterContext {
+        agent: &agent,
+        qagent_bin: "qagent".into(),
+        prompt: "p".into(),
+        session_id: None,
+        pinned_session_id: None,
+        workdir: dir.display().to_string(),
+        mcp_server_path: "mcp".into(),
+        fake_harness_path: "fake-harness".into(),
+        bus_environment: HashMap::new(),
+        mcp_command: None,
+    };
+    let claude = acs::adapters::get_harness_adapter("claude").unwrap();
+    let args = (claude.build)(&context).args;
+    let i = args.iter().position(|a| a == "--disallowedTools").unwrap();
+    assert_eq!(args[i + 1], "Bash(git push:*),Bash(sudo:*)");
+
+    raw["agents"]["c1"]["harnessOptions"] = serde_json::json!({ "guard": false });
+    fs::write(&config_path, raw.to_string()).unwrap();
+    let config = load_config(&config_path).unwrap();
+    let agent = fixture(&config, "c1");
+    assert!(!guarded(&agent));
+    let context = acs::adapters::AdapterContext { agent: &agent, ..context };
+    assert!(!(claude.build)(&context).args.iter().any(|a| a == "--disallowedTools"));
+}
