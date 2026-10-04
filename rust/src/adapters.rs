@@ -2,7 +2,9 @@
 //! how to build the CLI invocation for one vendor tool (plus a generic
 //! `command` escape hatch) and how to normalize its stdout into a result.
 //! probeHarness/discoverHarnessModels are not ported — nothing in supervise
-//! calls them.
+//! calls them. Since then the Rust side has moved ahead: harness-level
+//! `options`, the `{mcpConfig}`/`{mcpJson}` placeholders, per-agent MCP wiring
+//! for Gemini, Kimi and OpenCode, and `autoApprove: false`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -196,8 +198,60 @@ fn mcp_launch(
     }
 }
 
+/// An option for this agent's harness: the agent's harnessOptions first, then
+/// the harness's own `options` (shared by every agent on it).
+fn option<'a>(context: &'a AdapterContext, key: &str) -> &'a serde_json::Value {
+    let own = &context.agent.agent.harness_options[key];
+    if own.is_null() {
+        &context.agent.harness.options[key]
+    } else {
+        own
+    }
+}
+
+/// Whether the CLI may run tools without asking. Unset keeps each adapter's
+/// unattended default; `autoApprove: false` drops the approval-skipping flag.
+fn auto_approve(context: &AdapterContext) -> bool {
+    option(context, "autoApprove").as_bool().unwrap_or(true)
+}
+
+/// The bus MCP server in the common `{"mcpServers": {...}}` shape most CLIs read.
+fn mcp_servers_json(context: &AdapterContext) -> serde_json::Value {
+    let (command, args, env) = mcp_launch(context, &common_environment(context));
+    serde_json::json!({
+        "mcpServers": { "qagent": { "command": command, "args": args, "env": env } },
+    })
+}
+
+/// Per-agent file under `<bus home>/mcp/`, so no agent writes into the project
+/// folder and two agents sharing a folder never swap identities.
+fn agent_file(context: &AdapterContext, suffix: &str) -> PathBuf {
+    let db = context
+        .bus_environment
+        .get("QAGENT_BUS_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(&context.workdir)
+                .join(".agent-bus")
+                .join("bus.db")
+        });
+    crate::db::home_for(&db)
+        .join("mcp")
+        .join(format!("{}{suffix}", context.agent.agent.id))
+}
+
+fn write_agent_file(path: &PathBuf, value: &serde_json::Value) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(path, serde_json::to_string_pretty(value).unwrap())?;
+    Ok(())
+}
+
 fn command_template_value(value: &str, context: &AdapterContext) -> String {
-    let replacements: [(&str, &str); 10] = [
+    let mcp_json = mcp_servers_json(context).to_string();
+    let mcp_file = agent_file(context, ".mcp.json").display().to_string();
+    let replacements: [(&str, &str); 13] = [
         ("{prompt}", context.prompt.as_str()),
         (
             "{model}",
@@ -216,6 +270,9 @@ fn command_template_value(value: &str, context: &AdapterContext) -> String {
         ("{session}", context.session_id.as_deref().unwrap_or("")),
         ("{workdir}", context.workdir.as_str()),
         ("{mcpServer}", context.mcp_server_path.as_str()),
+        ("{mcpConfig}", mcp_file.as_str()),
+        ("{mcpJson}", mcp_json.as_str()),
+        ("{qagent}", context.qagent_bin.as_str()),
     ];
     let mut output = value.to_string();
     for (token, replacement) in replacements {
@@ -412,12 +469,26 @@ fn hermes_blocks(clean: &str) -> Vec<&str> {
 
 // ------------------------------------------------------------------ adapters
 
+/// Writes the `{mcpConfig}` file when the command line or env asks for it.
+fn command_prepare(context: &AdapterContext) -> Result<()> {
+    let mentions = |value: &serde_json::Value| value.to_string().contains("{mcpConfig}");
+    if ["args", "resumeArgs", "env"]
+        .iter()
+        .any(|key| mentions(option(context, key)))
+    {
+        write_agent_file(
+            &agent_file(context, ".mcp.json"),
+            &mcp_servers_json(context),
+        )?;
+    }
+    Ok(())
+}
+
 fn command_build(context: &AdapterContext) -> HarnessInvocation {
-    let options = &context.agent.agent.harness_options;
-    let configured = if context.session_id.is_some() && options["resumeArgs"].is_array() {
-        &options["resumeArgs"]
+    let configured = if context.session_id.is_some() && option(context, "resumeArgs").is_array() {
+        option(context, "resumeArgs")
     } else {
-        &options["args"]
+        option(context, "args")
     };
     let raw_args: Vec<String> = configured
         .as_array()
@@ -439,7 +510,7 @@ fn command_build(context: &AdapterContext) -> HarnessInvocation {
         .map(|(item, _)| item)
         .collect();
     let mut environment = common_environment(context);
-    if let Some(raw_env) = options["env"].as_object() {
+    if let Some(raw_env) = option(context, "env").as_object() {
         for (key, value) in raw_env {
             let text = value
                 .as_str()
@@ -449,14 +520,14 @@ fn command_build(context: &AdapterContext) -> HarnessInvocation {
         }
     }
     let timeout_ms = {
-        let n = as_number(&options["timeoutMs"]);
+        let n = as_number(option(context, "timeoutMs"));
         let n = if n == 0.0 { 60.0 * 60_000.0 } else { n };
         n.clamp(1_000.0, 24.0 * 60.0 * 60_000.0) as u64
     };
-    let auto_report = if options["autoReport"].is_null() {
+    let auto_report = if option(context, "autoReport").is_null() {
         !context.agent.harness.features.mcp
     } else {
-        options["autoReport"].as_bool().unwrap_or(false)
+        option(context, "autoReport").as_bool().unwrap_or(false)
     };
     HarnessInvocation {
         command: context.agent.harness.command.clone(),
@@ -695,12 +766,15 @@ fn kimi_build(context: &AdapterContext) -> HarnessInvocation {
         .as_ref()
         .map(|s| vec!["--session".to_string(), s.clone()])
         .unwrap_or_default();
+    // --print is Kimi's non-interactive mode; it implies --afk (tools run unasked).
     args.extend([
+        "--print".to_string(),
         "--prompt".to_string(),
         context.prompt.clone(),
-        "--auto".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
+        "--mcp-config".to_string(),
+        mcp_servers_json(context).to_string(),
     ]);
     if let Some(model) = &context.agent.model.exact_model {
         args.push("-m".to_string());
@@ -729,16 +803,33 @@ fn kimi_parse(stdout: &str, exit_code: i32) -> NormalizedHarnessResult {
     result
 }
 
+/// Gemini merges the settings file named by GEMINI_CLI_SYSTEM_SETTINGS_PATH over
+/// the user's, so a per-agent file hands each agent the bus as itself.
+fn gemini_prepare(context: &AdapterContext) -> Result<()> {
+    write_agent_file(
+        &agent_file(context, ".gemini.json"),
+        &mcp_servers_json(context),
+    )
+}
+
 fn gemini_build(context: &AdapterContext) -> HarnessInvocation {
-    let env = common_environment(context);
+    let mut env = common_environment(context);
+    env.insert(
+        "GEMINI_CLI_SYSTEM_SETTINGS_PATH".to_string(),
+        agent_file(context, ".gemini.json").display().to_string(),
+    );
     let mut args = vec![
         "-p".to_string(),
         context.prompt.clone(),
         "--output-format".to_string(),
         "json".to_string(),
-        "--approval-mode".to_string(),
-        "yolo".to_string(),
     ];
+    if auto_approve(context) {
+        // An untrusted folder forces approval back to default; the operator trusted it in aos.
+        env.insert("GEMINI_CLI_TRUST_WORKSPACE".to_string(), "true".to_string());
+        args.push("--approval-mode".to_string());
+        args.push("yolo".to_string());
+    }
     if let Some(session) = &context.session_id {
         args.push("--resume".to_string());
         args.push(session.clone());
@@ -846,8 +937,10 @@ fn grok_build(context: &AdapterContext) -> HarnessInvocation {
         context.prompt.clone(),
         "--output-format".to_string(),
         "json".to_string(),
-        "--always-approve".to_string(),
     ];
+    if auto_approve(context) {
+        args.push("--always-approve".to_string());
+    }
     if let Some(session) = &context.session_id {
         args.push("-r".to_string());
         args.push(session.clone());
@@ -896,40 +989,34 @@ fn grok_parse(stdout: &str, exit_code: i32) -> NormalizedHarnessResult {
     default_result(stdout, exit_code)
 }
 
-fn opencode_prepare(context: &AdapterContext) -> Result<()> {
-    let cfg_path = PathBuf::from(&context.workdir).join("opencode.json");
-    let mut cfg: serde_json::Value = fs::read_to_string(&cfg_path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    if !cfg.is_object() {
-        cfg = serde_json::json!({});
-    }
+/// OpenCode's inline config (OPENCODE_CONFIG_CONTENT) adds the bus server for
+/// this one run; the project's opencode.json is left alone.
+fn opencode_config(context: &AdapterContext) -> serde_json::Value {
     let (command, mut args, env) = mcp_launch(context, &common_environment(context));
     let mut launch_args = vec![command];
     launch_args.append(&mut args);
-    if !cfg["mcp"].is_object() {
-        cfg["mcp"] = serde_json::json!({});
-    }
-    cfg["mcp"]["qagent"] = serde_json::json!({
-        "type": "local",
-        "command": launch_args,
-        "environment": env,
-        "enabled": true,
-    });
-    cfg["$schema"] = serde_json::json!("https://opencode.ai/config.json");
-    fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap())?;
-    Ok(())
+    serde_json::json!({
+        "$schema": "https://opencode.ai/config.json",
+        "mcp": { "qagent": {
+            "type": "local",
+            "command": launch_args,
+            "environment": env,
+            "enabled": true,
+        } },
+    })
 }
 
 fn opencode_build(context: &AdapterContext) -> HarnessInvocation {
-    let env = common_environment(context);
-    let mut args = vec![
-        "run".to_string(),
-        "--auto".to_string(),
-        "--format".to_string(),
-        "json".to_string(),
-    ];
+    let mut env = common_environment(context);
+    env.insert(
+        "OPENCODE_CONFIG_CONTENT".to_string(),
+        opencode_config(context).to_string(),
+    );
+    let mut args = vec!["run".to_string()];
+    if auto_approve(context) {
+        args.push("--auto".to_string());
+    }
+    args.extend(["--format".to_string(), "json".to_string()]);
     if let Some(model) = &context.agent.model.exact_model {
         args.push("-m".to_string());
         args.push(model.clone());
@@ -1001,9 +1088,11 @@ fn hermes_build(context: &AdapterContext) -> HarnessInvocation {
         "-q".to_string(),
         context.prompt.clone(),
         "-Q".to_string(),
-        "--yolo".to_string(),
         "--pass-session-id".to_string(),
     ];
+    if auto_approve(context) {
+        args.push("--yolo".to_string());
+    }
     if let Some(session) = &context.session_id {
         args.push("--resume".to_string());
         args.push(session.clone());
@@ -1110,10 +1199,6 @@ fn fake_parse(stdout: &str, exit_code: i32) -> NormalizedHarnessResult {
     }
 }
 
-fn none_prepare(_context: &AdapterContext) -> Result<()> {
-    Ok(())
-}
-
 static ADAPTERS: &[HarnessAdapter] = &[
     HarnessAdapter {
         id: "claude",
@@ -1135,7 +1220,7 @@ static ADAPTERS: &[HarnessAdapter] = &[
     },
     HarnessAdapter {
         id: "gemini",
-        prepare: None,
+        prepare: Some(gemini_prepare),
         build: gemini_build,
         parse: default_result,
     },
@@ -1153,7 +1238,7 @@ static ADAPTERS: &[HarnessAdapter] = &[
     },
     HarnessAdapter {
         id: "opencode",
-        prepare: Some(opencode_prepare),
+        prepare: None,
         build: opencode_build,
         parse: opencode_parse,
     },
@@ -1171,7 +1256,7 @@ static ADAPTERS: &[HarnessAdapter] = &[
     },
     HarnessAdapter {
         id: "command",
-        prepare: Some(none_prepare),
+        prepare: Some(command_prepare),
         build: command_build,
         parse: generic_command_result,
     },

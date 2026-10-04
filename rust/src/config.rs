@@ -55,6 +55,9 @@ pub struct HarnessDef {
     pub model_discovery: Option<ModelDiscovery>,
     #[serde(default)]
     pub enabled: bool,
+    /// Defaults for every agent on this harness; an agent's own harnessOptions win.
+    #[serde(default)]
+    pub options: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
