@@ -4,32 +4,32 @@
 
 ## Platform
 
-cli (with an optional localhost web page and, on the `rust-port` branch, the `aos` terminal console)
+web
 
 ## Users
 
-A developer who already uses one or more coding-agent CLIs (Claude Code, Codex, Cursor and others) on their own machine and wants several of them to work on one project without relaying every brief and result by hand. Job: give agents scoped tasks, let them claim, hand off and submit work, have someone other than the author review it, and see what is stuck.
+Primary user is a human operator of a local multi-agent coding setup. Other people may install the same product. Job: configure providers and a roster from scratch, then run work from the dashboard, CLI, or chat (`@qagent`).
 
 ## Product Purpose
 
-Run different coding agents together without being their message bus. Success is: an agent dies mid-task and the work is recovered rather than lost; every task has one owner at a time; no agent accepts its own work; and the operator can tell from the bus alone what is waiting on them, what is running and why something stalled.
+Qagent is a local-first control plane for heterogeneous autonomous agents. Success is: a fresh install has no demo roster; the operator can autodetect installed CLIs, name agents, set who a manager may create, and delegate exact model+provider targets from chat.
 
 ## Positioning
 
-ACS is the coordination layer under standalone agent CLIs, not an agent framework. It does not write prompts or choose models. One SQLite file holds identities, mail, tasks, claims, path leases, reviews and the event log; the CLI, the MCP server, the supervisor, the dashboard and `aos` are interfaces over that same file. No daemon, no cloud, no broker.
+Independent model CLIs (Anthropic, OpenAI, Cursor, xAI, Moonshot, and others) stay behind one durable local broker. Cursor is one provider among equals. The browser dashboard, CLI, and operator MCP are interfaces over the same SQLite state.
 
 ## Operating Context
 
-Desk use on the operator's machine, per user, per machine. Commands on `main`: `qagent init`, `qagent status`, `qagent task …`, `qagent trace <task>`, `qagent supervise <agent> [dir]`, `qagent doctor`, `qagent dashboard` (`agent-bus` is an alias). The dashboard listens on `127.0.0.1:11511`, needs a single-use sign-in link from `qagent dashboard link`, reads the bus, and can only send a message as the operator. Work is started from the CLI or from an MCP client attached as operator (`qagent mcp-config --operator`), which can create and review tasks (`bus_task_create`, `bus_task_review`); there is no chat command or delegate tool. Hierarchy (who a manager may create) is set in config, not in a UI. `aos` (from the `aos-v0.1.0` release, built from `rust-port`) is the guided front door: it sets up a crew from detected CLIs, takes goals as sentences, and passes every `qagent` command through.
+Desk use on the operator's machine. Commands: `qagent start`, `qagent open`, `qagent status` (`agent-bus` is an alias). Dashboard requires a one-time CLI ticket. Default listen address is `127.0.0.1:11511`. Attach operator MCP with `qagent mcp-config` so a chat model can call `qagent_delegate`.
 
 ## Brand Commitments
 
-Names: ACS for the project, `qagent` for the TypeScript CLI, `aos` for the terminal console. The dashboard follows `DESIGN.md` (flat, one accent, no status colour). `aos` follows the Accelerate / Acceleration Chamber design record in the AOS repository.
+Name: Qagent. Mark: "Q". Visual language follows Cursor-style dashboard chrome (dark panels, rounded rows, blue accent) without Cursor trademarks. Operators can change the dashboard colors in Settings.
 
 ## Product Principles
 
-1. Start empty. No demo agents in a real setup; samples live only in `aos demo` and in throwaway buses.
-2. Detect installed CLIs and say plainly whether each is installed, signed in and able to join a crew; never infer sign-in, quota or model access from a binary on PATH.
-3. Claims, reviews and permissions are enforced in the bus core, not by the interface that happens to be used.
-4. State on screen must match the bus. Unknown is shown as unknown (for example cost when a CLI reports none).
-5. Guardrails are not a sandbox. Say what the bus protects against (accidental impersonation, double claims, self-review) and what it does not (a hostile process running as the same OS user).
+1. Start empty. No fake agents and no stock opus/gpt roster in production config.
+2. Autodetect installed CLIs; if a CLI is missing, show a login command and allow a manual binary path.
+3. The operator configures hierarchy; managers get an explicit spawn list via drag-and-drop.
+4. State on screen must match the broker contract.
+5. Unrelated local processes on other ports are not this product.
