@@ -665,31 +665,59 @@ pub const NO_WORKTREES: &str = "worktree isolation is not available in this buil
      nothing was claimed or started. Use the TypeScript qagent for worktrees, or set \
      constraints.isolation to \"path-locks\" in the config";
 
-/// One pid file per agent so two supervisors never drive the same CLI session.
+/// One supervisor per agent, so two never drive the same CLI session.
+///
+/// Ownership is an exclusive `flock` on `<agent>.lock`, held for the supervisor's
+/// life: the kernel grants it to exactly one process and drops it when that process
+/// dies, so simultaneous starters cannot both win and a crash leaves nothing stale.
+/// The lock file is never deleted (deleting it would let a late opener lock an
+/// orphaned inode). `<agent>.pid` is still written for aos, doctor and the
+/// TypeScript supervisor, which reads it: a live pid there that is not ours is a
+/// supervisor without the lock (TypeScript, or an older build), and we back off.
 fn acquire_lock(dir: &Path, agent_id: &str) -> Result<impl FnOnce()> {
+    use std::os::unix::io::AsRawFd;
     fs::create_dir_all(dir)?;
     let path = dir.join(format!("{agent_id}.pid"));
-    let holder: i32 = fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0);
-    let my_pid = std::process::id() as i32;
-    if holder != 0 && holder != my_pid {
-        if supervisor_alive(holder, agent_id) {
-            return Err(BusError::conflict(format!(
-                "a supervisor for {agent_id} is already running (pid {holder})"
-            )));
-        }
-    }
-    fs::write(&path, format!("{}\n", my_pid))?;
-    Ok(move || {
-        if fs::read_to_string(&path)
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(format!("{agent_id}.lock")))?;
+    fn read_holder(path: &Path) -> i32 {
+        fs::read_to_string(path)
             .ok()
-            .and_then(|s| s.trim().parse::<i32>().ok())
-            == Some(my_pid)
-        {
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+    let busy = |holder: i32| {
+        BusError::conflict(format!(
+            "a supervisor for {agent_id} is already running{}",
+            if holder > 0 { format!(" (pid {holder})") } else { String::new() }
+        ))
+    };
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            return Err(busy(read_holder(&path)));
+        }
+        return Err(error.into());
+    }
+    let my_pid = std::process::id() as i32;
+    let holder = read_holder(&path);
+    if holder != 0 && holder != my_pid && supervisor_alive(holder, agent_id) {
+        return Err(busy(holder));
+    }
+    // Write then rename, so a reader never sees a half-written pid.
+    let temporary = dir.join(format!("{agent_id}.pid.{my_pid}.tmp"));
+    fs::write(&temporary, format!("{my_pid}\n"))?;
+    fs::rename(&temporary, &path)?;
+    Ok(move || {
+        if read_holder(&path) == my_pid {
             let _ = fs::remove_file(&path);
         }
+        // Closing the file drops the flock.
+        drop(lock);
     })
 }
 

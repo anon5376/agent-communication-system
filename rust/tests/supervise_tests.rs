@@ -955,3 +955,71 @@ fn task_claim_with_worktree_fails_without_claiming() {
     assert!(stderr.contains("worktree isolation is not available"), "{stderr}");
     assert_eq!(e.bus.get_task(id).unwrap().task.state, "open");
 }
+
+// ------------------------------------------------- one supervisor per agent
+
+#[test]
+fn simultaneous_supervisors_for_one_agent_leave_exactly_one_running() {
+    // Check-then-write ownership lets several starters win only now and then, so race a few rounds.
+    const STARTERS: usize = 16;
+    let e = e2e("w1", "");
+    let config_path = e.workdir.join("agent-bus.config.json");
+    let db = e.home.join("bus.db");
+    for round in 0..4 {
+        // A stale pid file left by a crash: every starter has to decide to take it over.
+        fs::create_dir_all(e.home.join("supervisors")).unwrap();
+        fs::write(e.home.join("supervisors/w1.pid"), "999999\n").unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(STARTERS));
+        let starters: Vec<_> = (0..STARTERS)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let (db, workdir, config) = (db.clone(), e.workdir.clone(), config_path.clone());
+                std::thread::spawn(move || {
+                    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_qagent"));
+                    command
+                        .arg("--db").arg(&db).args(["--as", "w1", "supervise", "w1"])
+                        .arg(&workdir).arg("--config").arg(&config)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::piped());
+                    barrier.wait();
+                    command.spawn().unwrap()
+                })
+            })
+            .collect();
+        let mut children: Vec<_> = starters.into_iter().map(|t| t.join().unwrap()).collect();
+        std::thread::sleep(Duration::from_millis(1_500));
+        let mut running = 0;
+        for child in &mut children {
+            if child.try_wait().unwrap().is_none() {
+                running += 1;
+            }
+        }
+        let mut refusals = 0;
+        for child in &mut children {
+            if child.try_wait().unwrap().is_none() {
+                unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+            }
+            if child.wait_with_output_ref().contains("is already running") {
+                refusals += 1;
+            }
+        }
+        assert_eq!(running, 1, "round {round}: supervisors left running");
+        assert_eq!(refusals, STARTERS - 1, "round {round}");
+    }
+}
+
+trait WaitOutput {
+    fn wait_with_output_ref(&mut self) -> String;
+}
+
+impl WaitOutput for std::process::Child {
+    fn wait_with_output_ref(&mut self) -> String {
+        use std::io::Read;
+        let mut text = String::new();
+        if let Some(mut stderr) = self.stderr.take() {
+            let _ = stderr.read_to_string(&mut text);
+        }
+        let _ = self.wait();
+        text
+    }
+}
