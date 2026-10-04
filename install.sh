@@ -110,4 +110,4 @@ case ":$PATH:" in
 esac
 say ""
 say "next: cd into a project folder and run  aos"
-say "      (to look around first with a sample team:  aos demo)"
+say "      (to look around first with a simulated team, no account needed:  aos demo)"

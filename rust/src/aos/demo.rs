@@ -14,11 +14,24 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// The file next to a sample bus that marks it as simulated. aos shows
+/// SIMULATED on every screen of such a bus and refuses to start agents on it.
+pub const MARKER: &str = "SIMULATED";
+
+pub fn is_simulated(home: &Path) -> bool {
+    home.join(MARKER).exists()
+}
+
 /// Seed `path` unless it already holds agents. Returns true when it seeded.
 pub fn seed(path: &Path) -> Result<bool> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
             .map_err(|e| crate::error::BusError::invalid(format!("{}: {e}", dir.display())))?;
+        std::fs::write(
+            dir.join(MARKER),
+            "A sample bus made by aos demo. Its agents, tasks and results are made up; nothing runs.\n",
+        )
+        .map_err(|e| crate::error::BusError::invalid(format!("{}: {e}", dir.display())))?;
     }
     let now = now_ms();
     {

@@ -194,6 +194,7 @@ impl App {
     pub fn refresh(&mut self) -> Result<()> {
         self.frame = Frame::load(&self.bus, self.stall_ms)?;
         self.frame.crew = crew::gather(&self.paths, self.found.clone());
+        self.frame.add_crew_blockers();
         // The bus only learns an agent went away after its staleness window;
         // the crew's pid files know now.
         for a in self.frame.agents.iter_mut() {
@@ -347,6 +348,11 @@ impl App {
         let Some(i) = self.gate_index() else { return };
         let g = &self.frame.gates[i];
         let id = g.task.id;
+        if matches!(g.kind, GateKind::Failed | GateKind::Blocker) && n == 1 {
+            self.ui.prompt = g.next.clone();
+            self.go(Route::Home);
+            return;
+        }
         let kind = match (g.kind, n) {
             (GateKind::Review, 1) => Some(PendingKind::Accept),
             (GateKind::Review, 2) => Some(PendingKind::Revise),
@@ -513,7 +519,7 @@ impl App {
         match w {
             "help" if rest.is_empty() => {
                 for l in [
-                    "<anything>        type what you want done; the lead takes it as a goal",
+                    "<anything>        type what you want done; the crew takes it as a goal",
                     "fix|build|research|review|explain|docs <what>   start from a mission",
                     "missions          list mission templates (your own files, editable)",
                     "history           past goals   resume   start the crew and carry on",
@@ -1293,6 +1299,10 @@ impl App {
     /// Start crew members (all when `only` is empty). Asks to trust the folder
     /// first. Returns false when it stopped to ask.
     fn start_crew(&mut self, only: &[String]) -> Result<bool> {
+        if self.frame.crew.simulated {
+            self.say(fail_line(crew::SIMULATED_NOTE));
+            return Ok(false);
+        }
         let Some(config) = self.crew_config() else {
             return Ok(false);
         };
@@ -1510,7 +1520,20 @@ impl App {
         let Some(config) = self.crew_config() else {
             return Ok(());
         };
-        let lead = to.or_else(|| crew::member_ids(&config).into_iter().next());
+        let lead = to.or_else(|| crew::goal_owner(&config));
+        // A lead plans and hands the goal back to the operator; a worker's result
+        // goes to an independent reviewer, or to the operator when there is none.
+        let reviewer = match lead.as_deref() {
+            Some(id)
+                if config
+                    .agents
+                    .get(id)
+                    .is_some_and(|a| a.authority != "manager") =>
+            {
+                crew::reviewer_for(&config, id)
+            }
+            _ => OPERATOR_ID.to_string(),
+        };
         if self.frame.crew.running() == 0 {
             let started = self.start_crew(&[])?;
             if !started {
@@ -1528,7 +1551,7 @@ impl App {
                     brief: Some(brief),
                     acceptance: Some(acceptance).filter(|a| !a.is_empty()),
                     to: lead.clone(),
-                    reviewer: Some(OPERATOR_ID.into()),
+                    reviewer: Some(reviewer.clone()),
                     ..Default::default()
                 },
             )
@@ -1541,9 +1564,11 @@ impl App {
                     lead.unwrap_or_else(|| "the first free agent".into())
                 )));
                 self.say(dim_line("watch it: esc, then s swarm or g goal"));
-                self.say(dim_line(
-                    "the result comes to your gate to accept or send back",
-                ));
+                self.say(dim_line(if reviewer == OPERATOR_ID {
+                    "the result comes to your gate to accept or send back".to_string()
+                } else {
+                    format!("{reviewer} reviews the result independently; it can send it back")
+                }));
             }
             Err(e) => self.say(fail_line(e.message)),
         }
@@ -2051,6 +2076,15 @@ pub fn print_frame(
     Ok(s)
 }
 
+/// Removes a folder when dropped: the demo's temporary bus.
+struct RemoveOnDrop(std::path::PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 pub fn main() -> i32 {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let words = positionals(&argv);
@@ -2071,8 +2105,18 @@ pub fn main() -> i32 {
     }
     let demo = words.first().is_some_and(|a| a == "demo");
     let db_flag = flag(&argv, "--db");
-    let db_path = if demo && db_flag.is_none() {
-        crate::db::absolutize(&std::env::temp_dir().join("aos-demo").join("bus.db"))
+    // The demo gets a fresh sample bus in its own temporary folder each time,
+    // removed when aos leaves, so it never touches a real bus and never goes stale.
+    let demo_dir = (demo && db_flag.is_none()).then(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        std::env::temp_dir().join(format!("aos-demo-{}-{nanos}", std::process::id()))
+    });
+    let _cleanup = demo_dir.clone().map(RemoveOnDrop);
+    let db_path = if let Some(dir) = &demo_dir {
+        crate::db::absolutize(&dir.join("bus.db"))
     } else {
         crate::db::resolve_db_path_with(db_flag.as_deref(), |name| std::env::var(name).ok())
     };
@@ -2087,9 +2131,12 @@ pub fn main() -> i32 {
     }
     if demo {
         match demo::seed(&db_path) {
-            Ok(true) => eprintln!("aos: seeded a sample bus at {}", db_path.display()),
+            Ok(true) => eprintln!(
+                "aos demo: a SIMULATED team on a temporary bus at {}; nothing real runs, no account or key is used, and it is deleted when you leave",
+                db_path.display()
+            ),
             Ok(false) => eprintln!(
-                "aos: opening the existing sample bus at {}",
+                "aos demo: opening the existing sample bus at {}",
                 db_path.display()
             ),
             Err(e) => {

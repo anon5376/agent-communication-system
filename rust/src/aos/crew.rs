@@ -137,12 +137,102 @@ pub struct Found {
     pub cli: &'static Cli,
     pub path: Option<PathBuf>,
     pub version: Option<String>,
+    pub sign_in: SignIn,
 }
 
 impl Found {
+    /// Installed, able to join a crew, and not known to be signed out.
     pub fn usable(&self) -> bool {
-        self.path.is_some() && self.cli.crew_ready
+        self.path.is_some() && self.cli.crew_ready && !matches!(self.sign_in, SignIn::Missing)
     }
+}
+
+/// Whether a CLI is signed in, judged only from files and environment
+/// variables. aos never runs a turn to find out, so where the CLI keeps its
+/// sign-in somewhere aos cannot read (a keychain), it says it does not know.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SignIn {
+    /// Evidence of a sign-in: what was found.
+    Found(String),
+    /// The CLI keeps its sign-in only where aos looked, and there is none.
+    Missing,
+    /// aos cannot tell: why.
+    Unknown(String),
+}
+
+/// Where each crew-ready CLI keeps its sign-in. `env` reads a variable,
+/// `home` is the user's home folder.
+pub fn sign_in_for(
+    cli_id: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+    home: &Path,
+    macos: bool,
+) -> SignIn {
+    let set = |name: &str| env(name).is_some_and(|v| !v.trim().is_empty());
+    let first_set = |names: &[&str]| names.iter().find(|n| set(n)).map(|n| format!("{n} is set"));
+    match cli_id {
+        "claude" => {
+            if let Some(e) = first_set(&[
+                "ANTHROPIC_API_KEY",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_VERTEX",
+            ]) {
+                return SignIn::Found(e);
+            }
+            let dir = env("CLAUDE_CONFIG_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".claude"));
+            let creds = dir.join(".credentials.json");
+            if creds.is_file() {
+                return SignIn::Found(format!("{} exists", Paths::show(&creds)));
+            }
+            let state = home.join(".claude.json");
+            if fs::read_to_string(&state).is_ok_and(|t| t.contains("\"oauthAccount\"")) {
+                return SignIn::Found(format!("{} has an account", Paths::show(&state)));
+            }
+            if macos {
+                SignIn::Unknown("Claude Code may keep it in the macOS Keychain".into())
+            } else {
+                SignIn::Missing
+            }
+        }
+        "codex" => {
+            if let Some(e) = first_set(&["OPENAI_API_KEY", "CODEX_API_KEY"]) {
+                return SignIn::Found(e);
+            }
+            let dir = env("CODEX_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".codex"));
+            let auth = dir.join("auth.json");
+            if auth.is_file() {
+                return SignIn::Found(format!("{} exists", Paths::show(&auth)));
+            }
+            // Codex can be told to keep its sign-in in the system keyring instead.
+            let keyring = fs::read_to_string(dir.join("config.toml"))
+                .is_ok_and(|t| t.contains("cli_auth_credentials_store"));
+            if keyring {
+                SignIn::Unknown("Codex is set to keep it in the system keyring".into())
+            } else {
+                SignIn::Missing
+            }
+        }
+        "cursor" => match first_set(&["CURSOR_API_KEY"]) {
+            Some(e) => SignIn::Found(e),
+            None => SignIn::Unknown("Cursor CLI keeps it where aos can't read".into()),
+        },
+        _ => SignIn::Unknown("aos does not check this CLI".into()),
+    }
+}
+
+fn sign_in_here(cli_id: &str) -> SignIn {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    sign_in_for(
+        cli_id,
+        &|name| std::env::var(name).ok(),
+        &home,
+        cfg!(target_os = "macos"),
+    )
 }
 
 fn search_dirs() -> Vec<PathBuf> {
@@ -216,7 +306,17 @@ pub fn detect() -> Vec<Found> {
         .map(|cli| {
             let path = cli.binaries.iter().find_map(|b| find_binary(b));
             let version = path.as_deref().and_then(probe_version);
-            Found { cli, path, version }
+            let sign_in = if path.is_some() && cli.crew_ready {
+                sign_in_here(cli.id)
+            } else {
+                SignIn::Unknown("not checked".into())
+            };
+            Found {
+                cli,
+                path,
+                version,
+                sign_in,
+            }
         })
         .collect()
 }
@@ -346,45 +446,68 @@ fn pick<'a>(ready: &[&'a Found], order: &[&str], not_family: Option<&str>) -> Op
         .find(|f| not_family.is_none_or(|fam| f.cli.family != fam))
 }
 
-/// The default crew: a lead, a builder and a reviewer. With more than one CLI
-/// the reviewer comes from a different model family than the builder, so
-/// every change is checked by a second vendor.
+/// The default crew: a builder and a reviewer from a different model family,
+/// so every change gets an independent check. With only one family installed
+/// there is no reviewer agent: the operator reviews, because a reviewer from
+/// the same family is not independent. A lead (manager) is not in the default
+/// crew; add one to crew.json to have goals planned and split.
 pub fn plan(found: &[Found]) -> Vec<Member> {
     let ready: Vec<&Found> = found.iter().filter(|f| f.usable()).collect();
     if ready.is_empty() {
         return Vec::new();
     }
-    let lead = pick(&ready, &["claude", "codex", "cursor"], None).unwrap();
     let builder = pick(&ready, &["codex", "claude", "cursor"], None).unwrap();
-    let reviewer = pick(
+    let mut crew = vec![Member {
+        id: "builder",
+        role: "implementation",
+        authority: "worker",
+        cli: builder.cli,
+        description: "does the task and runs the checks",
+    }];
+    if let Some(reviewer) = pick(
         &ready,
         &["claude", "codex", "cursor"],
         Some(builder.cli.family),
-    )
-    .unwrap_or(builder);
-    vec![
-        Member {
-            id: "lead",
-            role: "manager",
-            authority: "manager",
-            cli: lead.cli,
-            description: "plans the goal, hands out tasks, hands back the result",
-        },
-        Member {
-            id: "builder",
-            role: "implementation",
-            authority: "worker",
-            cli: builder.cli,
-            description: "makes the changes and runs the checks",
-        },
-        Member {
+    ) {
+        crew.push(Member {
             id: "reviewer",
             role: "reviewer",
             authority: "worker",
             cli: reviewer.cli,
-            description: "checks every change before you see it",
-        },
-    ]
+            description: "reviews every result independently before it counts as done",
+        });
+    }
+    crew
+}
+
+/// Who reviews a goal in this crew: the reviewer agent when its model family
+/// differs from the agent doing the work, otherwise the operator.
+pub fn reviewer_for(config: &BusConfig, worker: &str) -> String {
+    let family = |id: &str| {
+        config
+            .agents
+            .get(id)
+            .and_then(|a| config.models.get(&a.model))
+            .map(|m| m.family.clone())
+    };
+    config
+        .agents
+        .values()
+        .filter(|a| a.enabled && a.role == "reviewer" && a.id != worker)
+        .find(|a| family(&a.id).is_some() && family(&a.id) != family(worker))
+        .map(|a| a.id.clone())
+        .unwrap_or_else(|| OPERATOR_ID.to_string())
+}
+
+/// The agent a goal goes to: the lead when the crew has one, else the first
+/// worker that is not a reviewer.
+pub fn goal_owner(config: &BusConfig) -> Option<String> {
+    let ids = member_ids(config);
+    ids.iter()
+        .find(|id| config.agents[*id].authority == "manager")
+        .or_else(|| ids.iter().find(|id| config.agents[*id].role != "reviewer"))
+        .or_else(|| ids.first())
+        .cloned()
 }
 
 fn capabilities() -> Value {
@@ -524,6 +647,9 @@ pub struct SetupReport {
 /// Write presets, the crew file (unless one exists and `force` is false) and
 /// put the crew on the bus.
 pub fn setup(bus: &Bus, paths: &Paths, found: &[Found], force: bool) -> Result<SetupReport> {
+    if super::demo::is_simulated(&paths.home) {
+        return Err(BusError::invalid(SIMULATED_NOTE));
+    }
     fs::create_dir_all(&paths.dir)?;
     let presets_written = write_presets(paths)?;
     let members = plan(found);
@@ -745,12 +871,22 @@ pub fn unsafe_workdir(dir: &Path) -> Option<String> {
 
 /// Start a supervisor for each agent in the background, working in `workdir`.
 /// Each keeps running after aos exits. Returns one line per agent.
+/// Why nothing real starts on a sample bus.
+pub const SIMULATED_NOTE: &str =
+    "this is the simulated sample from aos demo, so no agent starts here / leave (q), cd to your project and run aos";
+
 pub fn start(
     db_path: &Path,
     paths: &Paths,
     ids: &[String],
     workdir: &Path,
 ) -> Vec<(String, Result<i32>)> {
+    if super::demo::is_simulated(&paths.home) {
+        return ids
+            .iter()
+            .map(|id| (id.clone(), Err(BusError::invalid(SIMULATED_NOTE))))
+            .collect();
+    }
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aos"));
     let _ = fs::create_dir_all(paths.home.join("logs"));
     let _ = fs::write(paths.workdir_file(), format!("{}\n", workdir.display()));
@@ -919,6 +1055,8 @@ pub struct CrewInfo {
     pub missions: Vec<(String, String)>,
     /// Detection results, when they were gathered (welcome, setup, crew screen).
     pub found: Vec<Found>,
+    /// The bus is a sample made by `aos demo`: nothing on it is real.
+    pub simulated: bool,
 }
 
 impl std::fmt::Debug for Found {
@@ -945,6 +1083,7 @@ pub fn gather(paths: &Paths, found: Vec<Found>) -> CrewInfo {
             .map(|m| (m.name, m.summary))
             .collect(),
         found,
+        simulated: super::demo::is_simulated(&paths.home),
         ..Default::default()
     };
     match load_crew(paths) {
@@ -1119,15 +1258,28 @@ pub fn doctor(db_path: &Path) -> Vec<Check> {
                     out.push(check(
                         Some(true),
                         &id,
-                        format!(
-                            "{} at {} ({v}){}",
-                            h.id,
-                            Paths::show(&p),
-                            known
-                                .map(|c| format!(" / signed in? if turns fail: {}", c.sign_in))
-                                .unwrap_or_default()
-                        ),
+                        format!("{} installed at {} ({v})", h.id, Paths::show(&p)),
                     ));
+                    if let Some(c) = known {
+                        out.push(match sign_in_here(c.id) {
+                            SignIn::Found(why) => {
+                                check(Some(true), "", format!("signed in: {why}"))
+                            }
+                            SignIn::Missing => check(
+                                Some(false),
+                                "",
+                                format!("not signed in, so its turns will fail / {}", c.sign_in),
+                            ),
+                            SignIn::Unknown(why) => check(
+                                None,
+                                "",
+                                format!(
+                                    "sign-in not checked: {why} / if turns fail: {}",
+                                    c.sign_in
+                                ),
+                            ),
+                        });
+                    }
                 }
                 None => out.push(check(
                     Some(false),
@@ -1247,31 +1399,94 @@ mod tests {
                     .contains(&cli.id)
                     .then(|| PathBuf::from(format!("/bin/{}", cli.id))),
                 version: None,
+                sign_in: SignIn::Unknown("test".into()),
             })
             .collect()
     }
 
     #[test]
-    fn one_cli_fills_every_seat() {
+    fn one_family_means_the_operator_reviews() {
         let m = plan(&found(&["claude"]));
         assert_eq!(
-            m.iter().map(|m| m.cli.id).collect::<Vec<_>>(),
-            ["claude"; 3]
+            m.iter().map(|m| (m.id, m.cli.id)).collect::<Vec<_>>(),
+            [("builder", "claude")]
         );
     }
 
     #[test]
-    fn reviewer_comes_from_another_family_when_it_can() {
+    fn reviewer_comes_from_another_family() {
         let m = plan(&found(&["claude", "codex"]));
         let ids: Vec<_> = m.iter().map(|m| (m.id, m.cli.id)).collect();
+        assert_eq!(ids, [("builder", "codex"), ("reviewer", "claude")]);
+    }
+
+    #[test]
+    fn a_cli_known_to_be_signed_out_is_not_planned() {
+        let mut f = found(&["claude", "codex"]);
+        for x in f.iter_mut().filter(|x| x.cli.id == "codex") {
+            x.sign_in = SignIn::Missing;
+        }
+        let m = plan(&f);
         assert_eq!(
-            ids,
-            [
-                ("lead", "claude"),
-                ("builder", "codex"),
-                ("reviewer", "claude")
-            ]
+            m.iter().map(|m| (m.id, m.cli.id)).collect::<Vec<_>>(),
+            [("builder", "claude")]
         );
+    }
+
+    #[test]
+    fn sign_in_is_judged_from_files_and_env_only() {
+        let home = std::env::temp_dir().join(format!("aos-signin-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        let none = |_: &str| None;
+        assert_eq!(sign_in_for("claude", &none, &home, false), SignIn::Missing);
+        assert!(matches!(
+            sign_in_for("claude", &none, &home, true),
+            SignIn::Unknown(_)
+        ));
+        fs::write(home.join(".claude/.credentials.json"), "{}").unwrap();
+        assert!(matches!(
+            sign_in_for("claude", &none, &home, false),
+            SignIn::Found(_)
+        ));
+        assert_eq!(sign_in_for("codex", &none, &home, false), SignIn::Missing);
+        let key = |n: &str| (n == "OPENAI_API_KEY").then(|| "sk-test".to_string());
+        assert_eq!(
+            sign_in_for("codex", &key, &home, false),
+            SignIn::Found("OPENAI_API_KEY is set".into())
+        );
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::write(
+            home.join(".codex/config.toml"),
+            "cli_auth_credentials_store = \"keyring\"\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            sign_in_for("codex", &none, &home, false),
+            SignIn::Unknown(_)
+        ));
+        assert!(matches!(
+            sign_in_for("cursor", &none, &home, false),
+            SignIn::Unknown(_)
+        ));
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn goals_go_to_the_lead_when_there_is_one() {
+        let dir = std::env::temp_dir().join(format!("aos-owner-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("crew.json");
+        let f = found(&["claude", "codex"]);
+        fs::write(&path, crew_json(&plan(&f), &f).to_string()).unwrap();
+        let config = load_config(&path).unwrap();
+        assert_eq!(goal_owner(&config).as_deref(), Some("builder"));
+        assert_eq!(reviewer_for(&config, "builder"), "reviewer");
+        let one = found(&["claude"]);
+        fs::write(&path, crew_json(&plan(&one), &one).to_string()).unwrap();
+        let config = load_config(&path).unwrap();
+        assert_eq!(reviewer_for(&config, "builder"), OPERATOR_ID);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1287,7 +1502,7 @@ mod tests {
         let path = dir.join("crew.json");
         fs::write(&path, crew_json(&plan(&f), &f).to_string()).unwrap();
         let config = load_config(&path).unwrap();
-        assert_eq!(member_ids(&config), ["lead", "builder", "reviewer"]);
+        assert_eq!(member_ids(&config), ["builder", "reviewer"]);
         let agent = crate::config::resolve_agent(&config, "builder").unwrap();
         assert_eq!(agent.harness.adapter, "codex");
         fs::remove_dir_all(&dir).unwrap();
@@ -1312,11 +1527,11 @@ mod tests {
             dir: dir.join("aos"),
         };
         write_presets(&paths).unwrap();
-        let f = found(&["claude"]);
+        let f = found(&["claude", "codex"]);
         fs::write(paths.crew(), crew_json(&plan(&f), &f).to_string()).unwrap();
-        let text = role_prompt(&paths.crew(), "lead").unwrap();
-        assert!(text.starts_with("You are the lead"));
-        assert!(text.contains("- builder (implementation, claude)"));
+        let text = role_prompt(&paths.crew(), "builder").unwrap();
+        assert!(text.starts_with("You are the builder"), "{text}");
+        assert!(text.contains("- reviewer (reviewer, claude)"), "{text}");
         assert!(!text.contains("{team}"));
         fs::remove_dir_all(&dir).unwrap();
     }
