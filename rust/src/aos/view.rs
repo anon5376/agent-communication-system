@@ -1838,7 +1838,10 @@ fn found_lines(found: &[super::crew::Found], w: usize) -> Vec<VLine> {
             (Some(_), false) => (
                 "~",
                 Role::Dim,
-                format!("{} found / can't join a crew from aos yet", f.cli.name),
+                format!(
+                    "{} found / runs tools unasked; connect {} --auto-approve adds it",
+                    f.cli.name, f.cli.id
+                ),
             ),
             (None, true) => ("-", Role::Dim, format!("not installed / {}", f.cli.install)),
             (None, false) => continue,
@@ -2090,6 +2093,16 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
         "find agent CLIs and write your crew",
     ),
     ("doctor", "doctor", "check everything and say what to fix"),
+    (
+        "connect",
+        "connect <cli> [as <agent>]",
+        "put an agent CLI in the crew; alone, list them",
+    ),
+    (
+        "disconnect",
+        "disconnect <name>",
+        "take a CLI out of the crew",
+    ),
     ("swarm", "swarm", "the live view of agents and work"),
     ("goal", "goal", "the open goal as a tree"),
     ("evidence", "evidence", "submitted results"),
