@@ -1471,6 +1471,20 @@ impl Bus {
 
     /// Claimed tasks with no claim/note activity for `stall_ms` — a probably-dead claim.
     /// `updated_ms` moves on claim and on every note, so it is the last-activity clock.
+    /// Whether open work is waiting that `agent_id` may claim: assigned to it, or
+    /// unassigned for its role (or for no role).
+    pub fn has_claimable(&self, agent_id: &str, role: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT 1 FROM tasks WHERE state IN ('open', 'changes_requested')
+                   AND (assignee = ? OR (assignee IS NULL AND (role = '' OR role = ?))) LIMIT 1",
+            )?
+            .query_row(params![agent_id, role], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
     pub fn stalled_tasks(&self, stall_ms: i64) -> Result<Vec<Task>> {
         let cutoff = self.now() - stall_ms.max(0);
         self.to_tasks(

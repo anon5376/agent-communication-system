@@ -43,7 +43,7 @@ impl Default for Io {
 
 const BOOLEAN_FLAGS: &[&str] = &[
     "json", "peek", "all", "mine", "ack", "accept", "revise", "dry-run", "force", "follow",
-    "operator", "open", "help", "clear",
+    "operator", "open", "help", "clear", "worktree",
 ];
 const REPEATED_FLAGS: &[&str] = &["dep", "scope", "state", "file"];
 
@@ -498,6 +498,10 @@ fn task_command(ctx: &mut Context, sub: Option<&String>) -> Result<i32> {
             Ok(0)
         }
         Some("claim") => {
+            if ctx.bool_flag("worktree") {
+                // Fail closed: a claim that asked for its own checkout must not run in the shared one.
+                return Err(BusError::invalid(crate::supervisor::NO_WORKTREES));
+            }
             let me = ctx.identity(false)?;
             let id = if ctx.parsed.positionals.get(2).is_none() {
                 None

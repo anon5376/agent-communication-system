@@ -660,6 +660,11 @@ pub fn process_running(pid: i32, words: &[&str]) -> bool {
     }
 }
 
+/// Why this build refuses work that asked for per-task git worktrees.
+pub const NO_WORKTREES: &str = "worktree isolation is not available in this build (the Rust qagent/aos); \
+     nothing was claimed or started. Use the TypeScript qagent for worktrees, or set \
+     constraints.isolation to \"path-locks\" in the config";
+
 /// One pid file per agent so two supervisors never drive the same CLI session.
 fn acquire_lock(dir: &Path, agent_id: &str) -> Result<impl FnOnce()> {
     fs::create_dir_all(dir)?;
@@ -859,6 +864,10 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                 agent.agent.id
             )));
         }
+        if config.constraints["isolation"].as_str() == Some("worktree") {
+            // Fail closed: running in the shared checkout is what isolation was asked to prevent.
+            return Err(BusError::invalid(NO_WORKTREES));
+        }
         release = Some(Box::new(acquire_lock(
             &home.join("supervisors"),
             &agent.agent.id,
@@ -917,6 +926,10 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
         // Bus or file errors outside a turn (a locked database, a full disk) end
         // the round, not the supervisor: it logs, backs off and tries again.
         let mut error_streak: u32 = 0;
+        // Queued work that no fresh mail or event will announce: what was waiting before
+        // this supervisor started, or was queued while the agent was paused or mid-turn.
+        // Checked before the next wait instead of after a whole wait period.
+        let mut backlog_due = true;
         while !options.stop.load(Ordering::SeqCst) {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Round> {
                 // Pause and budget come first, so a paused agent's mail stays unread for later.
@@ -939,19 +952,32 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                 if paused_since.take().is_some() {
                     log("resumed");
                     consecutive_failures = 0;
+                    backlog_due = true;
                 }
-                let waited = crate::wait::wait_for_mail(
-                    &bus,
-                    &me,
-                    Duration::from_millis(wait_ms),
-                    &options.stop,
-                )?;
+                let backlog = std::mem::take(&mut backlog_due)
+                    && bus.unread_count(&me.agent_id)? == 0
+                    && bus.has_claimable(&me.agent_id, &bus_agent.role)?;
+                let waited = if backlog {
+                    log("queued work is waiting; starting without new mail");
+                    crate::bus::WaitResult {
+                        status: "backlog".into(),
+                        messages: vec![],
+                        events: vec![],
+                        seq: bus.latest_seq()?,
+                    }
+                } else {
+                    crate::wait::wait_for_mail(
+                        &bus,
+                        &me,
+                        Duration::from_millis(wait_ms),
+                        &options.stop,
+                    )?
+                };
                 if options.stop.load(Ordering::SeqCst) {
                     return Ok(Round::Stop);
                 }
-                if waited.status == "timeout" {
-                    return Ok(Round::Next);
-                }
+                // A wait that ends with no mail ("none") falls through: the queue is
+                // checked below, so claimable work never needs fresh mail.
                 if hold_for_pause(&bus, &me, &log)? {
                     return Ok(Round::Next);
                 }
@@ -1180,6 +1206,9 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
 
                 consecutive_failures = 0;
                 mark_read(&bus)?;
+                // Work queued during the turn announced itself to nobody. A managed agent
+                // claims it next round; an agent with bus tools sees it at its next wait's end.
+                backlog_due = managed;
                 if invocation.auto_report {
                     let structured = normalized.structured.unwrap_or(serde_json::json!({}));
                     for id in &report_ids {
