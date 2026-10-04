@@ -48,6 +48,13 @@ All notable changes to the Agent Communication System. Format follows
   promotion playbook, standout-features list, launch copy, and a full
   marketing strategy with a 30-day calendar.
 
+- **Recovery example** — `examples/worker-death-recovery.sh` kills a worker
+  mid-task with SIGKILL and walks the task through stalled detection, requeue,
+  a second worker's submission, a refused self-review and an independent
+  review, on a throwaway bus with no agent CLI. Runs with `qagent` or `aos`.
+- **Launch docs** — `docs/launch-copy.md` rewritten around a claims-and-evidence
+  table; `docs/launch-checklist.md` lists the owner-only steps.
+
 ### Changed
 
 - **Efficiency pass** — cached prepared statements on hot paths, batched
@@ -60,6 +67,12 @@ All notable changes to the Agent Communication System. Format follows
 
 ### Fixed
 
+- README leads with ownership, recovery and independent review, installs the
+  released `aos` binary, and states what is and is not tested. Provider support
+  no longer labels unit-tested adapters "invocation tested"; they are "live
+  unverified". `PRODUCT.md` now describes the shipped CLI, dashboard and `aos`
+  instead of commands that do not exist (`qagent start`, `qagent open`,
+  `qagent_delegate`). Older marketing docs carry a superseded note.
 - Worktree creation no longer blocks on a stale lock: a lock whose holder
   died, never wrote its owner file, or stopped heartbeating (pid reuse) is
   swept. Worktree cleanup (`task worktree --remove`, `prune`) now works after

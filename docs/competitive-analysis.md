@@ -1,5 +1,7 @@
 # ACS (qagent) — Competitor Landscape
 
+> **Superseded for launch (2026-10-04).** Use [launch-copy.md](launch-copy.md) for wording and [launch-checklist.md](launch-checklist.md) for steps. This file is kept as background research; its numbers and claims (binary size, speed, star counts, feature status) were not re-checked and some are wrong, for example the `aos` binary is about 5 MB, not 3 or 4 MB. Check any claim against the [claims table](launch-copy.md#claims-and-evidence) before reusing it.
+
 Scope: multi-agent orchestration frameworks, agent control planes, and lightweight/CLI local coordination tools. Star counts are as quoted by Aug–Sep 2026 sources (cited per row) and were **not re-checked on 2026-10-01** (no GitHub API access outside this repository in that session); treat every star count as unverified. Hermes Agent was added on 2026-10-01 from a clone, not from a search.
 
 ## Multi-agent orchestration frameworks

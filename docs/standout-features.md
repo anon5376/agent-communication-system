@@ -1,5 +1,7 @@
 # ACS positioning research: what users complain about, and how a local-first bus wins
 
+> **Superseded for launch (2026-10-04).** Use [launch-copy.md](launch-copy.md) for wording and [launch-checklist.md](launch-checklist.md) for steps. This file is kept as background research; its numbers and claims (binary size, speed, star counts, feature status) were not re-checked and some are wrong, for example the `aos` binary is about 5 MB, not 3 or 4 MB. Check any claim against the [claims table](launch-copy.md#claims-and-evidence) before reusing it.
+
 > **Status note (2026-10-01).** This is a positioning draft; some of its recommendations have since shipped in the unreleased `main` (see `CHANGELOG.md`, `[Unreleased]`): stalled-task detection and requeue, `qagent trace`, `supervise --roster`, registry manifests (`server.json`, `glama.json`, `smithery.yaml`), and per-task git worktrees. Not shipped: prebuilt `acs` binaries, standards interop (A2A/ACP), and a family-aware review rule. The other items were not re-checked. Quoted issue threads and blog posts were not re-checked. The Hermes Agent comparison is in `docs/competitive-analysis.md`.
 
 ## TL;DR
