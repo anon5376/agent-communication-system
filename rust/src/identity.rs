@@ -18,6 +18,100 @@ use std::path::{Path, PathBuf};
 pub struct Permissions {
     pub can_delegate: bool,
     pub can_review: bool,
+    /// When set and non-empty, the only agents this one may assign work to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_child_agent_ids: Option<Vec<String>>,
+    /// Deepest parent chain (ancestors of the new task) this agent may create work under.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_delegation_depth: Option<i64>,
+    /// Most tasks this agent may hold claimed at once.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_tasks: Option<i64>,
+}
+
+/// Limits applied on top of the authority's permissions, usually copied from the
+/// project configuration by the supervisor. Stored as `policy` inside
+/// identities.permissions_json, so both implementations read it without a schema
+/// change (mirror: AgentPolicy in src/core/identity.ts). A policy only ever narrows:
+/// the effective permission is the authority's AND the policy's.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AgentPolicy {
+    pub can_delegate: Option<bool>,
+    pub allowed_child_agent_ids: Option<Vec<String>>,
+    pub max_delegation_depth: Option<i64>,
+    pub max_concurrent_tasks: Option<i64>,
+}
+
+impl AgentPolicy {
+    pub fn is_empty(&self) -> bool {
+        *self == AgentPolicy::default()
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut value = serde_json::Map::new();
+        if let Some(v) = self.can_delegate {
+            value.insert("canDelegate".into(), v.into());
+        }
+        if let Some(v) = &self.allowed_child_agent_ids {
+            value.insert("allowedChildAgentIds".into(), v.clone().into());
+        }
+        if let Some(v) = self.max_delegation_depth {
+            value.insert("maxDelegationDepth".into(), v.into());
+        }
+        if let Some(v) = self.max_concurrent_tasks {
+            value.insert("maxConcurrentTasks".into(), v.into());
+        }
+        serde_json::Value::Object(value)
+    }
+}
+
+fn whole_number(value: &serde_json::Value) -> Option<i64> {
+    let n = value.as_f64()?;
+    (n >= 0.0 && n.fract() == 0.0 && n <= i64::MAX as f64).then_some(n as i64)
+}
+
+/// The policy in a permissions_json `policy` value, with anything malformed dropped.
+pub fn parse_policy(value: &serde_json::Value) -> AgentPolicy {
+    let Some(raw) = value.as_object() else {
+        return AgentPolicy::default();
+    };
+    AgentPolicy {
+        can_delegate: raw.get("canDelegate").and_then(|v| v.as_bool()),
+        allowed_child_agent_ids: raw.get("allowedChildAgentIds").and_then(|v| v.as_array()).map(|ids| {
+            ids.iter().filter_map(|id| id.as_str().map(str::to_string)).collect()
+        }),
+        max_delegation_depth: raw.get("maxDelegationDepth").and_then(whole_number),
+        max_concurrent_tasks: raw
+            .get("maxConcurrentTasks")
+            .and_then(whole_number)
+            .filter(|n| *n >= 1),
+    }
+}
+
+/// Whether `next` would allow anything `current` forbids.
+pub fn policy_widens(current: &AgentPolicy, next: &AgentPolicy) -> bool {
+    if current.can_delegate == Some(false) && next.can_delegate != Some(false) {
+        return true;
+    }
+    let non_empty = |ids: &Option<Vec<String>>| ids.clone().filter(|ids| !ids.is_empty());
+    if let Some(current_ids) = non_empty(&current.allowed_child_agent_ids) {
+        match non_empty(&next.allowed_child_agent_ids) {
+            None => return true,
+            Some(next_ids) if next_ids.iter().any(|id| !current_ids.contains(id)) => return true,
+            _ => {}
+        }
+    }
+    for (was, now) in [
+        (current.max_delegation_depth, next.max_delegation_depth),
+        (current.max_concurrent_tasks, next.max_concurrent_tasks),
+    ] {
+        if let Some(was) = was {
+            if now.map(|now| now > was).unwrap_or(true) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -128,16 +222,13 @@ pub fn read_token_file(path: &Path) -> Option<String> {
 }
 
 pub fn default_permissions(authority: &str) -> Permissions {
-    if authority == "worker" {
-        Permissions {
-            can_delegate: false,
-            can_review: false,
-        }
-    } else {
-        Permissions {
-            can_delegate: true,
-            can_review: true,
-        }
+    let allowed = authority != "worker";
+    Permissions {
+        can_delegate: allowed,
+        can_review: allowed,
+        allowed_child_agent_ids: None,
+        max_delegation_depth: None,
+        max_concurrent_tasks: None,
     }
 }
 
@@ -157,40 +248,67 @@ pub fn agent_id_from_env() -> Option<String> {
 struct IdentityRow {
     token_hash: String,
     authority: String,
+    permissions_json: String,
     created_ms: i64,
 }
 
 fn row_for(conn: &Connection, agent_id: &str) -> Result<Option<IdentityRow>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT token_hash, authority, created_ms FROM identities WHERE agent_id = ?",
+        "SELECT token_hash, authority, permissions_json, created_ms FROM identities WHERE agent_id = ?",
     )?;
     let row = stmt
         .query_row([agent_id], |row| {
             Ok(IdentityRow {
                 token_hash: row.get(0)?,
                 authority: row.get(1)?,
-                created_ms: row.get(2)?,
+                permissions_json: row.get(2)?,
+                created_ms: row.get(3)?,
             })
         })
         .ok();
     Ok(row)
 }
 
-fn parse_permissions(json: &str, authority: &str) -> Permissions {
+fn json_object(text: &str) -> serde_json::Map<String, serde_json::Value> {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    }
+}
+
+pub fn parse_permissions(json: &str, authority: &str) -> Permissions {
     let base = default_permissions(authority);
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
-        return base;
-    };
+    let value = json_object(json);
+    let policy = parse_policy(value.get("policy").unwrap_or(&serde_json::Value::Null));
     Permissions {
         can_delegate: value
             .get("canDelegate")
             .and_then(|v| v.as_bool())
-            .unwrap_or(base.can_delegate),
+            .unwrap_or(base.can_delegate)
+            && policy.can_delegate != Some(false),
         can_review: value
             .get("canReview")
             .and_then(|v| v.as_bool())
             .unwrap_or(base.can_review),
+        allowed_child_agent_ids: policy.allowed_child_agent_ids.filter(|ids| !ids.is_empty()),
+        max_delegation_depth: policy.max_delegation_depth,
+        max_concurrent_tasks: policy.max_concurrent_tasks,
     }
+}
+
+/// The permissions_json value stored for `agent_id`, parsed (empty when missing or malformed).
+pub fn stored_permissions_json(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>> {
+    Ok(row_for(conn, agent_id)?
+        .map(|row| json_object(&row.permissions_json))
+        .unwrap_or_default())
+}
+
+/// The effective permissions stored for `agent_id` right now (read inside a write transaction).
+pub fn current_permissions(conn: &Connection, agent_id: &str) -> Result<Option<Permissions>> {
+    Ok(row_for(conn, agent_id)?.map(|row| parse_permissions(&row.permissions_json, &row.authority)))
 }
 
 /// Resolve the identity for `agent_id` from its token file. The token's hash must
@@ -277,8 +395,14 @@ pub fn store_new_token(
         agent_id,
         hash_token(&token),
         authority,
-        serde_json::to_string(permissions.unwrap_or(&default_permissions(authority)))?,
-        existing.map(|row| row.created_ms).unwrap_or(now_ms),
+        // A rotation keeps the stored permissions and policy; only a new identity or a
+        // new authority starts from the defaults.
+        match (permissions, &existing) {
+            (Some(permissions), _) => serde_json::to_string(permissions)?,
+            (None, Some(row)) if row.authority == authority => row.permissions_json.clone(),
+            (None, _) => serde_json::to_string(&default_permissions(authority))?,
+        },
+        existing.as_ref().map(|row| row.created_ms).unwrap_or(now_ms),
         now_ms
     ])?;
     Ok(token)

@@ -660,65 +660,160 @@ pub fn process_running(pid: i32, words: &[&str]) -> bool {
     }
 }
 
+/// The project configuration's limits for this agent, as the policy the bus core
+/// enforces: delegation, the agents it may assign, delegation depth, and how many
+/// tasks it may hold claimed at once. Mirror: policyFromConfig in src/supervisor.ts.
+pub fn policy_from_config(
+    config: &crate::config::BusConfig,
+    agent: &crate::config::AgentDef,
+) -> crate::identity::AgentPolicy {
+    let number = |v: &serde_json::Value| v.as_f64().filter(|n| *n >= 0.0).map(|n| n as i64);
+    let depth = match (
+        number(&agent.permissions["maxDelegationDepth"]),
+        number(&config.constraints["maxDelegationDepth"]),
+    ) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    crate::identity::AgentPolicy {
+        can_delegate: agent.permissions["canDelegate"].as_bool(),
+        allowed_child_agent_ids: agent.permissions["allowedChildAgentIds"]
+            .as_array()
+            .map(|ids| ids.iter().filter_map(|id| id.as_str().map(str::to_string)).collect::<Vec<_>>())
+            .filter(|ids| !ids.is_empty()),
+        max_delegation_depth: depth,
+        max_concurrent_tasks: number(&config.constraints["maxConcurrentTasks"]).filter(|n| *n >= 1),
+    }
+}
+
+/// Why the configuration's usage budget (`optionalTokenBudget`,
+/// `optionalApiCostBudgetUSD`) stops new turns, or None. It counts what the CLI
+/// itself reported and is checked between turns, so one turn can overshoot it, and a
+/// CLI that reports no cost never moves the dollar count. Mirror: budgetReached in
+/// src/supervisor.ts.
+pub fn config_budget_reached(
+    config: &crate::config::BusConfig,
+    total_tokens: f64,
+    cost_usd: f64,
+) -> Option<String> {
+    if let Some(tokens) = config.constraints["optionalTokenBudget"].as_f64() {
+        if total_tokens >= tokens {
+            return Some(format!(
+                "{} of {} reported tokens used",
+                crate::control::short(total_tokens),
+                crate::control::short(tokens)
+            ));
+        }
+    }
+    if let Some(dollars) = config.constraints["optionalApiCostBudgetUSD"].as_f64() {
+        if cost_usd >= dollars {
+            return Some(format!("${cost_usd:.2} of ${dollars:.2} reported cost used"));
+        }
+    }
+    None
+}
+
 /// Why this build refuses work that asked for per-task git worktrees.
 pub const NO_WORKTREES: &str = "worktree isolation is not available in this build (the Rust qagent/aos); \
      nothing was claimed or started. Use the TypeScript qagent for worktrees, or set \
      constraints.isolation to \"path-locks\" in the config";
 
-/// One supervisor per agent, so two never drive the same CLI session.
+fn read_pid(path: &Path) -> i32 {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Write `<pid>\n` to a private file and hard-link it to `path`: atomic, and it fails
+/// with AlreadyExists while `path` exists, so the file is never seen half written.
+fn link_pid_file(path: &Path, suffix: &str) -> std::io::Result<()> {
+    let mine = path.with_file_name(format!(
+        "{}.{}.{suffix}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    fs::write(&mine, format!("{}\n", std::process::id()))?;
+    let _ = fs::set_permissions(&mine, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    let linked = fs::hard_link(&mine, path);
+    let _ = fs::remove_file(&mine);
+    linked
+}
+
+/// One pid file per agent so two supervisors never drive the same CLI session.
 ///
-/// Ownership is an exclusive `flock` on `<agent>.lock`, held for the supervisor's
-/// life: the kernel grants it to exactly one process and drops it when that process
-/// dies, so simultaneous starters cannot both win and a crash leaves nothing stale.
-/// The lock file is never deleted (deleting it would let a late opener lock an
-/// orphaned inode). `<agent>.pid` is still written for aos, doctor and the
-/// TypeScript supervisor, which reads it: a live pid there that is not ours is a
-/// supervisor without the lock (TypeScript, or an older build), and we back off.
+/// Taking it is atomic: the pid is hard-linked into place, which fails if any
+/// supervisor holds it, so two starters cannot both win. A stale file (its pid is
+/// gone) is removed only while holding `<agent>.pid.reap`, so a supervisor that just
+/// took the lock is never removed by a slower starter. The same protocol as
+/// acquireSupervisorLock in src/supervisor.ts, so a Rust and a TypeScript starter
+/// contend on one file.
 fn acquire_lock(dir: &Path, agent_id: &str) -> Result<impl FnOnce()> {
-    use std::os::unix::io::AsRawFd;
     fs::create_dir_all(dir)?;
     let path = dir.join(format!("{agent_id}.pid"));
-    let lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dir.join(format!("{agent_id}.lock")))?;
-    fn read_holder(path: &Path) -> i32 {
-        fs::read_to_string(path)
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0)
-    }
-    let busy = |holder: i32| {
-        BusError::conflict(format!(
-            "a supervisor for {agent_id} is already running{}",
-            if holder > 0 { format!(" (pid {holder})") } else { String::new() }
-        ))
-    };
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            return Err(busy(read_holder(&path)));
-        }
-        return Err(error.into());
-    }
     let my_pid = std::process::id() as i32;
-    let holder = read_holder(&path);
-    if holder != 0 && holder != my_pid && supervisor_alive(holder, agent_id) {
-        return Err(busy(holder));
-    }
-    // Write then rename, so a reader never sees a half-written pid.
-    let temporary = dir.join(format!("{agent_id}.pid.{my_pid}.tmp"));
-    fs::write(&temporary, format!("{my_pid}\n"))?;
-    fs::rename(&temporary, &path)?;
-    Ok(move || {
-        if read_holder(&path) == my_pid {
-            let _ = fs::remove_file(&path);
+    let release = {
+        let path = path.clone();
+        move || {
+            if read_pid(&path) == my_pid {
+                let _ = fs::remove_file(&path);
+            }
         }
-        // Closing the file drops the flock.
-        drop(lock);
-    })
+    };
+    for _ in 0..20 {
+        match link_pid_file(&path, "lock") {
+            Ok(()) => return Ok(release),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let holder = read_pid(&path);
+        if holder == my_pid {
+            return Ok(release);
+        }
+        if holder != 0 && supervisor_alive(holder, agent_id) {
+            return Err(BusError::conflict(format!(
+                "a supervisor for {agent_id} is already running (pid {holder})"
+            )));
+        }
+        reap_stale_lock(&path, holder)?;
+    }
+    Err(BusError::conflict(format!(
+        "could not take the supervisor lock for {agent_id}; another supervisor keeps starting"
+    )))
+}
+
+fn reap_stale_lock(path: &Path, stale_pid: i32) -> Result<()> {
+    let reap = path.with_file_name(format!(
+        "{}.reap",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    match link_pid_file(&reap, "reap") {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Another starter is reaping. A reaper that died midway leaves its file
+            // behind; clear it once it is clearly abandoned.
+            let reaper = read_pid(&reap);
+            let age = fs::metadata(&reap)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .unwrap_or_default();
+            let reaper_alive = reaper > 0 && unsafe { libc::kill(reaper, 0) } == 0;
+            if reaper == 0 || (!reaper_alive && age > Duration::from_secs(2)) {
+                let _ = fs::remove_file(&reap);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    }
+    // Holding the reap lock nobody else removes the pid file, and only a link creates
+    // it, which fails while it exists.
+    if read_pid(path) == stale_pid {
+        let _ = fs::remove_file(path);
+    }
+    let _ = fs::remove_file(&reap);
+    Ok(())
 }
 
 fn sleep_interruptible(ms: u64, stop: &AtomicBool) {
@@ -921,6 +1016,34 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                 )?;
             }
         }
+        let dollar_budget = config.constraints["optionalApiCostBudgetUSD"].as_f64();
+        if dollar_budget.is_some() && !agent.harness.features.usage_reporting {
+            return Err(BusError::invalid(format!(
+                "optionalApiCostBudgetUSD is set, but {} reports no usage, so the budget could never be counted. \
+                 Remove it or use a CLI that reports cost.",
+                agent.harness.id
+            )));
+        }
+        if !agent.harness.features.usage_reporting
+            && bus.budget_of(&bus_agent).is_some_and(|b| b.limits.usd.is_some())
+        {
+            log(&format!(
+                "{} reports no usage, so the dollar part of {}'s budget never counts; its turn and minute limits still apply",
+                agent.harness.id, agent.agent.id
+            ));
+        }
+        // The configuration's limits go into the bus, where every call path (MCP, CLI,
+        // this supervisor, either implementation) enforces them.
+        let operator = bus.identify(Some(crate::types::OPERATOR_ID)).ok();
+        if let Err(error) = bus.set_agent_policy(
+            operator.as_ref().unwrap_or(&me),
+            &me.agent_id,
+            Some(&policy_from_config(&config, agent.agent)),
+        ) {
+            log(&format!(
+                "configuration limits not applied ({error}); the stricter stored limits stay in force"
+            ));
+        }
         let qagent_bin = options.qagent_bin.clone().unwrap_or_else(|| {
             std::env::current_exe()
                 .map(|p| p.display().to_string())
@@ -949,6 +1072,8 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
             }
         ));
 
+        let mut budget_noticed: Option<String> = None;
+        let mut cost_noticed = false;
         let mut paused_since: Option<Instant> = None;
         let mut last_beat = Instant::now();
         // Bus or file errors outside a turn (a locked database, a full disk) end
@@ -975,6 +1100,18 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                     while Instant::now() < until && !options.stop.load(Ordering::SeqCst) {
                         std::thread::sleep(Duration::from_millis(100));
                     }
+                    return Ok(Round::Next);
+                }
+                // The configuration's usage budget: counted from what the CLI reported into
+                // sessions/<agent>.json and checked between turns, so one turn can overshoot it.
+                if let Some(over) = config_budget_reached(&config, session.total_tokens, session.cost_usd) {
+                    if budget_noticed.as_deref() != Some(over.as_str()) {
+                        log(&format!(
+                            "budget reached ({over}); no new turns until the configuration budget is raised"
+                        ));
+                        budget_noticed = Some(over);
+                    }
+                    sleep_interruptible(wait_ms, &options.stop);
                     return Ok(Round::Next);
                 }
                 if paused_since.take().is_some() {
@@ -1065,8 +1202,9 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                     if messages.is_empty() {
                         match bus.claim_task(&me, None) {
                             Ok(task) => tasks.push(task),
+                            // Nothing to claim, or the agent already holds its claim limit.
                             Err(error) => {
-                                if error.code.as_str() != "not_found" {
+                                if !matches!(error.code.as_str(), "not_found" | "conflict") {
                                     return Err(error);
                                 }
                             }
@@ -1158,6 +1296,15 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                 session.output_tokens += normalized.usage.output_tokens;
                 session.total_tokens += normalized.usage.total_tokens;
                 session.cost_usd += normalized.usage.cost_usd;
+                if let Some(dollars) = dollar_budget {
+                    if !cost_noticed && normalized.usage.cost_usd == 0.0 {
+                        cost_noticed = true;
+                        log(&format!(
+                            "{} reported no cost for this turn; the ${dollars} budget only counts cost the CLI reports",
+                            agent.harness.id
+                        ));
+                    }
+                }
                 session.latency_ms += process_result.duration_ms as f64;
                 if let Some(pinned) = &pinned_session_id {
                     session.session_id = Some(pinned.clone());

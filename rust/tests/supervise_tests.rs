@@ -1023,3 +1023,83 @@ impl WaitOutput for std::process::Child {
         text
     }
 }
+
+// ------------------------------------------------- configuration limits and budgets
+
+#[test]
+fn supervise_applies_the_configuration_limits_to_the_bus_at_start() {
+    let e = e2e("w1", "");
+    set_constraint(&e, "maxConcurrentTasks", serde_json::json!(3));
+    let (stop, handle) = spawn_supervisor(&e, "w1", 60_000);
+    wait_for(Duration::from_secs(10), "the supervisor to wait", || {
+        e.bus
+            .get_agent("w1")
+            .unwrap()
+            .is_some_and(|a| a.stored_status == "waiting")
+    });
+    let me = e.bus.identify(Some("w1")).unwrap();
+    assert!(!me.permissions.can_delegate);
+    assert_eq!(me.permissions.max_concurrent_tasks, Some(3));
+    assert_eq!(me.permissions.max_delegation_depth, Some(0));
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap().unwrap();
+}
+
+#[test]
+fn supervise_stops_new_turns_once_the_configuration_token_budget_is_used() {
+    let e = e2e("w1", "");
+    // The fake harness reports well over 10 tokens a turn.
+    set_constraint(&e, "optionalTokenBudget", serde_json::json!(10));
+    let logs: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = {
+        let (stop, logs) = (Arc::clone(&stop), Arc::clone(&logs));
+        let db_path = e.home.join("bus.db");
+        let workdir = e.workdir.display().to_string();
+        let config_path = e.workdir.join("agent-bus.config.json");
+        std::thread::spawn(move || {
+            supervise(SuperviseOptions {
+                agent_id: "w1".into(),
+                workdir,
+                db_path,
+                config_path: Some(config_path),
+                stop,
+                wait_ms: Some(500),
+                retry_base_ms: None,
+                fake_harness_path: Some("fake-harness".to_string()),
+                qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
+                log: Some(Box::new(move |line| logs.lock().unwrap().push(line.to_string()))),
+            })
+        })
+    };
+    let first = unassigned_task(&e, "first");
+    wait_for(Duration::from_secs(15), "first task submitted", || {
+        e.bus.get_task(first).is_ok_and(|t| t.task.state == "submitted")
+    });
+    let second = unassigned_task(&e, "second");
+    wait_for(Duration::from_secs(10), "the budget notice", || {
+        logs.lock().unwrap().iter().any(|l| l.contains("budget reached (") && l.contains("reported tokens used"))
+    });
+    std::thread::sleep(Duration::from_millis(1_000));
+    assert_eq!(e.bus.get_task(second).unwrap().task.state, "open");
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap().unwrap();
+}
+
+#[test]
+fn supervise_refuses_a_dollar_budget_on_a_cli_that_reports_no_usage() {
+    let e = e2e("w1", "");
+    set_constraint(&e, "optionalApiCostBudgetUSD", serde_json::json!(5));
+    let (stop, handle) = spawn_supervisor(&e, "w1", 1_000);
+    let finished = Instant::now() + Duration::from_secs(10);
+    while !handle.is_finished() && Instant::now() < finished {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    stop.store(true, Ordering::SeqCst);
+    let error = handle.join().unwrap().unwrap_err();
+    assert!(
+        error.message.contains("reports no usage, so the budget could never be counted"),
+        "{}",
+        error.message
+    );
+}
