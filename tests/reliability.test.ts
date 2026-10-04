@@ -310,3 +310,30 @@ test("a dollar budget on a CLI that reports no usage is refused instead of silen
   const outcome = await Promise.race([supervisor.done.then(() => "returned", (error: Error) => error.message), pause(3_000).then(() => "still running")]);
   assert.match(outcome, /reports no usage, so the budget could never be counted/);
 });
+
+test("a message or open task that lands just as a wait starts wakes the waiter instead of waiting out the timeout", async (t) => {
+  const f = fixture(t);
+  const worker = f.add("fake-small", "cheap-worker");
+  const other = Bus.open({ dbPath: f.dbPath });
+  t.after(() => other.close());
+  const operator = other.identify("operator");
+  // Land the write between waitForMail's empty inbox check and the event that marks the
+  // start of the wait, the window a concurrent sender can hit.
+  const internals = f.bus as unknown as { write: <T>(fn: () => T) => T };
+  const write = internals.write.bind(f.bus);
+  let inject: (() => void) | null = null;
+  internals.write = <T>(fn: () => T): T => { const pending = inject; inject = null; pending?.(); return write(fn); };
+
+  inject = () => { other.send(operator, { to: "fake-small", type: "question", subject: "racing mail", body: "x" }); };
+  let started = Date.now();
+  const mail = await f.bus.waitForMail(worker, { timeoutMs: 3000 });
+  assert.equal(mail.status, "mail");
+  assert.ok(Date.now() - started < 2000, `woke after ${Date.now() - started} ms`);
+  f.bus.inbox(worker, { limit: 50 });
+
+  inject = () => { other.createTask(operator, { title: "racing task", role: "cheap-worker" }); };
+  started = Date.now();
+  const task = await f.bus.waitForMail(worker, { timeoutMs: 3000 });
+  assert.equal(task.status, "task");
+  assert.ok(Date.now() - started < 2000, `woke after ${Date.now() - started} ms`);
+});

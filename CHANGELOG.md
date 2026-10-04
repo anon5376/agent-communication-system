@@ -22,6 +22,10 @@ All notable changes to the Agent Communication System. Format follows
   for claimable tasks that were already waiting when it started, and checks
   again after every wait timeout, so work freed by an event about another
   agent's task is no longer stranded. Each task is offered once per change.
+- **A wait no longer misses mail that lands as it starts.** Mail or a task
+  event written between `waitForMail`'s empty inbox check and the start of the
+  wait was invisible until the wait timed out; the waiter now checks that gap
+  and wakes at once (seen as a flaky supervisor test in CI).
 - **Worktree isolation fails closed.** Under `"isolation": "worktree"` the
   supervisor runs one claimed task per turn in its worktree; if no worktree
   can be made it notes why, releases the claim and runs no turn. A pinned

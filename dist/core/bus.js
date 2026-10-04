@@ -478,6 +478,7 @@ export class Bus {
      */
     async waitForMail(actor, options) {
         const me = actor.agentId;
+        const checkedSeq = latestEventSeq(this.db);
         const pending = this.inbox(actor, { peek: true, limit: 50 }).messages;
         if (pending.length) {
             // A waiter killed earlier (kill -9) can leave 'waiting' stored; clear it without writing otherwise.
@@ -499,7 +500,15 @@ export class Bus {
         const watcher = options.watcher ?? new ChangeWatcher(this.db, this.dbPath, { maxPollMs: 1000, ...options.watcherOptions });
         let result = { status: "timeout", messages: [], events: [], seq: since };
         try {
-            while (!options.signal?.aborted) {
+            // Mail or a task event written between the empty check above and the waiting event
+            // sits at or below `since`, where the watcher never looks; pick it up here.
+            const raced = this.inbox(actor, { peek: true, limit: 50 }).messages;
+            const racedEvents = raced.length ? [] : this.taskEventsFor(me, checkedSeq, since);
+            if (raced.length)
+                result = { status: "mail", messages: raced, events: [], seq: since };
+            else if (racedEvents.length)
+                result = { status: "task", messages: [], events: racedEvents, seq: since };
+            while (result.status === "timeout" && !options.signal?.aborted) {
                 const remaining = deadline - Date.now();
                 if (remaining <= 0)
                     break;
