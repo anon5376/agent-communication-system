@@ -53,7 +53,21 @@ pub fn wait_for_mail(
     timeout: Duration,
     stop: &AtomicBool,
 ) -> Result<WaitResult> {
+    wait_for_mail_with(bus, actor, timeout, stop, || {})
+}
+
+/// `wait_for_mail` with a hook that runs after the first, empty inbox check and before
+/// the wait is marked started: tests use it to land a write in that window.
+#[doc(hidden)]
+pub fn wait_for_mail_with(
+    bus: &Bus,
+    actor: &Identity,
+    timeout: Duration,
+    stop: &AtomicBool,
+    after_check: impl FnOnce(),
+) -> Result<WaitResult> {
     let me = &actor.agent_id;
+    let checked_seq = bus.latest_seq()?;
     let pending = bus.inbox(actor, true, None)?;
     if !pending.messages.is_empty() {
         // Waiters that die mid-poll leave 'waiting' behind; this clear covers that.
@@ -70,6 +84,7 @@ pub fn wait_for_mail(
             seq: bus.latest_seq()?,
         });
     }
+    after_check();
     let watcher = ChangeWatcher::new(
         &bus.db_path,
         ChangeWatcherOptions {
@@ -101,10 +116,18 @@ pub fn wait_for_mail(
     let mut status = "none".to_string();
     let mut messages = vec![];
     let mut events = vec![];
+    // Mail or a task event written between the empty check above and the waiting event
+    // sits at or below `since`, where the watcher never looks; pick it up here.
     let pending = bus.inbox(actor, true, None)?;
     if !pending.messages.is_empty() {
         status = "mail".into();
         messages = pending.messages;
+    } else {
+        let raced = bus.task_events_for(me, checked_seq, since)?;
+        if !raced.is_empty() {
+            status = "task".into();
+            events = raced;
+        }
     }
     let deadline = Instant::now() + timeout;
     let mut seq = since;
