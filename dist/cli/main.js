@@ -410,7 +410,7 @@ async function taskCommand(ctx, sub) {
         case "claim": {
             const me = ctx.identity();
             const id = ctx.parsed.positionals[2] === undefined ? null : ctx.taskId(2);
-            const wantTree = ctx.flag("worktree") === true;
+            const wantTree = ctx.flag("worktree") === true || process.env.QAGENT_REQUIRE_WORKTREE === "1";
             // With an explicit task the repository check runs before the claim, so a bad project leaves it unclaimed.
             if (wantTree && id !== null)
                 await repoRootFor(bus.getTask(id));
@@ -419,16 +419,16 @@ async function taskCommand(ctx, sub) {
                 ctx.out(task, `claimed task #${task.id}: ${task.title}`);
                 return 0;
             }
-            // Same as the MCP tool: once claimed, the claim stands even if the checkout cannot be made.
-            let worktree = null;
-            let worktreeError = null;
+            // Same as the MCP tool: a claim that asked for a worktree and cannot get one is given back.
+            let worktree;
             try {
                 worktree = await ensureTaskWorktree(task, bus.home);
             }
             catch (error) {
-                worktreeError = error.message;
+                bus.releaseTask(me, task.id, "worktree isolation unavailable");
+                throw new BusError("conflict", `task ${task.id} needs its own worktree and none could be made, so the claim was released: ${error.message}`);
             }
-            ctx.out({ ...task, worktree, worktreeError }, `claimed task #${task.id}: ${task.title}\n${worktree ? `worktree ${worktree.workdir} (branch ${worktree.branch})` : `no worktree: ${worktreeError}`}`);
+            ctx.out({ ...task, worktree }, `claimed task #${task.id}: ${task.title}\nworktree ${worktree.workdir} (branch ${worktree.branch})`);
             return 0;
         }
         case "note": {

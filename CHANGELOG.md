@@ -6,6 +6,37 @@ All notable changes to the Agent Communication System. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Delegation and claim limits are enforced by the core.** `createTask`
+  refuses an agent without `canDelegate` (workers by default) that assigns work
+  to someone else or files unassigned work; it may still file tasks for
+  itself. The supervisor copies the project configuration's limits
+  (`canDelegate`, `allowedChildAgentIds`, `maxDelegationDepth`,
+  `constraints.maxConcurrentTasks`) into the bus as a policy stored in
+  `identities.permissions_json` (no schema change), so the MCP server, the CLI
+  and the supervisor all enforce them inside the write transaction. An agent
+  can narrow its own policy but only the operator can widen it. Token
+  rotation now keeps stored permissions.
+- **Queued work is scheduled without fresh mail.** A supervisor starts a turn
+  for claimable tasks that were already waiting when it started, and checks
+  again after every wait timeout, so work freed by an event about another
+  agent's task is no longer stranded. Each task is offered once per change.
+- **Worktree isolation fails closed.** Under `"isolation": "worktree"` the
+  supervisor runs one claimed task per turn in its worktree; if no worktree
+  can be made it notes why, releases the claim and runs no turn. A pinned
+  session under worktree isolation is refused at start. `claim --worktree`
+  and `bus_task_claim` with `worktree: true` release the claim instead of
+  keeping it without a checkout.
+- **Supervisor ownership is atomic.** The pid file is taken with a hard link
+  (it fails if held), and a stale file is removed only under a reap lock, so
+  two simultaneous starters can no longer both run one agent. A pid reused by
+  an unrelated process after a reboot no longer blocks a start on Linux.
+- **Configuration budgets are enforced, honestly.** `optionalTokenBudget` and
+  `optionalApiCostBudgetUSD` stop new turns once the usage the CLI reported
+  reaches them. They are checked between turns, so one turn can overshoot, and
+  a dollar budget on a CLI that reports no usage is refused at start.
+
 ### Added
 
 - **Benchmark runner** (`bench/`) — runs a fixed task set (14 implementation

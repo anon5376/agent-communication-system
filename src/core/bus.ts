@@ -14,8 +14,9 @@ import type { DatabaseSync } from "node:sqlite";
 import { ChangeWatcher, type ChangeWatcherOptions } from "./changes.js";
 import { appendEvent, homeFor, latestEventSeq, openDatabase, prepared, resolveDbPath, transaction } from "./db.js";
 import {
-  adoptToken, agentIdFromEnv, assertSafeAgentId, ensurePrivateDirectories, hashToken, Identity, operatorTokenPath,
-  readTokenFile, requireOperator, resolveIdentity, storedIdentity, storeNewToken, tokenPathFor, writePrivateToken,
+  adoptToken, AgentPolicy, agentIdFromEnv, assertSafeAgentId, currentPermissions, ensurePrivateDirectories, hashToken, Identity,
+  operatorTokenPath, parsePolicy, Permissions, policyWidens, readTokenFile, requireOperator, resolveIdentity, storedIdentity,
+  storedPermissionsJson, storeNewToken, tokenPathFor, writePrivateToken,
 } from "./identity.js";
 import {
   Agent, AgentStatus, AgentSummary, Authority, boundedString, BusError, BusEvent, CLAIM_TTL_MS, CLOSED_STATES, ContextReference,
@@ -273,6 +274,32 @@ export class Bus {
       this.event(actor.agentId, "token_rotated", "agent", id);
     });
     return { tokenPath };
+  }
+
+  /**
+   * Store the policy that narrows `agentId`'s permissions (null clears it). The operator may
+   * set any policy; an agent may set its own only when the new one allows nothing the stored
+   * one forbids, so a supervisor can apply its project configuration without the operator
+   * token but can never widen what the operator or an earlier policy allowed.
+   */
+  setAgentPolicy(actor: Identity, agentId: string, policy: AgentPolicy | null): Permissions {
+    const id = assertSafeAgentId(agentId);
+    if (actor.authority !== "operator" && actor.agentId !== id) throw new BusError("forbidden", `only the operator or ${id} itself may set ${id}'s policy`);
+    const next = parsePolicy(policy ?? {});
+    return this.write(() => {
+      if (!storedIdentity(this.db, id)) throw new BusError("not_found", `unknown agent: ${id}`);
+      const stored = storedPermissionsJson(this.db, id);
+      const current = parsePolicy(stored.policy);
+      if (actor.authority !== "operator" && policyWidens(current, next)) {
+        throw new BusError("forbidden", `${id} may only narrow its own policy; ask the operator to widen it`);
+      }
+      const value: Record<string, unknown> = { ...stored };
+      if (policy === null || !Object.keys(next).length) delete value.policy;
+      else value.policy = { ...next, updatedMs: this.now(), by: actor.agentId };
+      prepared(this.db, "UPDATE identities SET permissions_json = ?, updated_ms = ? WHERE agent_id = ?").run(JSON.stringify(value), this.now(), id);
+      this.event(actor.agentId, "agent_policy", "agent", id, { policy: value.policy ?? null });
+      return currentPermissions(this.db, id)!;
+    });
   }
 
   // ------------------------------------------------------------------ agents
@@ -798,6 +825,7 @@ export class Bus {
       if (to && !this.agentRow(to)) throw new BusError("not_found", `unknown assignee: ${to}`);
       if (reviewer && !this.agentRow(reviewer)) throw new BusError("not_found", `unknown reviewer: ${reviewer}`);
       if (input.parentId !== undefined && input.parentId !== null) this.requireTask(Number(input.parentId));
+      this.assertMayDelegate(actor, to, input.parentId ?? null);
       let blocked = false;
       for (const dep of dependencies) blocked = this.requireTask(dep).state !== "accepted" || blocked;
       const state: TaskState = blocked ? "blocked" : "open";
@@ -821,6 +849,68 @@ export class Bus {
   }
 
   /**
+   * Delegation rules, checked inside the creating transaction against the permissions stored
+   * now (not those resolved when the caller identified itself). Creating work for someone
+   * else, or for anyone to claim, needs canDelegate; a policy can also name the only agents
+   * this one may assign and how deep under existing tasks it may create work.
+   */
+  private assertMayDelegate(actor: Identity, to: string | null, parentId: number | null): void {
+    if (actor.authority === "operator") return;
+    const permissions = currentPermissions(this.db, actor.agentId) ?? actor.permissions;
+    const me = actor.agentId;
+    if (to !== me && !permissions.canDelegate) {
+      throw new BusError("forbidden", `${me} may not delegate: it can only create tasks assigned to itself (--to ${me})`);
+    }
+    if (to && to !== me && permissions.allowedChildAgentIds?.length && !permissions.allowedChildAgentIds.includes(to)) {
+      throw new BusError("forbidden", `${me} may only assign work to ${permissions.allowedChildAgentIds.join(", ")}, not ${to}`);
+    }
+    if (to !== me && permissions.maxDelegationDepth !== undefined && parentId !== null) {
+      let depth = 0;
+      for (let id: number | null = Number(parentId); id !== null && depth <= permissions.maxDelegationDepth; depth += 1) {
+        const parent = prepared(this.db, "SELECT parent_id FROM tasks WHERE id = ?").get(id) as Row | undefined;
+        id = parent ? num(parent.parent_id) : null;
+      }
+      if (depth > permissions.maxDelegationDepth) {
+        throw new BusError("forbidden", `${me} may create work at most ${permissions.maxDelegationDepth} level(s) below a top-level task`);
+      }
+    }
+  }
+
+  /**
+   * Tasks `agentId` could claim right now: open or sent back, assigned to it or unassigned for
+   * its role, with no lease conflict, and nothing at all once it holds its claim limit. Read
+   * only; the supervisor uses it to schedule work that is already waiting, not just new mail.
+   */
+  claimableTasks(agentId: string, limit = 50): Task[] {
+    const permissions = currentPermissions(this.db, agentId);
+    if (permissions?.maxConcurrentTasks !== undefined && this.claimedCount(agentId) >= permissions.maxConcurrentTasks) return [];
+    const role = String(this.agentRow(agentId)?.role ?? "");
+    const rows = prepared(this.db, `
+      SELECT * FROM tasks
+      WHERE state IN ('open', 'changes_requested')
+        AND (assignee = ? OR (assignee IS NULL AND (role = '' OR role = ?)))
+      ORDER BY CASE WHEN assignee = ? THEN 0 ELSE 1 END,
+               CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+               id LIMIT 500
+    `).all(agentId, role, agentId) as Row[];
+    const now = this.now();
+    const free = rows.filter((row) => {
+      // A claim past its expiry is reopened by the next write; its leases do not block here.
+      const task = this.toLiteTask(row);
+      return !this.leaseConflicts(task).some((conflict) => {
+        const holder = this.taskRow(conflict.taskId);
+        return !(holder && num(holder.claim_expires_ms) !== null && Number(holder.claim_expires_ms) < now);
+      });
+    });
+    return this.toTasks(free.slice(0, Math.max(1, limit)));
+  }
+
+  /** How many tasks the agent holds claimed right now. */
+  private claimedCount(agentId: string): number {
+    return Number((prepared(this.db, "SELECT COUNT(*) AS n FROM tasks WHERE state = 'claimed' AND assignee = ?").get(agentId) as { n: number }).n);
+  }
+
+  /**
    * Claim a task atomically. The claim is one UPDATE ... WHERE state IN ('open','changes_requested')
    * AND (assignee IS NULL OR assignee = me) RETURNING; it wins only if that row came back.
    * Without an id, the most urgent claimable task assigned to me, or unassigned for my role, is taken.
@@ -830,6 +920,11 @@ export class Bus {
     const explicit = taskId !== undefined && taskId !== null;
     return this.write(() => {
       this.reopenExpiredClaims();
+      const limit = (currentPermissions(this.db, me) ?? actor.permissions).maxConcurrentTasks;
+      if (limit !== undefined) {
+        const held = this.claimedCount(me);
+        if (held >= limit) throw new BusError("conflict", `${me} already holds ${held} claimed task(s), its limit; submit or release one first`);
+      }
       const role = explicit ? "" : String(this.agentRow(me)?.role ?? "");
       const candidateStmt = prepared(this.db, `
         SELECT id, state, assignee, project, path_scopes_json FROM tasks

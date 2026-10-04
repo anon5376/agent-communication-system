@@ -171,15 +171,17 @@ export function createBusServer(bus, options) {
     }, async (input) => run(async (identity) => {
         const task = bus.claimTask(identity, input.task_id ?? null);
         const text = `${renderTaskLine(task, "Claimed")}\n\n${renderTask(bus.getTask(task.id))}`;
-        if (!input.worktree)
+        // The supervisor sets QAGENT_REQUIRE_WORKTREE when the bus isolates tasks in worktrees.
+        if (!input.worktree && process.env.QAGENT_REQUIRE_WORKTREE !== "1")
             return text;
         try {
             const worktree = await ensureTaskWorktree(task, bus.home);
             return `${text}\n\nWorktree: ${worktree.workdir} (branch ${worktree.branch}). Edit and commit there, not in ${task.project}.`;
         }
         catch (error) {
-            // The claim stands; only the isolation step failed.
-            return `${text}\n\nNo worktree: ${error.message}`;
+            // Isolation was asked for and is not available: give the claim back rather than work in the shared checkout.
+            bus.releaseTask(identity, task.id, "worktree isolation unavailable");
+            throw new BusError("conflict", `task ${task.id} needs its own worktree and none could be made, so the claim was released: ${error.message}`);
         }
     }));
     server.registerTool("bus_task_note", {
