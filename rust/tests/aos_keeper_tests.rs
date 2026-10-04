@@ -165,17 +165,17 @@ fn the_watcher_never_restarts_into_an_untrusted_folder() {
 fn autostart_files_name_the_watcher_and_keep_path() {
     let unit = keeper::systemd_unit(
         Path::new("/opt/aos/bin/aos"),
-        Path::new("/home/a/.agent-bus/bus.db"),
-        "/home/a/.local/bin:/usr/bin",
+        Path::new("/srv/crew/.agent-bus/bus.db"),
+        "/srv/crew/.local/bin:/usr/bin",
     );
-    assert!(unit.contains("ExecStart=\"/opt/aos/bin/aos\" --db \"/home/a/.agent-bus/bus.db\" watch"));
-    assert!(unit.contains("Environment=\"PATH=/home/a/.local/bin:/usr/bin\""));
+    assert!(unit.contains("ExecStart=\"/opt/aos/bin/aos\" --db \"/srv/crew/.agent-bus/bus.db\" watch"));
+    assert!(unit.contains("Environment=\"PATH=/srv/crew/.local/bin:/usr/bin\""));
     assert!(unit.contains("Restart=on-failure"));
     let plist = keeper::launchd_plist(
         Path::new("/opt/aos & co/aos"),
-        Path::new("/Users/a/.agent-bus/bus.db"),
+        Path::new("/srv/crew/.agent-bus/bus.db"),
         "/usr/bin",
-        Path::new("/Users/a/.agent-bus/logs/aos-watch.out"),
+        Path::new("/srv/crew/.agent-bus/logs/aos-watch.out"),
     );
     assert!(plist.contains("<string>/opt/aos &amp; co/aos</string><string>--db</string>"));
     assert!(plist.contains("<key>RunAtLoad</key><true/>"));
