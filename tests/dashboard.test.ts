@@ -194,7 +194,7 @@ test("the page is server-rendered, escaped, and shows data only with a session",
   const nonce = /script-src 'nonce-([^']+)'/.exec(String(page.headers["content-security-policy"]))?.[1];
   assert.ok(nonce, "CSP carries a nonce");
   assert.ok(page.body.includes(`<script nonce="${nonce}">`));
-  for (const heading of ["Agents", "Open tasks", "Recent messages", "Send a message"]) assert.ok(page.body.includes(`>${heading}</h2>`), heading);
+  for (const heading of ["Needs you", "Active and queued", "Agents", "Recent messages", "Send a message"]) assert.ok(page.body.includes(`>${heading}</h2>`), heading);
   assert.ok(page.body.includes("Write the &lt;parser&gt;"), "task title rendered and escaped");
   assert.ok(!page.body.includes("<parser>"), "raw markup never reaches the page");
   assert.ok(page.body.includes("function agentRows("), "the client reuses the server's row renderers");
