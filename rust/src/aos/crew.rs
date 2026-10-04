@@ -148,6 +148,19 @@ pub const CLIS: &[Cli] = &[
         install: "see the Grok CLI docs",
         sign_in: "run grok login",
     },
+    Cli {
+        id: "devin",
+        name: "Devin CLI",
+        binaries: &["devin"],
+        provider: "cognition",
+        family: "devin",
+        adapter: "devin",
+        crew_ready: false,
+        tools: false,
+        auto_approve: true,
+        install: "curl -fsSL https://cli.devin.ai/install.sh | bash",
+        sign_in: "run devin auth login",
+    },
 ];
 
 pub fn cli(id: &str) -> Option<&'static Cli> {
@@ -391,7 +404,7 @@ pub fn plan(found: &[Found]) -> Vec<Member> {
 /// hands out tasks through the bus tools, so only a CLI with them can lead.
 pub fn plan_with(found: &[Found], allowed: &[String]) -> Vec<Member> {
     let ready: Vec<&Found> = found.iter().filter(|f| f.joinable(allowed)).collect();
-    const LATER: [&str; 5] = ["gemini", "opencode", "kimi", "hermes", "grok"];
+    const LATER: [&str; 6] = ["gemini", "opencode", "kimi", "hermes", "grok", "devin"];
     let order = |first: [&'static str; 3]| -> Vec<&'static str> {
         first.into_iter().chain(LATER).collect()
     };

@@ -83,10 +83,10 @@ Agent logs are in `~/.agent-bus/logs/` (`<agent>.log` for the supervisor, `<agen
 | Gemini CLI | bus tools (a per-agent `GEMINI_CLI_SYSTEM_SETTINGS_PATH` file) | `connect gemini --auto-approve` |
 | Kimi Code | bus tools (`--mcp-config`) | `connect kimi --auto-approve` |
 | OpenCode | bus tools (`OPENCODE_CONFIG_CONTENT`) | `connect opencode --auto-approve` |
-| Hermes Agent, Grok CLI | supervisor-managed | `connect hermes --auto-approve` |
+| Hermes Agent, Grok CLI, Devin CLI | supervisor-managed | `connect devin --auto-approve` |
 | anything else | either; see below | `connect <name> -- <command line>` |
 
-Gemini, Kimi, OpenCode, Hermes and Grok run commands and edit files without asking you when they work unattended, so aos adds them only after you type `--auto-approve` once (kept in `aos/auto-approve`; delete the line to take it back). To keep their approval prompts instead, set `"autoApprove": false` under the harness's `options` in `crew.json`; a headless CLI then usually can't edit anything. A CLI without bus tools can't be the lead, because the lead hands out tasks through them.
+Gemini, Kimi, OpenCode, Hermes, Grok and Devin run commands and edit files without asking you when they work unattended, so aos adds them only after you type `--auto-approve` once (kept in `aos/auto-approve`; delete the line to take it back). To keep their approval prompts instead, set `"autoApprove": false` under the harness's `options` in `crew.json`; a headless CLI then usually can't edit anything. A CLI without bus tools can't be the lead, because the lead hands out tasks through them.
 
 `connect <cli> as <agent>` moves an existing seat (`lead`, `builder`, `reviewer`) onto that CLI; without `as`, a new teammate named after the CLI joins as a builder. For any other CLI give its command line after `--`, with placeholders the supervisor fills in on every turn:
 
@@ -106,7 +106,7 @@ aos disconnect mytool
 
 The command line is stored under `options.args` of the harness in `crew.json`, where you can also set `env`, `resumeArgs`, `timeoutMs` and `autoReport`. Arguments containing spaces need editing there. A CLI's reply is read from its last JSON line with a `result`, `text`, `content` or `message` field, and otherwise from its plain output.
 
-Only the stand-in CLIs in the tests have run through these paths; Gemini, Kimi, OpenCode, Hermes and Grok have not been run live. The TypeScript `qagent supervise` does not know `options` or `{mcpConfig}` yet, so run connected CLIs from aos.
+Only the stand-in CLIs in the tests have run through these paths; Gemini, Kimi, OpenCode, Hermes, Grok and Devin have not been run live. The TypeScript `qagent supervise` does not know `options` or `{mcpConfig}` yet, so run connected CLIs from aos.
 
 ## From the shell
 

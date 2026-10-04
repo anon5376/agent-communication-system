@@ -1126,6 +1126,31 @@ fn hermes_parse(stdout: &str, exit_code: i32) -> NormalizedHarnessResult {
     }
 }
 
+/// Devin CLI (Cognition): `-p` runs one turn and prints the answer. It has no
+/// per-run MCP flag (`devin mcp add` is global), so the supervisor manages it.
+fn devin_build(context: &AdapterContext) -> HarnessInvocation {
+    let mut args = vec!["-p".to_string(), context.prompt.clone()];
+    if auto_approve(context) {
+        args.push("--permission-mode".to_string());
+        args.push("dangerous".to_string());
+    }
+    if let Some(session) = &context.session_id {
+        args.push("--resume".to_string());
+        args.push(session.clone());
+    }
+    if let Some(model) = &context.agent.model.exact_model {
+        args.push("--model".to_string());
+        args.push(model.clone());
+    }
+    HarnessInvocation {
+        command: context.agent.harness.command.clone(),
+        args,
+        environment: common_environment(context),
+        auto_report: false,
+        timeout_ms: 60 * 60_000,
+    }
+}
+
 fn fake_prepare(context: &AdapterContext) -> Result<()> {
     fs::create_dir_all(PathBuf::from(&context.workdir).join(".agent-bus"))?;
     Ok(())
@@ -1242,6 +1267,12 @@ static ADAPTERS: &[HarnessAdapter] = &[
         prepare: None,
         build: hermes_build,
         parse: hermes_parse,
+    },
+    HarnessAdapter {
+        id: "devin",
+        prepare: None,
+        build: devin_build,
+        parse: default_result,
     },
     HarnessAdapter {
         id: "fake",

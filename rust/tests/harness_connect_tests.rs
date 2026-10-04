@@ -75,6 +75,14 @@ fn auto_approving_clis_need_the_operators_word() {
     crew::setup(&bus, &paths, &found, false).unwrap();
 
     let err = crew::connect(&bus, &paths, &found, &req("gemini", None, &[], false)).unwrap_err();
+    let devin = only(&["claude", "devin"]);
+    let devin_err =
+        crew::connect(&bus, &paths, &devin, &req("devin", None, &[], false)).unwrap_err();
+    assert!(
+        devin_err.message.contains("--auto-approve"),
+        "{}",
+        devin_err.message
+    );
     assert!(err.message.contains("--auto-approve"), "{}", err.message);
     assert!(!fs::read_to_string(paths.crew())
         .unwrap()
@@ -265,7 +273,9 @@ fn each_adapter_hands_its_agent_the_bus_as_itself() {
     let dir = fresh_dir("wiring");
     let (bus, paths) = bus_in(&dir);
     let workdir = fresh_dir("wiring-work");
-    let found = only(&["claude", "gemini", "kimi", "opencode", "grok", "hermes"]);
+    let found = only(&[
+        "claude", "gemini", "kimi", "opencode", "grok", "hermes", "devin",
+    ]);
     crew::setup(&bus, &paths, &found, false).unwrap();
     for (cli, seat) in [
         ("gemini", "g1"),
@@ -273,6 +283,7 @@ fn each_adapter_hands_its_agent_the_bus_as_itself() {
         ("opencode", "o1"),
         ("grok", "x1"),
         ("hermes", "h1"),
+        ("devin", "d1"),
     ] {
         crew::connect(&bus, &paths, &found, &req(cli, Some(seat), &[], true)).unwrap();
     }
@@ -321,10 +332,19 @@ fn each_adapter_hands_its_agent_the_bus_as_itself() {
     let (inv, _) = invocation(&paths, &db, "h1", &workdir);
     assert!(inv.args.contains(&"--yolo".to_string()));
 
+    // Devin: print mode, supervisor-managed, bypass permissions only when allowed.
+    assert!(supervisor_managed(&resolve_agent(&config, "d1").unwrap()));
+    let (inv, _) = invocation(&paths, &db, "d1", &workdir);
+    assert_eq!(inv.args[..2], ["-p".to_string(), "do the work".to_string()]);
+    assert!(inv
+        .args
+        .windows(2)
+        .any(|w| w == ["--permission-mode", "dangerous"]));
+
     // autoApprove false in crew.json drops every approval-skipping flag.
     let mut crew_json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(paths.crew()).unwrap()).unwrap();
-    for h in ["gemini", "opencode", "grok", "hermes"] {
+    for h in ["gemini", "opencode", "grok", "hermes", "devin"] {
         crew_json["harnesses"][h]["options"]["autoApprove"] = serde_json::json!(false);
     }
     fs::write(
@@ -341,6 +361,8 @@ fn each_adapter_hands_its_agent_the_bus_as_itself() {
     assert!(!inv.args.contains(&"--always-approve".to_string()));
     let (inv, _) = invocation(&paths, &db, "h1", &workdir);
     assert!(!inv.args.contains(&"--yolo".to_string()));
+    let (inv, _) = invocation(&paths, &db, "d1", &workdir);
+    assert!(!inv.args.contains(&"--permission-mode".to_string()));
 }
 
 // ------------------------------------------------------------- end to end
