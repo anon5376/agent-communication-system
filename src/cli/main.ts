@@ -12,7 +12,8 @@ import type { Identity } from "../core/identity.js";
 import { agentIdFromEnv } from "../core/identity.js";
 import { defaultImportSources, runImport } from "../core/import.js";
 import { waitForMail, waitSeconds } from "../notify/wait.js";
-import { BusError, MessageType, OPERATOR_ID, Priority, TaskState } from "../core/types.js";
+import { BusError, MessageType, OPERATOR_ID, Priority, STALE_AGENT_MS, TaskState } from "../core/types.js";
+import { taskAttention } from "../attention.js";
 import { ensureTaskWorktree, pruneTaskWorktrees, removeTaskWorktree, repoRootFor, type TaskWorktree } from "../worktree.js";
 import { renderAgents, renderEvent, renderImport, renderMessages, renderStatus, renderTask, renderTasks, renderTrace, renderTraceHtml } from "./format.js";
 
@@ -137,7 +138,7 @@ class Context {
   }
 
   taskId(index: number): number {
-    const raw = this.position(index, "task number").replace(/^#/, "");
+    const raw = this.position(index, "task number").replace(/^(#|task-)/, "");
     const id = Number(raw);
     if (!Number.isInteger(id) || id <= 0) throw new BusError("invalid", `invalid task number: ${raw}`);
     return id;
@@ -337,20 +338,21 @@ async function dispatch(ctx: Context): Promise<number> {
       return taskCommand(ctx, sub);
     case "trace": {
       const trace = ctx.bus.traceTask(ctx.taskId(1));
+      const now = taskAttention(ctx.bus, trace.task, STALE_AGENT_MS);
       const format = ctx.str("format") ?? (ctx.str("out")?.endsWith(".html") ? "html" : "text");
       if (format === "html") {
         const out = ctx.str("out");
         if (!out) throw new BusError("invalid", "--format html requires --out FILE");
-        writeFileSync(out, renderTraceHtml(trace), { mode: 0o600 });
+        writeFileSync(out, renderTraceHtml(trace, now), { mode: 0o600 });
         ctx.out({ out }, `wrote ${out}`);
         return 0;
       }
       if (format === "json") {
-        console.log(JSON.stringify(trace, null, 2));
+        console.log(JSON.stringify({ ...trace, now }, null, 2));
         return 0;
       }
       if (format !== "text") throw new BusError("invalid", "--format must be text, json, or html");
-      ctx.out(trace, renderTrace(trace));
+      ctx.out({ ...trace, now }, renderTrace(trace, now));
       return 0;
     }
     case "import": {

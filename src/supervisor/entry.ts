@@ -8,7 +8,8 @@ import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { configPathFromProject, enabledAgents, loadConfig, resolveAgent } from "../config.js";
 import { Bus } from "../core/bus.js";
 import { operatorTokenPath, readTokenFile } from "../core/identity.js";
-import { BusError } from "../core/types.js";
+import { BusError, STALE_AGENT_MS } from "../core/types.js";
+import { agentViews, ATTENTION_TIERS, attentionList, taskViews } from "../attention.js";
 import { supervise } from "../supervisor.js";
 
 export interface EntryContext {
@@ -71,6 +72,13 @@ function doctor(positionals: string[], configPath: string | undefined, context: 
     const operatorToken = readTokenFile(operatorTokenPath(bus.home));
     if (!operatorToken) problems.push(`no operator token at ${operatorTokenPath(bus.home)}`);
     out(`agents ${bus.listAgents().map((agent) => agent.id).join(", ") || "(none)"}\n`);
+    // What needs the operator, most urgent first. Informational: it does not change the exit code.
+    const now = bus.now();
+    const attention = attentionList(taskViews(bus, now), agentViews(bus), now, STALE_AGENT_MS).filter((item) => item.attention.tier < ATTENTION_TIERS);
+    out(attention.length ? `attention ${attention.length} task(s) need you\n` : "attention nothing needs you\n");
+    for (const { task, attention: item } of attention) {
+      out(`  #${task.id} ${item.label}: ${item.reason}\n    evidence: ${item.evidence}\n    next: ${item.next}\n`);
+    }
     const [agentId, dir] = positionals;
     if (agentId) {
       try { bus.identify(agentId); out(`identity ${agentId} ok\n`); } catch (error) { problems.push(`identity ${agentId}: ${(error as Error).message}`); }

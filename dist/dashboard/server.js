@@ -15,8 +15,9 @@ import { createServer } from "node:http";
 import { Bus } from "../core/bus.js";
 import { ChangeWatcher } from "../core/changes.js";
 import { identityForToken } from "../core/identity.js";
-import { BusError, CLOSED_STATES, OPERATOR_ID } from "../core/types.js";
+import { BusError, OPERATOR_ID } from "../core/types.js";
 import { renderPage, renderSignedOut } from "./page.js";
+import { taskViews } from "../attention.js";
 import { AuthError, requireLoopbackHost, requireSameOrigin, requireSession, Sessions, sessionOf } from "./session.js";
 export const DEFAULT_PORT = 11511;
 export const HOST = "127.0.0.1";
@@ -50,6 +51,8 @@ function messageView(message) {
     const first = (message.subject.trim() || message.body.trim()).split("\n")[0] ?? "";
     return { seq: message.seq, tsMs: message.tsMs, sender: message.sender, recipient: message.recipient, line: first.slice(0, 300) };
 }
+/** Open tasks plus recent failures, with what the attention rules need. Four reads. */
+const TASK_VIEW_QUERIES = 4;
 class Reader {
     bus;
     stats;
@@ -58,7 +61,7 @@ class Reader {
         this.stats = stats;
     }
     state() {
-        this.stats.queries += 5;
+        this.stats.queries += 3 + TASK_VIEW_QUERIES;
         const seq = this.bus.latestSeq();
         const last = seq > 0 ? this.bus.events(seq - 1, 1)[0] : undefined;
         return {
@@ -66,9 +69,7 @@ class Reader {
             seq,
             lastChangeMs: last?.tsMs ?? null,
             agents: this.bus.listAgents().filter((agent) => agent.id !== OPERATOR_ID).map(agentView),
-            tasks: this.bus.listTasks({ limit: 200 }).map((task) => ({
-                id: task.id, title: task.title, assignee: task.assignee, state: task.state, createdMs: task.createdMs, closed: false,
-            })),
+            tasks: taskViews(this.bus, this.bus.now()),
             messages: this.bus.getMessages({ limit: 100 }).map(messageView).reverse(),
         };
     }
@@ -97,14 +98,11 @@ class Reader {
             this.stats.queries += 1;
             agents = this.bus.agentSummaries([...agentIds]).map(agentView);
         }
-        let tasks = [];
-        const ids = [...taskIds].filter((id) => Number.isInteger(id) && id > 0).slice(0, 500);
-        if (ids.length) {
-            this.stats.queries += 1;
-            tasks = this.bus.taskSummaries(ids).map((task) => ({
-                id: task.id, title: task.title, assignee: task.assignee, state: task.state,
-                createdMs: task.createdMs, closed: CLOSED_STATES.includes(task.state),
-            }));
+        // A task change can unblock or block others (dependencies), so the whole list is re-read and replaced.
+        let tasks;
+        if (taskIds.size) {
+            this.stats.queries += TASK_VIEW_QUERIES;
+            tasks = taskViews(this.bus, this.bus.now());
         }
         let messages = [];
         if (messageSeqs.size) {
