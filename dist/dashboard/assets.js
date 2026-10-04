@@ -23,7 +23,10 @@ td { padding: 7px 12px 7px 0; border-bottom: 1px solid #242424; vertical-align: 
 .m, .none { color: #8c8c8c; }
 .agents th:nth-child(1) { width: 40%; }
 .agents th:nth-child(2) { width: 30%; }
-.tasks th:nth-child(1) { width: 64px; }
+.tasks th:nth-child(1), .attention th:nth-child(1) { width: 64px; }
+.attention th:nth-child(2) { width: 120px; }
+.why { display: block; }
+code.next { display: block; margin-top: 4px; color: #dddddd; white-space: pre-wrap; overflow-wrap: anywhere; }
 .tasks th:nth-child(3) { width: 140px; }
 .tasks th:nth-child(4) { width: 150px; }
 .tasks th:nth-child(5), .messages th:nth-child(4) { width: 96px; }
@@ -49,14 +52,18 @@ a { color: #6aa0ff; }
 }
 `;
 /**
- * Client logic. Runs after the shared renderers from page.ts (esc, ago,
- * agentState, agentRows, taskRows, messageRows, statusLine) are defined.
+ * Client logic. Runs after the shared renderers from page.ts and attention.ts
+ * (esc, ago, agentState, attention, agentRows, attentionRows, taskRows,
+ * messageRows, statusLine) are defined. The 30 s re-render also re-applies the
+ * attention rules, so a claim that goes stale with no write still moves up.
  * One EventSource per tab; the server pushes changes. The only timer is a
  * 30 s local re-render so ages stay current; it makes no request.
  */
 export const CLIENT_JS = `
 const boot = JSON.parse(document.getElementById("boot").textContent);
 const staleMs = boot.staleMs;
+const stallMs = boot.stallMs;
+const tiers = boot.tiers;
 const agents = new Map(boot.agents.map((a) => [a.id, a]));
 const tasks = new Map(boot.tasks.map((t) => [t.id, t]));
 const messages = new Map(boot.messages.map((m) => [m.seq, m]));
@@ -67,16 +74,18 @@ function render() {
   const now = Date.now();
   const agentList = Array.from(agents.values()).sort((a, b) => a.id < b.id ? -1 : 1);
   $("agent-rows").innerHTML = agentRows(agentList, now, staleMs);
-  $("task-rows").innerHTML = taskRows(Array.from(tasks.values()).sort((a, b) => a.id - b.id), now);
+  const taskList = Array.from(tasks.values());
+  $("attention-rows").innerHTML = attentionRows(taskList, agentList, now, staleMs, stallMs, tiers);
+  $("task-rows").innerHTML = taskRows(taskList, agentList, now, staleMs, stallMs, tiers);
   $("message-rows").innerHTML = messageRows(Array.from(messages.values()).sort((a, b) => b.seq - a.seq), now);
   $("status").textContent = "";
-  $("status").insertAdjacentHTML("afterbegin", statusLine({ dbPath: boot.dbPath, agents: agentList, lastChangeMs: lastChangeMs }, now, staleMs));
+  $("status").insertAdjacentHTML("afterbegin", statusLine({ dbPath: boot.dbPath, agents: agentList, tasks: taskList, lastChangeMs: lastChangeMs }, now, staleMs, stallMs, tiers));
   $("agent-ids").innerHTML = agentList.map((a) => '<option value="' + esc(a.id) + '">').join("");
 }
 
 function apply(delta) {
   for (const a of delta.agents || []) agents.set(a.id, a);
-  for (const t of delta.tasks || []) { if (t.closed) tasks.delete(t.id); else tasks.set(t.id, t); }
+  if (delta.tasks) { tasks.clear(); for (const t of delta.tasks) tasks.set(t.id, t); }
   for (const m of delta.messages || []) messages.set(m.seq, m);
   if (messages.size > 100) {
     const drop = Array.from(messages.keys()).sort((a, b) => a - b).slice(0, messages.size - 100);

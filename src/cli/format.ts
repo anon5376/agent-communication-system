@@ -2,6 +2,7 @@
  * Plain-text rendering for the v2 CLI. fmtAgo is ported from cli-view.ts:1-49;
  * everything else is a text table with no colour, so output pipes cleanly.
  */
+import type { Attention } from "../attention.js";
 import type { ImportReport } from "../core/import.js";
 import type { Agent, BusEvent, Message, Task, TaskDetail, TaskTrace } from "../core/types.js";
 
@@ -90,12 +91,20 @@ export function renderTask(task: TaskDetail): string {
   return lines.join("\n");
 }
 
-export function renderTrace(trace: TaskTrace): string {
+/** "now:" lines for a trace: where the task stands, why, and the next command. */
+export function renderAttention(attention: Attention, indent = "  "): string[] {
+  const lines = [`${indent}now: ${attention.label}. ${attention.reason}`, `${indent}evidence: ${attention.evidence}`];
+  if (attention.next) lines.push(`${indent}next: ${attention.next}`);
+  return lines;
+}
+
+export function renderTrace(trace: TaskTrace, attention?: Attention): string {
   const task = trace.task;
   const lines = [
     `Trace #${task.id}: ${task.title}`,
     `  state ${task.state}  assignee ${task.assignee ?? "-"}  creator ${task.creator}  round ${task.round}`,
   ];
+  if (attention) lines.push(...renderAttention(attention));
   if (task.parentId !== null) lines.push(`  parent #${task.parentId}`);
   if (trace.dependencies.length) lines.push(`  depends on ${trace.dependencies.map((id) => `#${id}`).join(", ")}`);
   if (trace.dependents.length) lines.push(`  unblocks ${trace.dependents.map((id) => `#${id}`).join(", ")}`);
@@ -113,7 +122,7 @@ function esc(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-export function renderTraceHtml(trace: TaskTrace): string {
+export function renderTraceHtml(trace: TaskTrace, attention?: Attention): string {
   const task = trace.task;
   const items = trace.timeline.map((item) => {
     const time = new Date(item.tsMs).toISOString();
@@ -132,7 +141,7 @@ time{color:#888;font-size:12px;display:block}.kind{font-size:12px;color:#555;bac
 <h1>Trace #${task.id}: ${esc(task.title)}</h1>
 <div class="meta">state <code>${esc(task.state)}</code> · assignee <code>${esc(task.assignee ?? "-")}</code> · creator <code>${esc(task.creator)}</code> · round ${task.round}
 ${task.parentId !== null ? ` · parent #${task.parentId}` : ""}${trace.dependencies.length ? ` · depends on ${trace.dependencies.map((id) => `#${id}`).join(", ")}` : ""}${trace.dependents.length ? ` · unblocks ${trace.dependents.map((id) => `#${id}`).join(", ")}` : ""}
-<br>${trace.timeline.length} items · exported ${new Date().toISOString()}</div>
+${attention ? `<p class="now"><b>now: ${esc(attention.label)}.</b> ${esc(attention.reason)}<br>evidence: ${esc(attention.evidence)}${attention.next ? `<br>next: <code>${esc(attention.next)}</code>` : ""}</p>` : "<br>"}${trace.timeline.length} items · exported ${new Date().toISOString()}</div>
 <ol>
 ${items}
 </ol>

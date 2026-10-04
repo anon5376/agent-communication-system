@@ -7,10 +7,11 @@
  * change arrives. Keep them free of imports and closures for that reason.
  */
 import { STALE_AGENT_MS } from "../core/types.js";
+import { agentState, ago, ATTENTION_TIERS, attention, type AgentView, STALL_MS, type TaskView } from "../attention.js";
 import { CLIENT_JS, CSS } from "./assets.js";
 
-export interface AgentView { id: string; status: string; waitUntilMs: number | null; lastSeenMs: number | null }
-export interface TaskView { id: number; title: string; assignee: string | null; state: string; createdMs: number; closed: boolean }
+export type { AgentView, TaskView } from "../attention.js";
+export { agentState, ago } from "../attention.js";
 export interface MessageView { seq: number; tsMs: number; sender: string; recipient: string | null; line: string }
 
 export interface ViewState {
@@ -26,25 +27,6 @@ export function esc(value: unknown): string {
   return String(value ?? "").replace(/[&<>"']/g, (c) => c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : c === '"' ? "&quot;" : "&#39;");
 }
 
-export function ago(ms: number | null, now: number): string {
-  if (ms === null || ms === undefined) return "never";
-  const s = Math.max(0, Math.round((now - ms) / 1000));
-  if (s < 10) return "now";
-  if (s < 60) return s + " s ago";
-  const m = Math.floor(s / 60);
-  if (m < 60) return m + " min ago";
-  const h = Math.floor(m / 60);
-  if (h < 48) return h + " h ago";
-  return Math.floor(h / 24) + " d ago";
-}
-
-/** Same rule as Bus.toAgent: a waiter past its deadline, or an agent unseen for staleMs, is offline. */
-export function agentState(agent: AgentView, now: number, staleMs: number): string {
-  if (agent.status === "waiting") return agent.waitUntilMs !== null && agent.waitUntilMs >= now ? "waiting" : "offline";
-  if (agent.status === "offline") return "offline";
-  return agent.lastSeenMs !== null && now - agent.lastSeenMs <= staleMs ? agent.status : "offline";
-}
-
 export function agentRows(agents: AgentView[], now: number, staleMs: number): string {
   if (!agents.length) return '<tr><td class="none wide">No agents yet.</td></tr>';
   return agents.map((agent) => {
@@ -54,11 +36,25 @@ export function agentRows(agents: AgentView[], now: number, staleMs: number): st
   }).join("");
 }
 
-export function taskRows(tasks: TaskView[], now: number): string {
-  if (!tasks.length) return '<tr><td class="none wide">No open tasks.</td></tr>';
-  return tasks.map((task) => '<tr><td class="id">#' + esc(task.id) + '</td><td class="wide">' + esc(task.title) +
-    '</td><td class="' + (task.assignee ? "" : "m") + '">' + esc(task.assignee || "unassigned") + "</td><td>" + esc(String(task.state).replace(/_/g, " ")) +
-    '</td><td class="m">' + esc(ago(task.createdMs, now)) + "</td></tr>").join("");
+/** Tasks that need the operator, most urgent first: needs review, then failed or blocked, then stalled. */
+export function attentionRows(tasks: TaskView[], agents: AgentView[], now: number, staleMs: number, stallMs: number, tiers: number): string {
+  const items = tasks.map((task) => ({ task, a: attention(task, agents, now, staleMs, stallMs) }))
+    .filter((item) => item.a.tier < tiers)
+    .sort((x, y) => x.a.tier - y.a.tier || x.task.id - y.task.id);
+  if (!items.length) return '<tr><td class="none wide">Nothing needs you. Nothing is waiting for review, failed, blocked or stalled.</td></tr>';
+  return items.map((item) => '<tr><td class="id">#' + esc(item.task.id) + '</td><td>' + esc(item.a.label) + '</td><td class="wide">' + esc(item.task.title) +
+    '<span class="why">' + esc(item.a.reason) + '</span><span class="why m">' + esc(item.a.evidence) + '</span><code class="next">' + esc(item.a.next) + "</code></td></tr>").join("");
+}
+
+/** Work going on without the operator: active first, then the queue. */
+export function taskRows(tasks: TaskView[], agents: AgentView[], now: number, staleMs: number, stallMs: number, tiers: number): string {
+  const items = tasks.map((task) => ({ task, a: attention(task, agents, now, staleMs, stallMs) }))
+    .filter((item) => item.a.tier >= tiers)
+    .sort((x, y) => x.a.tier - y.a.tier || x.task.id - y.task.id);
+  if (!items.length) return '<tr><td class="none wide">No active or queued tasks.</td></tr>';
+  return items.map((item) => '<tr><td class="id">#' + esc(item.task.id) + '</td><td class="wide">' + esc(item.task.title) +
+    '<span class="why m">' + esc(item.a.reason) + '</span></td><td class="' + (item.task.assignee ? "" : "m") + '">' + esc(item.task.assignee || "unassigned") +
+    "</td><td>" + esc(item.a.label) + '</td><td class="m">' + esc(ago(item.task.updatedMs, now)) + "</td></tr>").join("");
 }
 
 export function messageRows(messages: MessageView[], now: number): string {
@@ -67,14 +63,16 @@ export function messageRows(messages: MessageView[], now: number): string {
     '</td><td class="wide">' + esc(message.line) + '</td><td class="m">' + esc(ago(message.tsMs, now)) + "</td></tr>").join("");
 }
 
-export function statusLine(state: { dbPath: string; agents: AgentView[]; lastChangeMs: number | null }, now: number, staleMs: number): string {
+export function statusLine(state: { dbPath: string; agents: AgentView[]; tasks: TaskView[]; lastChangeMs: number | null }, now: number, staleMs: number, stallMs: number, tiers: number): string {
   const online = state.agents.filter((agent) => agentState(agent, now, staleMs) !== "offline").length;
-  return esc(state.dbPath) + " · " + online + " of " + state.agents.length + " agents online · last change " + esc(ago(state.lastChangeMs, now));
+  const need = state.tasks.filter((task) => attention(task, state.agents, now, staleMs, stallMs).tier < tiers).length;
+  return esc(state.dbPath) + " · " + (need ? need + (need === 1 ? " task needs" : " tasks need") + " you" : "nothing needs you") + " · " +
+    online + " of " + state.agents.length + " agents online · last change " + esc(ago(state.lastChangeMs, now));
 }
 
 /** The page script: the shared renderers' source text, then the client logic from assets.ts. */
 function clientScript(): string {
-  const shared = [esc, ago, agentState, agentRows, taskRows, messageRows, statusLine].map((fn) => fn.toString()).join("\n");
+  const shared = [esc, ago, agentState, attention, agentRows, attentionRows, taskRows, messageRows, statusLine].map((fn) => fn.toString()).join("\n");
   return `(() => {\n"use strict";\n${shared}\n${CLIENT_JS}\n})();`;
 }
 
@@ -105,20 +103,27 @@ ${body}
 
 export function renderPage(state: ViewState, nonce: string, now = Date.now()): string {
   const staleMs = STALE_AGENT_MS;
+  const stallMs = STALL_MS;
+  const tiers = ATTENTION_TIERS;
   const ids = state.agents.map((agent) => `<option value="${esc(agent.id)}">`).join("");
   const body = `<header>
 <h1>Qagent</h1>
-<p class="status"><span id="status">${statusLine(state, now, staleMs)}</span> · <span id="live">connecting</span></p>
+<p class="status"><span id="status">${statusLine(state, now, staleMs, stallMs, tiers)}</span> · <span id="live">connecting</span></p>
 </header>
+<section aria-labelledby="h-attention">
+<h2 id="h-attention">Needs you</h2>
+<table class="attention"><thead><tr><th>Task</th><th>Status</th><th>Why, evidence and the next command</th></tr></thead>
+<tbody id="attention-rows">${attentionRows(state.tasks, state.agents, now, staleMs, stallMs, tiers)}</tbody></table>
+</section>
+<section aria-labelledby="h-tasks">
+<h2 id="h-tasks">Active and queued</h2>
+<table class="tasks"><thead><tr><th>Task</th><th>Title</th><th>Assignee</th><th>Status</th><th>Changed</th></tr></thead>
+<tbody id="task-rows">${taskRows(state.tasks, state.agents, now, staleMs, stallMs, tiers)}</tbody></table>
+</section>
 <section aria-labelledby="h-agents">
 <h2 id="h-agents">Agents</h2>
 <table class="agents"><thead><tr><th>Agent</th><th>Last seen</th><th>State</th></tr></thead>
 <tbody id="agent-rows">${agentRows(state.agents, now, staleMs)}</tbody></table>
-</section>
-<section aria-labelledby="h-tasks">
-<h2 id="h-tasks">Open tasks</h2>
-<table class="tasks"><thead><tr><th>Task</th><th>Title</th><th>Assignee</th><th>Status</th><th>Age</th></tr></thead>
-<tbody id="task-rows">${taskRows(state.tasks, now)}</tbody></table>
 </section>
 <section aria-labelledby="h-messages">
 <h2 id="h-messages">Recent messages</h2>
@@ -136,7 +141,7 @@ export function renderPage(state: ViewState, nonce: string, now = Date.now()): s
 <p class="row"><button type="submit">Send as operator</button> <span id="send-status" class="m" role="status"></span></p>
 </form>
 </section>
-<script type="application/json" id="boot">${scriptJson({ ...state, staleMs })}</script>`;
+<script type="application/json" id="boot">${scriptJson({ ...state, staleMs, stallMs, tiers })}</script>`;
   return shell(nonce, body, clientScript());
 }
 
