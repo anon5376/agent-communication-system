@@ -526,6 +526,8 @@ impl App {
                     "pause <agent|all> [why]   resume <agent|all>   budget [<agent|all> 20 turns 60 min | off]",
                     "start [agent]     start the crew here   stop agents|<agent>   stop it",
                     "setup [--force]   find agent CLIs, make the crew   doctor   check all",
+                    "connect           list CLIs   connect <cli> [as <agent>] [--auto-approve]",
+                    "connect <name> [as <agent>] -- <command> {prompt}   any CLI   disconnect <name>",
                     "accept # <reason>   revise # <feedback>   requeue # [reason]",
                     "cancel #   stop [#]   cancel a task, or a goal and all under it",
                     "send <agent|all> <message>   reply <msg#> <text>   ack <msg#>   read",
@@ -760,6 +762,71 @@ impl App {
                         }
                     }
                 }
+            }
+            "connect" | "connections" if rest.is_empty() => {
+                if self.found.is_empty() {
+                    self.found = crew::detect();
+                }
+                for (mark, id, what) in crew::connections(&self.paths, &self.found) {
+                    self.ui.out.push(vec![
+                        (format!("{mark} "), if mark == '+' { Role::Ok } else { Role::Dim }),
+                        (view::pad(&id, 10), Role::Bold),
+                        (what, Role::Plain),
+                    ]);
+                }
+                self.say(dim_line(
+                    "any other CLI: connect <name> [as <agent>] -- <command> {prompt}",
+                ));
+            }
+            "connect" => {
+                let split = rest.iter().position(|w| *w == "--");
+                let (head, command) = match split {
+                    Some(i) => (&rest[..i], rest[i + 1..].iter().map(|w| w.to_string()).collect()),
+                    None => (&rest[..], Vec::new()),
+                };
+                let auto_approve = head.iter().any(|w| matches!(*w, "--auto-approve" | "auto-approve"));
+                let words: Vec<&str> = head
+                    .iter()
+                    .copied()
+                    .filter(|w| !matches!(*w, "--auto-approve" | "auto-approve"))
+                    .collect();
+                let req = match words.as_slice() {
+                    [name] => Some((name.to_string(), None)),
+                    [name, "as", seat] => Some((name.to_string(), Some(seat.to_string()))),
+                    _ => None,
+                };
+                match req {
+                    None => self.say(fail_line(
+                        "usage: connect <cli> [as <agent>] [--auto-approve], or connect <name> [as <agent>] -- <command> {prompt}",
+                    )),
+                    Some((name, seat)) => {
+                        self.found = crew::detect();
+                        let r = crew::connect(
+                            &self.bus,
+                            &self.paths,
+                            &self.found,
+                            &crew::Connect { name, seat, command, auto_approve },
+                        );
+                        match r {
+                            Ok(lines) => {
+                                let mut lines = lines.into_iter();
+                                if let Some(first) = lines.next() {
+                                    self.say(ok_line(first));
+                                }
+                                for l in lines {
+                                    self.say(dim_line(l));
+                                }
+                            }
+                            Err(e) => self.say(fail_line(e.message)),
+                        }
+                        self.refresh()?;
+                    }
+                }
+            }
+            "disconnect" if rest.len() == 1 => {
+                let r = crew::disconnect(&self.paths, rest[0]);
+                self.outcome(r, |lines| lines.join(" / "));
+                self.refresh()?;
             }
             "missions" if rest.is_empty() => {
                 for m in crew::missions(&self.paths) {
@@ -1803,6 +1870,14 @@ const USAGE: &str = "aos - mission control for a team of AI coding agents
   aos budget all 20 turns 60 min   limits per agent; budget lists them, off clears
   aos setup [--force]       find agent CLIs on this computer and write your crew
   aos doctor                check everything and say what to fix
+  aos connect               list agent CLIs and how each reaches the bus
+  aos connect <cli> [as <agent>] [--auto-approve]
+                            put a CLI aos knows in the crew (gemini, kimi, opencode,
+                            hermes and grok need --auto-approve: they run tools unasked)
+  aos connect <name> [as <agent>] -- <command> {prompt}
+                            put any other CLI in the crew; {mcpConfig} or {mcpJson}
+                            in its command line hands it the bus tools
+  aos disconnect <name>     take a CLI out of the crew
   aos missions              list the mission templates
   aos demo                  try aos on a sample team; nothing real runs
 
@@ -1842,6 +1917,10 @@ fn positionals(argv: &[String]) -> Vec<String> {
     while i < argv.len() {
         let a = &argv[i];
         if a == "--" {
+            // `aos connect <name> -- <command ...>` needs to know where the command starts.
+            if out.first().is_some_and(|w| w == "connect") {
+                out.push(a.clone());
+            }
             out.extend(argv[i + 1..].iter().cloned());
             break;
         }
@@ -1853,6 +1932,8 @@ fn positionals(argv: &[String]) -> Vec<String> {
                 )
             {
                 i += 1;
+            } else if name == "auto-approve" {
+                out.push(a.clone());
             }
         } else {
             out.push(a.clone());
@@ -2094,12 +2175,13 @@ pub fn main() -> i32 {
             return crate::cli::run(&argv, &mut io);
         }
     }
-    if argv.iter().any(|a| a == "--help" || a == "-h") || words.first().is_some_and(|w| w == "help")
+    let own = argv.iter().take_while(|a| *a != "--");
+    if own.clone().any(|a| a == "--help" || a == "-h") || words.first().is_some_and(|w| w == "help")
     {
         println!("{USAGE}");
         return 0;
     }
-    if argv.iter().any(|a| a == "--version" || a == "-V") {
+    if own.clone().any(|a| a == "--version" || a == "-V") {
         println!("aos {}", env!("CARGO_PKG_VERSION"));
         return 0;
     }

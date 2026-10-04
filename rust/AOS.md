@@ -84,7 +84,43 @@ aos writes a preset only when the file is missing, so your edits are never overw
 
 Agent logs are in `~/.agent-bus/logs/` (`<agent>.log` for the supervisor, `<agent>.out` for the CLI's output).
 
-Only Claude Code, Codex CLI and Cursor CLI can join a crew today: aos hands those the bus tools on every turn. Gemini CLI, Hermes Agent, OpenCode, Kimi and Grok are detected and listed, but their adapters do not pass the bus tools yet, so a task given to them would never be submitted.
+## Connect any agent CLI
+
+`aos connect` lists every CLI aos knows, whether it is installed, which seats run on it, and how it reaches the bus. Any CLI can join a crew in one of two ways:
+
+- **Bus tools.** The CLI gets the bus as an MCP server on every turn, signed in as its own agent, and claims, notes and submits tasks itself. aos never writes into your project for this: each agent's MCP config goes to `~/.agent-bus/mcp/<agent>...`, or into an environment variable or flag.
+- **Supervisor-managed.** For a CLI without MCP, its supervisor claims the task, hands the CLI the brief, and submits the CLI's final answer as the result. The CLI can still message the team from its shell: `"$QAGENT_CLI" send <agent> "<subject>" "<body>"`, already signed in as itself.
+
+| CLI | Reaches the bus with | Joins |
+|---|---|---|
+| Claude Code, Codex CLI, Cursor CLI | bus tools | at `aos setup` |
+| Gemini CLI | bus tools (a per-agent `GEMINI_CLI_SYSTEM_SETTINGS_PATH` file) | `connect gemini --auto-approve` |
+| Kimi Code | bus tools (`--mcp-config`) | `connect kimi --auto-approve` |
+| OpenCode | bus tools (`OPENCODE_CONFIG_CONTENT`) | `connect opencode --auto-approve` |
+| Hermes Agent, Grok CLI | supervisor-managed | `connect hermes --auto-approve` |
+| anything else | either; see below | `connect <name> -- <command line>` |
+
+Gemini, Kimi, OpenCode, Hermes and Grok run commands and edit files without asking you when they work unattended, so aos adds them only after you type `--auto-approve` once (kept in `aos/auto-approve`; delete the line to take it back). To keep their approval prompts instead, set `"autoApprove": false` under the harness's `options` in `crew.json`; a headless CLI then usually can't edit anything. A CLI without bus tools can't be the lead or the reviewer, because the lead hands out tasks and the reviewer decides reviews through them.
+
+`connect <cli> as <agent>` moves an existing seat (`lead`, `builder`, `reviewer`) onto that CLI; without `as`, a new teammate named after the CLI joins as a builder. For any other CLI give its command line after `--`, with placeholders the supervisor fills in on every turn:
+
+```sh
+aos connect mytool -- mytool run --yes {prompt}                 # supervisor-managed
+aos connect mytool as reviewer -- mytool --mcp {mcpConfig} -p {prompt}   # bus tools
+aos disconnect mytool
+```
+
+| Placeholder | Becomes |
+|---|---|
+| `{prompt}` | the brief (added at the end if you leave it out) |
+| `{mcpConfig}` | path of a JSON file `{"mcpServers": {"qagent": ...}}` for this agent |
+| `{mcpJson}` | the same JSON inline |
+| `{session}` | the CLI's session id from its last turn, for resuming |
+| `{model}`, `{agentId}`, `{role}`, `{workdir}`, `{qagent}` | the agent's model, id, role, folder, and the aos binary |
+
+The command line is stored under `options.args` of the harness in `crew.json`, where you can also set `env`, `resumeArgs`, `timeoutMs` and `autoReport`. Arguments containing spaces need editing there. A CLI's reply is read from its last JSON line with a `result`, `text`, `content` or `message` field, and otherwise from its plain output.
+
+Only the stand-in CLIs in the tests have run through these paths; Gemini, Kimi, OpenCode, Hermes and Grok have not been run live. The TypeScript `qagent supervise` does not know `options` or `{mcpConfig}` yet, so run connected CLIs from aos.
 
 ## From the shell
 
@@ -97,6 +133,7 @@ aos history                      # your past goals and how each ended
 aos pause builder | aos resume builder   # no new turns until resumed
 aos budget all 20 turns 60 min   # each agent pauses itself when it reaches its budget
 aos setup [--force]              # detect CLIs, write the crew
+aos connect                      # list agent CLIs; connect <cli> or connect <name> -- <command> adds one
 aos doctor                       # check everything; exits 1 if something needs fixing
 aos missions
 aos task list                    # every qagent command works through aos too
@@ -165,7 +202,8 @@ Press `c` for command home. It lists the operator's latest mail with message num
 | `pause <agent\|all> [why]` | pauses the agent: it finishes any turn it is in, then starts no new one |
 | `resume <agent\|all>` | lifts the pause; a budget starts a fresh allowance |
 | `budget <agent\|all> 20 turns 60 min $2`, `budget <agent\|all> off`, `budget` | sets, clears or lists budgets. Turns and minutes are always counted. Dollars are counted only from CLIs that report a cost per turn (Claude Code); Codex CLI and Cursor CLI report none, so a `$` limit does not stop them, and their crew entries say `"usageReporting": false`. Dollars are checked between turns, so one long turn can pass a `$` limit. An agent that reaches its budget pauses itself and writes to you |
-| `setup [--force]`, `doctor`, `missions`, `crew` | nothing |
+| `setup [--force]`, `doctor`, `missions`, `crew`, `connect` | nothing |
+| `connect <cli> [as <agent>] [--auto-approve]`, `connect <name> [as <agent>] -- <command>`, `disconnect <name>` | nothing on the bus except a new teammate: edits `crew.json` |
 | `task add <title> [--to agent] [--under #] [--review]` | a task; `--review` makes you its reviewer, so its result comes to your gate |
 | `accept # <reason>`, `revise # <feedback>` | a review |
 | `requeue # [reason]` | returns a claimed task to the pool |
@@ -178,7 +216,7 @@ Press `c` for command home. It lists the operator's latest mail with message num
 
 ## What aos cannot do yet
 
-These are in the design but have no ACS verb, so aos does not fake them: rerouting an agent to another harness or model from inside aos (edit `crew.json`), and handing a task straight to a named agent (requeue returns it to the pool; `--to` works only when creating).
+These are in the design but have no ACS verb, so aos does not fake them: handing a task straight to a named agent (requeue returns it to the pool; `--to` works only when creating).
 
 ## Where each readout comes from
 
