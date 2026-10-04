@@ -1007,11 +1007,24 @@ fn opencode_config(context: &AdapterContext) -> serde_json::Value {
 }
 
 fn opencode_build(context: &AdapterContext) -> HarnessInvocation {
+    opencode_like(context, "OPENCODE_CONFIG_CONTENT", opencode_config(context))
+}
+
+/// Kilo CLI is an OpenCode fork: the same `run` flags, with its inline config
+/// in KILO_CONFIG_CONTENT (both names checked in kilo 7.8.3).
+fn kilo_build(context: &AdapterContext) -> HarnessInvocation {
+    let mut config = opencode_config(context);
+    config.as_object_mut().map(|o| o.remove("$schema"));
+    opencode_like(context, "KILO_CONFIG_CONTENT", config)
+}
+
+fn opencode_like(
+    context: &AdapterContext,
+    config_env: &str,
+    config: serde_json::Value,
+) -> HarnessInvocation {
     let mut env = common_environment(context);
-    env.insert(
-        "OPENCODE_CONFIG_CONTENT".to_string(),
-        opencode_config(context).to_string(),
-    );
+    env.insert(config_env.to_string(), config.to_string());
     let mut args = vec!["run".to_string()];
     if auto_approve(context) {
         args.push("--auto".to_string());
@@ -1131,6 +1144,258 @@ fn hermes_parse(stdout: &str, exit_code: i32) -> NormalizedHarnessResult {
     }
 }
 
+/// One invocation of a CLI with plain-text output and no session tracking.
+fn plain(
+    context: &AdapterContext,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+) -> HarnessInvocation {
+    HarnessInvocation {
+        command: context.agent.harness.command.clone(),
+        args,
+        environment: env,
+        auto_report: false,
+        timeout_ms: 60 * 60_000,
+    }
+}
+
+fn push_model(args: &mut Vec<String>, context: &AdapterContext, flag: &str) {
+    if let Some(model) = &context.agent.model.exact_model {
+        args.push(flag.to_string());
+        args.push(model.clone());
+    }
+}
+
+// The adapters below were checked against each CLI's own --help output
+// (versions noted); none was run against a model.
+
+/// Qwen Code 0.24: positional prompt is one-shot; --mcp-config takes inline JSON.
+fn qwen_build(context: &AdapterContext) -> HarnessInvocation {
+    let mut args = vec![
+        "--mcp-config".to_string(),
+        mcp_servers_json(context).to_string(),
+        "--approval-mode".to_string(),
+        if auto_approve(context) {
+            "yolo"
+        } else {
+            "default"
+        }
+        .to_string(),
+    ];
+    push_model(&mut args, context, "-m");
+    args.push(context.prompt.clone());
+    plain(context, args, common_environment(context))
+}
+
+/// GitHub Copilot CLI 1.0: -p runs one prompt; it needs --allow-all-tools to
+/// run without a person, and --additional-mcp-config adds the bus server.
+fn copilot_build(context: &AdapterContext) -> HarnessInvocation {
+    let mut args = vec![
+        "-p".to_string(),
+        context.prompt.clone(),
+        "-s".to_string(),
+        "--additional-mcp-config".to_string(),
+        mcp_servers_json(context).to_string(),
+    ];
+    if auto_approve(context) {
+        args.push("--allow-all-tools".to_string());
+    }
+    push_model(&mut args, context, "--model");
+    plain(context, args, common_environment(context))
+}
+
+/// Amp: -x runs one turn, --stream-json prints Claude Code-style JSON lines,
+/// --mcp-config merges the bus server. Skipping approvals is only a setting
+/// (amp.dangerouslyAllowAll), so an allowed agent gets its own settings file:
+/// the user's settings plus that one key.
+fn amp_prepare(context: &AdapterContext) -> Result<()> {
+    if !auto_approve(context) {
+        return Ok(());
+    }
+    let user = std::env::var("AMP_SETTINGS_FILE")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config/amp/settings.json")));
+    let mut settings: serde_json::Value = user
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    settings["amp.dangerouslyAllowAll"] = serde_json::json!(true);
+    write_agent_file(&agent_file(context, ".amp.json"), &settings)
+}
+
+fn amp_build(context: &AdapterContext) -> HarnessInvocation {
+    let mut args = vec![
+        "-x".to_string(),
+        context.prompt.clone(),
+        "--stream-json".to_string(),
+        "--mcp-config".to_string(),
+        mcp_servers_json(context).to_string(),
+    ];
+    if auto_approve(context) {
+        args.push("--settings-file".to_string());
+        args.push(agent_file(context, ".amp.json").display().to_string());
+    }
+    plain(context, args, common_environment(context))
+}
+
+/// Auggie (Augment) 0.36: --print one-shot, --mcp-config for the bus server.
+/// Without auto-approval it runs in --ask mode (retrieval and non-editing tools).
+fn auggie_build(context: &AdapterContext) -> HarnessInvocation {
+    let mut args = vec![
+        "--print".to_string(),
+        "--quiet".to_string(),
+        "--mcp-config".to_string(),
+        mcp_servers_json(context).to_string(),
+    ];
+    if !auto_approve(context) {
+        args.push("--ask".to_string());
+    }
+    push_model(&mut args, context, "--model");
+    args.push("--instruction".to_string());
+    args.push(context.prompt.clone());
+    plain(context, args, common_environment(context))
+}
+
+/// Goose 1.53: `run -t` one-shot; --with-extension starts the bus server as a
+/// stdio extension for this run only; GOOSE_MODE=auto skips approvals.
+fn goose_build(context: &AdapterContext) -> HarnessInvocation {
+    // Goose splits the extension line on spaces, so only the bus variables go in it.
+    let (command, args_mcp, env_mcp) = mcp_launch(context, &common_environment(context));
+    let mut pairs: Vec<String> = env_mcp
+        .iter()
+        .filter(|(k, _)| k.starts_with("QAGENT_"))
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    pairs.sort();
+    let extension = format!(
+        "qagent:{} {} {}",
+        pairs.join(" "),
+        command,
+        args_mcp.join(" ")
+    );
+    let args = vec![
+        "run".to_string(),
+        "--quiet".to_string(),
+        "--no-session".to_string(),
+        "--with-extension".to_string(),
+        extension.trim_end().to_string(),
+        "--text".to_string(),
+        context.prompt.clone(),
+    ];
+    let mut env = common_environment(context);
+    if auto_approve(context) {
+        env.insert("GOOSE_MODE".to_string(), "auto".to_string());
+    }
+    plain(context, args, env)
+}
+
+/// Crush 0.97: `run --quiet` one-shot. `run` has no approval flag; MCP is only
+/// in its config files, so the supervisor manages it.
+fn crush_build(context: &AdapterContext) -> HarnessInvocation {
+    let mut args = vec!["run".to_string(), "--quiet".to_string()];
+    push_model(&mut args, context, "--model");
+    args.push(context.prompt.clone());
+    plain(context, args, common_environment(context))
+}
+
+/// Mistral Vibe 2.25: -p programmatic mode; --trust skips the folder prompt
+/// for this run only. MCP lives in $VIBE_HOME config, so it is managed.
+fn vibe_build(context: &AdapterContext) -> HarnessInvocation {
+    let mut args = vec![
+        "-p".to_string(),
+        context.prompt.clone(),
+        "--output".to_string(),
+        "text".to_string(),
+        "--trust".to_string(),
+    ];
+    if auto_approve(context) {
+        args.push("--auto-approve".to_string());
+    }
+    plain(context, args, common_environment(context))
+}
+
+/// Cline CLI 3.0: a positional prompt runs one task; it auto-approves by
+/// default, so the flag is always passed explicitly.
+fn cline_build(context: &AdapterContext) -> HarnessInvocation {
+    let mut args = vec![
+        "--auto-approve".to_string(),
+        auto_approve(context).to_string(),
+    ];
+    push_model(&mut args, context, "--model");
+    args.push(context.prompt.clone());
+    plain(context, args, common_environment(context))
+}
+
+/// Continue CLI (cn) 1.5: -p prints and exits; --auto allows all tools.
+fn continue_build(context: &AdapterContext) -> HarnessInvocation {
+    let mut args = vec!["-p".to_string(), "--silent".to_string()];
+    if auto_approve(context) {
+        args.push("--auto".to_string());
+    }
+    args.push(context.prompt.clone());
+    plain(context, args, common_environment(context))
+}
+
+/// Aider 0.86: --message runs one message and exits; --yes-always answers its
+/// confirmations. It has no MCP, so the supervisor manages it.
+fn aider_build(context: &AdapterContext) -> HarnessInvocation {
+    let mut args = vec![
+        "--message".to_string(),
+        context.prompt.clone(),
+        "--no-check-update".to_string(),
+        "--no-show-release-notes".to_string(),
+    ];
+    if auto_approve(context) {
+        args.push("--yes-always".to_string());
+    }
+    push_model(&mut args, context, "--model");
+    plain(context, args, common_environment(context))
+}
+
+/// Amazon Q Developer CLI 1.19: `chat --no-interactive`; --trust-all-tools
+/// skips approvals. MCP is only in its agent config, so it is managed.
+fn amazonq_build(context: &AdapterContext) -> HarnessInvocation {
+    let mut args = vec![
+        "chat".to_string(),
+        "--no-interactive".to_string(),
+        "--wrap".to_string(),
+        "never".to_string(),
+    ];
+    if auto_approve(context) {
+        args.push("--trust-all-tools".to_string());
+    }
+    push_model(&mut args, context, "--model");
+    args.push(context.prompt.clone());
+    plain(context, args, common_environment(context))
+}
+
+/// Devin CLI (Cognition): `-p` runs one turn and prints the answer. It has no
+/// per-run MCP flag (`devin mcp add` is global), so the supervisor manages it.
+fn devin_build(context: &AdapterContext) -> HarnessInvocation {
+    let mut args = vec!["-p".to_string(), context.prompt.clone()];
+    if auto_approve(context) {
+        args.push("--permission-mode".to_string());
+        args.push("dangerous".to_string());
+    }
+    if let Some(session) = &context.session_id {
+        args.push("--resume".to_string());
+        args.push(session.clone());
+    }
+    if let Some(model) = &context.agent.model.exact_model {
+        args.push("--model".to_string());
+        args.push(model.clone());
+    }
+    HarnessInvocation {
+        command: context.agent.harness.command.clone(),
+        args,
+        environment: common_environment(context),
+        auto_report: false,
+        timeout_ms: 60 * 60_000,
+    }
+}
+
 fn fake_prepare(context: &AdapterContext) -> Result<()> {
     fs::create_dir_all(PathBuf::from(&context.workdir).join(".agent-bus"))?;
     Ok(())
@@ -1247,6 +1512,84 @@ static ADAPTERS: &[HarnessAdapter] = &[
         prepare: None,
         build: hermes_build,
         parse: hermes_parse,
+    },
+    HarnessAdapter {
+        id: "qwen",
+        prepare: None,
+        build: qwen_build,
+        parse: default_result,
+    },
+    HarnessAdapter {
+        id: "copilot",
+        prepare: None,
+        build: copilot_build,
+        parse: default_result,
+    },
+    HarnessAdapter {
+        id: "amp",
+        prepare: Some(amp_prepare),
+        build: amp_build,
+        parse: claude_parse,
+    },
+    HarnessAdapter {
+        id: "auggie",
+        prepare: None,
+        build: auggie_build,
+        parse: default_result,
+    },
+    HarnessAdapter {
+        id: "kilo",
+        prepare: None,
+        build: kilo_build,
+        parse: opencode_parse,
+    },
+    HarnessAdapter {
+        id: "goose",
+        prepare: None,
+        build: goose_build,
+        parse: default_result,
+    },
+    HarnessAdapter {
+        id: "crush",
+        prepare: None,
+        build: crush_build,
+        parse: default_result,
+    },
+    HarnessAdapter {
+        id: "vibe",
+        prepare: None,
+        build: vibe_build,
+        parse: default_result,
+    },
+    HarnessAdapter {
+        id: "cline",
+        prepare: None,
+        build: cline_build,
+        parse: default_result,
+    },
+    HarnessAdapter {
+        id: "continue",
+        prepare: None,
+        build: continue_build,
+        parse: default_result,
+    },
+    HarnessAdapter {
+        id: "aider",
+        prepare: None,
+        build: aider_build,
+        parse: default_result,
+    },
+    HarnessAdapter {
+        id: "amazonq",
+        prepare: None,
+        build: amazonq_build,
+        parse: default_result,
+    },
+    HarnessAdapter {
+        id: "devin",
+        prepare: None,
+        build: devin_build,
+        parse: default_result,
     },
     HarnessAdapter {
         id: "fake",
