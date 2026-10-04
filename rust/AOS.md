@@ -84,6 +84,7 @@ aos pause builder | aos resume builder   # no new turns until resumed
 aos budget all 20 turns 60 min   # each agent pauses itself when it reaches its budget
 aos setup [--force]              # detect CLIs, write the crew
 aos doctor                       # check everything; exits 1 if something needs fixing
+aos autostart on|off|status      # bring the crew back by itself after a reboot
 aos missions
 aos task list                    # every qagent command works through aos too
 ```
@@ -168,6 +169,8 @@ Each agent's supervisor is built to keep going for days without you:
 - During a turn the supervisor renews the agent's task claims every minute, so a turn longer than the 2-hour claim window keeps its task.
 - `logs/<agent>.log` and `logs/<agent>.out` are capped at 10 MB each; the previous 10 MB is kept as `<file>.1`.
 - A pid file left from before a reboot that now names an unrelated process is ignored, so `aos stop` never signals that process.
+- `aos start` also starts `aos watch` in the background. It looks every 10 seconds and restarts any agent whose supervisor went down without `aos stop` (a crash, a kill, an out-of-memory kill). An agent that goes down 5 times within an hour is left down and you get a message. The watcher only restarts into the crew's folder when that folder is still trusted, and it exits once no agent is running. Its log is `logs/aos-watch.log`.
+- `aos autostart on` has your system run `aos watch` when you log in (a systemd user service on Linux, a LaunchAgent on macOS), so a crew that was running before a reboot comes back by itself. A crew you stopped stays stopped. On Linux, `loginctl enable-linger` makes it run at boot before you log in. `aos autostart off` removes it, and `aos autostart status` says whether it is on.
 
 A budget (`budget all 20 turns 60 min`) is still the way to cap spend; nothing sets one for you.
 

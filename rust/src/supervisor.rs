@@ -541,6 +541,12 @@ fn pause_after_failures(
 /// a reboot a stale pid file can name an unrelated process that reused the pid.
 /// When the command line cannot be read, a live pid counts.
 pub fn supervisor_alive(pid: i32, agent_id: &str) -> bool {
+    process_running(pid, &["supervise", agent_id])
+}
+
+/// Whether `pid` is alive and its command line has every word in `words`.
+/// When the command line cannot be read, a live pid counts.
+pub fn process_running(pid: i32, words: &[&str]) -> bool {
     if pid <= 0 {
         return false;
     }
@@ -585,9 +591,7 @@ pub fn supervisor_alive(pid: i32, agent_id: &str) -> bool {
         }
     };
     match args {
-        Some(args) if !args.is_empty() => {
-            args.iter().any(|a| a == "supervise") && args.iter().any(|a| a == agent_id)
-        }
+        Some(args) if !args.is_empty() => words.iter().all(|w| args.iter().any(|a| a == w)),
         _ => true,
     }
 }

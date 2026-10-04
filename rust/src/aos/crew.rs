@@ -752,6 +752,17 @@ pub fn start(
     workdir: &Path,
 ) -> Vec<(String, Result<i32>)> {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aos"));
+    start_with(&exe, db_path, paths, ids, workdir)
+}
+
+/// `start` with the binary that runs each supervisor named (the watcher and tests).
+pub fn start_with(
+    exe: &Path,
+    db_path: &Path,
+    paths: &Paths,
+    ids: &[String],
+    workdir: &Path,
+) -> Vec<(String, Result<i32>)> {
     let _ = fs::create_dir_all(paths.home.join("logs"));
     let _ = fs::write(paths.workdir_file(), format!("{}\n", workdir.display()));
     let mut spawned: Vec<(String, Result<i32>)> = Vec::new();
@@ -767,7 +778,7 @@ pub fn start(
         let r = out.map_err(BusError::from).and_then(|out| {
             let err = out.try_clone()?;
             use std::os::unix::process::CommandExt;
-            let mut cmd = Command::new(&exe);
+            let mut cmd = Command::new(exe);
             cmd.arg("--db")
                 .arg(db_path)
                 .arg("supervise")
