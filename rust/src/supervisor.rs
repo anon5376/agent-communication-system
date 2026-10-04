@@ -362,6 +362,14 @@ pub fn build_brief(
     );
     if managed {
         lines.push("The supervisor has claimed the task(s) above for you and will submit your final answer as the result.".to_string());
+        lines.push(
+            "To reach the team from your shell, you are already signed in as yourself:".to_string(),
+        );
+        lines.push("  \"$QAGENT_CLI\" send <agent> \"<subject>\" \"<body>\"    message a teammate (operator = the human)".to_string());
+        lines.push(
+            "  \"$QAGENT_CLI\" task note <N> \"<progress>\"              record progress on task N"
+                .to_string(),
+        );
         lines.push("End the turn with the result or your question.".to_string());
     } else {
         lines.push("Claim a task with bus_task_claim before you start it, record progress with bus_task_note,".to_string());
@@ -779,6 +787,8 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                     ),
                     ("QAGENT_BLOCK_SEC".to_string(), block_sec.to_string()),
                     ("AGENT_BUS_BLOCK_SEC".to_string(), block_sec.to_string()),
+                    // A CLI without bus tools reaches the bus from its shell with this binary.
+                    ("QAGENT_CLI".to_string(), qagent_bin.clone()),
                 ]),
                 mcp_command: Some(mcp_command.clone()),
             };

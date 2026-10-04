@@ -29,13 +29,20 @@ pub struct Cli {
     pub provider: &'static str,
     pub family: &'static str,
     pub adapter: &'static str,
-    /// aos hands this CLI the bus tools on every turn, so it can work in a crew.
+    /// aos puts this CLI in a crew without asking first.
     pub crew_ready: bool,
+    /// It gets the bus tools (MCP) on every turn. Without them the supervisor
+    /// claims and submits for it, and it reaches the bus with `$QAGENT_CLI`.
+    pub tools: bool,
+    /// Its adapter runs tools without approval prompts, so it joins a crew only
+    /// after the operator allows that with `connect <id> --auto-approve`.
+    pub auto_approve: bool,
     pub install: &'static str,
     pub sign_in: &'static str,
 }
 
-/// Crew-ready CLIs first, in the order aos prefers them.
+/// Crew-ready CLIs first, in the order aos prefers them. Any other CLI joins
+/// through `connect <name> -- <command line>` (the generic command adapter).
 pub const CLIS: &[Cli] = &[
     Cli {
         id: "claude",
@@ -45,6 +52,8 @@ pub const CLIS: &[Cli] = &[
         family: "claude",
         adapter: "claude",
         crew_ready: true,
+        tools: true,
+        auto_approve: false,
         install: "curl -fsSL https://claude.ai/install.sh | bash",
         sign_in: "run claude once and sign in",
     },
@@ -56,6 +65,8 @@ pub const CLIS: &[Cli] = &[
         family: "gpt",
         adapter: "codex",
         crew_ready: true,
+        tools: true,
+        auto_approve: false,
         install: "npm install -g @openai/codex",
         sign_in: "run codex login",
     },
@@ -67,6 +78,8 @@ pub const CLIS: &[Cli] = &[
         family: "cursor",
         adapter: "cursor",
         crew_ready: true,
+        tools: true,
+        auto_approve: false,
         install: "curl https://cursor.com/install -fsS | bash",
         sign_in: "run cursor-agent login",
     },
@@ -78,6 +91,8 @@ pub const CLIS: &[Cli] = &[
         family: "gemini",
         adapter: "gemini",
         crew_ready: false,
+        tools: true,
+        auto_approve: true,
         install: "npm install -g @google/gemini-cli",
         sign_in: "run gemini once and sign in",
     },
@@ -89,6 +104,8 @@ pub const CLIS: &[Cli] = &[
         family: "hermes",
         adapter: "hermes",
         crew_ready: false,
+        tools: false,
+        auto_approve: true,
         install: "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
         sign_in: "run hermes setup",
     },
@@ -100,6 +117,8 @@ pub const CLIS: &[Cli] = &[
         family: "opencode",
         adapter: "opencode",
         crew_ready: false,
+        tools: true,
+        auto_approve: true,
         install: "see opencode.ai",
         sign_in: "run opencode auth login",
     },
@@ -111,6 +130,8 @@ pub const CLIS: &[Cli] = &[
         family: "kimi",
         adapter: "kimi",
         crew_ready: false,
+        tools: true,
+        auto_approve: true,
         install: "see the Kimi Code docs",
         sign_in: "run kimi once and sign in",
     },
@@ -122,6 +143,8 @@ pub const CLIS: &[Cli] = &[
         family: "grok",
         adapter: "grok",
         crew_ready: false,
+        tools: false,
+        auto_approve: true,
         install: "see the Grok CLI docs",
         sign_in: "run grok login",
     },
@@ -142,6 +165,13 @@ pub struct Found {
 impl Found {
     pub fn usable(&self) -> bool {
         self.path.is_some() && self.cli.crew_ready
+    }
+    /// Usable, or allowed by the operator to run with auto-approval.
+    pub fn joinable(&self, allowed: &[String]) -> bool {
+        self.usable()
+            || (self.path.is_some()
+                && self.cli.auto_approve
+                && allowed.iter().any(|a| a == self.cli.id))
     }
 }
 
@@ -253,6 +283,10 @@ impl Paths {
     pub fn trusted_file(&self) -> PathBuf {
         self.dir.join("trusted")
     }
+    /// CLIs the operator allowed to run tools without approval prompts.
+    pub fn auto_approve_file(&self) -> PathBuf {
+        self.dir.join("auto-approve")
+    }
     pub fn pid_file(&self, agent: &str) -> PathBuf {
         self.home.join("supervisors").join(format!("{agent}.pid"))
     }
@@ -350,15 +384,25 @@ fn pick<'a>(ready: &[&'a Found], order: &[&str], not_family: Option<&str>) -> Op
 /// the reviewer comes from a different model family than the builder, so
 /// every change is checked by a second vendor.
 pub fn plan(found: &[Found]) -> Vec<Member> {
-    let ready: Vec<&Found> = found.iter().filter(|f| f.usable()).collect();
-    if ready.is_empty() {
+    plan_with(found, &[])
+}
+
+/// The default crew, also using the auto-approving CLIs in `allowed`. The lead
+/// hands out tasks through the bus tools, so only a CLI with them can lead.
+pub fn plan_with(found: &[Found], allowed: &[String]) -> Vec<Member> {
+    let ready: Vec<&Found> = found.iter().filter(|f| f.joinable(allowed)).collect();
+    const LATER: [&str; 5] = ["gemini", "opencode", "kimi", "hermes", "grok"];
+    let order = |first: [&'static str; 3]| -> Vec<&'static str> {
+        first.into_iter().chain(LATER).collect()
+    };
+    let leads: Vec<&Found> = ready.iter().copied().filter(|f| f.cli.tools).collect();
+    let Some(lead) = pick(&leads, &order(["claude", "codex", "cursor"]), None) else {
         return Vec::new();
-    }
-    let lead = pick(&ready, &["claude", "codex", "cursor"], None).unwrap();
-    let builder = pick(&ready, &["codex", "claude", "cursor"], None).unwrap();
+    };
+    let builder = pick(&ready, &order(["codex", "claude", "cursor"]), None).unwrap();
     let reviewer = pick(
         &ready,
-        &["claude", "codex", "cursor"],
+        &order(["claude", "codex", "cursor"]),
         Some(builder.cli.family),
     )
     .unwrap_or(builder);
@@ -427,20 +471,8 @@ pub fn crew_json(members: &[Member], found: &[Found]) -> Value {
             json!({"id": c.provider, "displayName": c.name, "enabled": true, "subscriptionBacked": true,
                    "authKind": "subscription", "authSource": c.sign_in}),
         );
-        harnesses.insert(
-            c.id.into(),
-            json!({"id": c.id, "adapter": c.adapter, "command": command, "providers": [c.provider],
-                   "features": {"headless": true, "resume": true, "mcp": true, "structuredOutput": true,
-                                "streaming": true, "cancellation": true, "modelSelection": true,
-                                "reasoningControl": c.id != "cursor", "usageReporting": true},
-                   "probeArgs": ["--version"], "enabled": true}),
-        );
-        models.insert(
-            c.id.into(),
-            json!({"id": c.id, "provider": c.provider, "harness": c.id, "family": c.family,
-                   "capabilities": capabilities(), "enabled": true,
-                   "notes": "No exactModel: the CLI uses its own default model. Set exactModel to pin one."}),
-        );
+        harnesses.insert(c.id.into(), harness_json(c, &command));
+        models.insert(c.id.into(), model_json(c.id, c.provider, c.family));
         agents.insert(
             m.id.into(),
             json!({"id": m.id, "model": c.id, "role": m.role, "authority": m.authority,
@@ -458,6 +490,25 @@ pub fn crew_json(members: &[Member], found: &[Found]) -> Value {
         "roles": roles(), "routing": {},
         "constraints": {"maxDelegationDepth": 2, "maxConcurrentTasks": 4, "maxRetries": 2}
     })
+}
+
+fn harness_json(c: &Cli, command: &str) -> Value {
+    let mut h = json!({"id": c.id, "adapter": c.adapter, "command": command, "providers": [c.provider],
+           "features": {"headless": true, "resume": true, "mcp": c.tools, "structuredOutput": true,
+                        "streaming": true, "cancellation": true, "modelSelection": true,
+                        "reasoningControl": c.id != "cursor", "usageReporting": true},
+           "probeArgs": ["--version"], "enabled": true});
+    if c.auto_approve {
+        // Written only once the operator allowed it; set false to keep approval prompts.
+        h["options"] = json!({"autoApprove": true});
+    }
+    h
+}
+
+fn model_json(id: &str, provider: &str, family: &str) -> Value {
+    json!({"id": id, "provider": provider, "harness": id, "family": family,
+           "capabilities": capabilities(), "enabled": true,
+           "notes": "No exactModel: the CLI uses its own default model. Set exactModel to pin one."})
 }
 
 pub fn load_crew(paths: &Paths) -> Result<Option<BusConfig>> {
@@ -526,12 +577,12 @@ pub struct SetupReport {
 pub fn setup(bus: &Bus, paths: &Paths, found: &[Found], force: bool) -> Result<SetupReport> {
     fs::create_dir_all(&paths.dir)?;
     let presets_written = write_presets(paths)?;
-    let members = plan(found);
+    let members = plan_with(found, &allowed(paths));
     let mut wrote_crew = false;
     if force || !paths.crew().exists() {
         if members.is_empty() {
             return Err(BusError::invalid(
-                "no crew-ready agent CLI found / install Claude Code, Codex CLI or Cursor CLI, then run aos setup",
+                "no crew-ready agent CLI found / install Claude Code, Codex CLI or Cursor CLI, then run aos setup, or add any CLI with aos connect",
             ));
         }
         let text = serde_json::to_string_pretty(&crew_json(&members, found))?;
@@ -557,6 +608,388 @@ pub fn setup(bus: &Bus, paths: &Paths, found: &[Found], force: bool) -> Result<S
         presets_written,
         added,
     })
+}
+
+// ------------------------------------------------------------------ connect
+
+/// CLIs the operator allowed to run with auto-approval (one id per line).
+pub fn allowed(paths: &Paths) -> Vec<String> {
+    fs::read_to_string(paths.auto_approve_file())
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
+}
+
+fn set_allowed(paths: &Paths, id: &str, on: bool) -> Result<()> {
+    let mut ids = allowed(paths);
+    ids.retain(|a| a != id);
+    if on {
+        ids.push(id.to_string());
+    }
+    fs::create_dir_all(&paths.dir)?;
+    let mut text = String::from(
+        "# CLIs allowed to run tools without approval prompts (aos connect <id> --auto-approve)\n",
+    );
+    for a in ids {
+        text.push_str(&a);
+        text.push('\n');
+    }
+    fs::write(paths.auto_approve_file(), text)?;
+    Ok(())
+}
+
+/// What `connect` was asked to do.
+#[derive(Debug, Default)]
+pub struct Connect {
+    /// A CLI aos knows (claude, gemini, ...) or a new name for any other CLI.
+    pub name: String,
+    /// The agent to give it: an existing seat (lead, builder, reviewer) switches
+    /// to it, a new id adds a teammate. Defaults to `name`.
+    pub seat: Option<String>,
+    /// For any other CLI: its command line, with {prompt} where the brief goes.
+    pub command: Vec<String>,
+    pub auto_approve: bool,
+}
+
+/// The role, authority and preset prompt for a new seat, from its name.
+fn seat_kind(seat: &str) -> (&'static str, &'static str, &'static str) {
+    match seat {
+        "lead" | "manager" => ("manager", "manager", "lead"),
+        "reviewer" | "review" => ("reviewer", "worker", "reviewer"),
+        "researcher" | "research" => ("research", "worker", "researcher"),
+        _ => ("implementation", "worker", "builder"),
+    }
+}
+
+/// Put a CLI in the crew: register it in crew.json (harness, model, provider)
+/// and give it a seat. Any CLI works: one aos knows uses its own adapter;
+/// any other runs through the generic command adapter, with the bus tools
+/// when its command line passes {mcpConfig} or {mcpJson}, otherwise with the
+/// supervisor claiming and submitting for it. Returns what changed.
+pub fn connect(bus: &Bus, paths: &Paths, found: &[Found], req: &Connect) -> Result<Vec<String>> {
+    let name = crate::identity::assert_safe_agent_id(req.name.trim())?.to_string();
+    let seat =
+        crate::identity::assert_safe_agent_id(req.seat.as_deref().unwrap_or(&name))?.to_string();
+    let mut said = Vec::new();
+    let mut allow: Option<&str> = None;
+    let (provider, harness, model, tools, label) = if req.command.is_empty() {
+        let Some(c) = cli(&name) else {
+            let known: Vec<&str> = CLIS.iter().map(|c| c.id).collect();
+            return Err(BusError::invalid(format!(
+                "aos doesn't know {name} / known: {}; for any other CLI give its command line: connect {name} -- <command> {{prompt}}",
+                known.join(" ")
+            )));
+        };
+        let Some(path) = found
+            .iter()
+            .find(|f| f.cli.id == c.id)
+            .and_then(|f| f.path.clone())
+        else {
+            return Err(BusError::invalid(format!(
+                "{} isn't installed / {}",
+                c.name, c.install
+            )));
+        };
+        if c.auto_approve && !req.auto_approve && !allowed(paths).iter().any(|a| a == c.id) {
+            return Err(BusError::invalid(format!(
+                "{} would run commands and edit files without asking you / type connect {} --auto-approve to allow that",
+                c.name, c.id
+            )));
+        }
+        if req.auto_approve && c.auto_approve {
+            allow = Some(c.id);
+        }
+        (
+            json!({"id": c.provider, "displayName": c.name, "enabled": true, "subscriptionBacked": true,
+                   "authKind": "subscription", "authSource": c.sign_in}),
+            harness_json(c, &path.display().to_string()),
+            model_json(c.id, c.provider, c.family),
+            c.tools,
+            c.provider.to_string(),
+        )
+    } else {
+        let bin = &req.command[0];
+        let path = if bin.contains('/') {
+            Some(PathBuf::from(bin)).filter(|p| is_executable(p))
+        } else {
+            find_binary(bin)
+        };
+        let Some(path) = path else {
+            return Err(BusError::invalid(format!("no program {bin} found on PATH")));
+        };
+        let mut args: Vec<String> = req.command[1..].to_vec();
+        if !args.iter().any(|a| a.contains("{prompt}")) {
+            args.push("{prompt}".to_string());
+            said.push("no {prompt} in the command line / the brief goes last".to_string());
+        }
+        let tools = args
+            .iter()
+            .any(|a| a.contains("{mcpConfig}") || a.contains("{mcpJson}"));
+        let resume = args.iter().any(|a| a.contains("{session}"));
+        (
+            json!({"id": name, "displayName": name, "enabled": true, "subscriptionBacked": false,
+                   "authKind": "cli", "authSource": "the CLI's own sign-in"}),
+            json!({"id": name, "adapter": "command", "command": path.display().to_string(), "providers": [name],
+                   "features": {"headless": true, "resume": resume, "mcp": tools, "structuredOutput": false,
+                                "streaming": false, "cancellation": true, "modelSelection": false,
+                                "reasoningControl": false, "usageReporting": false},
+                   "options": {"args": args}, "enabled": true}),
+            model_json(&name, &name, &name),
+            tools,
+            name.clone(),
+        )
+    };
+
+    // The crew file to change: the existing one, a fresh default, or an empty one.
+    fs::create_dir_all(&paths.dir)?;
+    write_presets(paths)?;
+    let before = fs::read_to_string(paths.crew()).ok();
+    let mut crew: Value = match &before {
+        Some(text) => serde_json::from_str(text)
+            .map_err(|e| BusError::invalid(format!("crew.json isn't valid JSON: {e}")))?,
+        None => crew_json(&plan_with(found, &allowed(paths)), found),
+    };
+    crew["providers"][&label] = provider;
+    crew["harnesses"][&name] = harness;
+    crew["models"][&name] = model;
+    let (role, authority, preset) = match crew["agents"][&seat].as_object() {
+        Some(a) => (
+            a.get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("implementation")
+                .to_string(),
+            a.get("authority")
+                .and_then(Value::as_str)
+                .unwrap_or("worker")
+                .to_string(),
+            "",
+        ),
+        None => {
+            let (r, a, p) = seat_kind(&seat);
+            (r.to_string(), a.to_string(), p)
+        }
+    };
+    if authority == "manager" && !tools {
+        return Err(BusError::invalid(format!(
+            "{seat} hands out tasks through the bus tools, and {name} has none / give {name} another seat, or pass {{mcpConfig}} in its command line"
+        )));
+    }
+    if crew["agents"][&seat].is_object() {
+        crew["agents"][&seat]["model"] = json!(name);
+        said.push(format!("{seat} now runs on {name}"));
+    } else {
+        let role_file = paths.roles().join(format!("{seat}.md"));
+        if !role_file.exists() {
+            let text = ROLE_PRESETS
+                .iter()
+                .find(|(n, _)| *n == preset)
+                .map(|(_, t)| *t)
+                .unwrap_or("");
+            fs::write(&role_file, text)?;
+        }
+        crew["agents"][&seat] = json!({"id": seat, "model": name, "role": role, "authority": authority,
+            "description": format!("{role} on {name}"), "enabled": true, "autoStart": false,
+            "instructions": format!("roles/{seat}.md"),
+            "permissions": {"canDelegate": authority == "manager", "canReview": true,
+                            "filesystem": if role == "reviewer" { "read" } else { "write" },
+                            "shell": true, "network": true, "maxDelegationDepth": 2}});
+        said.push(format!("{seat} joined the crew on {name} as {role}"));
+    }
+    said.push(if tools {
+        format!("{name} gets the bus tools every turn")
+    } else {
+        format!("{name} has no bus tools: its supervisor claims tasks for it and submits its answer; it can message the team with $QAGENT_CLI")
+    });
+
+    let text = format!("{}\n", serde_json::to_string_pretty(&crew)?);
+    fs::write(paths.crew(), &text)?;
+    let config = match load_config(&paths.crew()) {
+        Ok(c) => c,
+        Err(e) => {
+            match &before {
+                Some(old) => fs::write(paths.crew(), old)?,
+                None => fs::remove_file(paths.crew())?,
+            }
+            return Err(BusError::invalid(format!(
+                "crew.json left as it was / {}",
+                e.message
+            )));
+        }
+    };
+    sync_bus(bus, &config)?;
+    if let Some(id) = allow {
+        set_allowed(paths, id, true)?;
+        said.push(format!(
+            "{id} may run tools without asking (remove it from {} to undo)",
+            Paths::show(&paths.auto_approve_file())
+        ));
+    }
+    if running_pid(paths, &seat).is_some() {
+        said.push(format!(
+            "{seat} is running on its old CLI / stop {seat}, then start {seat}"
+        ));
+    }
+    Ok(said)
+}
+
+/// Take a CLI out of the crew. A teammate named after it goes too; any other
+/// seat on it has to move first, so the crew never points at a missing CLI.
+pub fn disconnect(paths: &Paths, name: &str) -> Result<Vec<String>> {
+    let text = fs::read_to_string(paths.crew())
+        .map_err(|_| BusError::invalid("no crew yet / setup makes one"))?;
+    let mut crew: Value = serde_json::from_str(&text)
+        .map_err(|e| BusError::invalid(format!("crew.json isn't valid JSON: {e}")))?;
+    if !crew["harnesses"][name].is_object() {
+        return Err(BusError::invalid(format!("{name} isn't in your crew")));
+    }
+    let models: Vec<String> = crew["models"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter(|(_, v)| v["harness"].as_str() == Some(name))
+                .map(|(k, _)| k.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let on_it: Vec<String> = crew["agents"]
+        .as_object()
+        .map(|a| {
+            a.iter()
+                .filter(|(_, v)| {
+                    v["model"]
+                        .as_str()
+                        .is_some_and(|m| models.iter().any(|x| x == m))
+                })
+                .map(|(k, _)| k.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let others: Vec<&String> = on_it.iter().filter(|id| *id != name).collect();
+    if !others.is_empty() {
+        let ids: Vec<&str> = others.iter().map(|s| s.as_str()).collect();
+        return Err(BusError::invalid(format!(
+            "{} still run on {name} / connect another CLI to them first, e.g. connect claude as {}",
+            ids.join(", "),
+            ids[0]
+        )));
+    }
+    if running_pid(paths, name).is_some() {
+        return Err(BusError::invalid(format!(
+            "{name} is running / stop {name} first"
+        )));
+    }
+    let mut said = Vec::new();
+    if let Some(a) = crew["agents"].as_object_mut() {
+        if a.remove(name).is_some() {
+            said.push(format!("{name} left the crew"));
+        }
+    }
+    let provider = crew["models"][&models.first().cloned().unwrap_or_default()]["provider"]
+        .as_str()
+        .map(str::to_string);
+    for m in &models {
+        crew["models"].as_object_mut().map(|o| o.remove(m));
+    }
+    crew["harnesses"].as_object_mut().map(|o| o.remove(name));
+    if let Some(p) = provider {
+        let used = crew["models"].as_object().is_some_and(|o| {
+            o.values()
+                .any(|v| v["provider"].as_str() == Some(p.as_str()))
+        });
+        if !used {
+            crew["providers"].as_object_mut().map(|o| o.remove(&p));
+        }
+    }
+    fs::write(
+        paths.crew(),
+        format!("{}\n", serde_json::to_string_pretty(&crew)?),
+    )?;
+    load_config(&paths.crew())?;
+    if allowed(paths).iter().any(|a| a == name) {
+        set_allowed(paths, name, false)?;
+    }
+    said.push(format!("{name} is no longer in crew.json"));
+    Ok(said)
+}
+
+/// One line per CLI: installed or not, in the crew or not, and how it reaches the bus.
+pub fn connections(paths: &Paths, found: &[Found]) -> Vec<(char, String, String)> {
+    let config = load_crew(paths).ok().flatten();
+    let ok = allowed(paths);
+    let seats = |harness: &str| -> Vec<String> {
+        let Some(c) = &config else { return Vec::new() };
+        let mut ids: Vec<String> = c
+            .agents
+            .values()
+            .filter(|a| c.models.get(&a.model).is_some_and(|m| m.harness == harness))
+            .map(|a| a.id.clone())
+            .collect();
+        ids.sort();
+        ids
+    };
+    let link = |tools: bool| {
+        if tools {
+            "bus tools"
+        } else {
+            "supervisor-managed"
+        }
+    };
+    let mut out = Vec::new();
+    for f in found {
+        let c = f.cli;
+        let on = seats(c.id);
+        let (mark, what) = if !on.is_empty() {
+            (
+                '+',
+                format!("in crew: {} / {}", on.join(", "), link(c.tools)),
+            )
+        } else if f.path.is_none() {
+            ('-', format!("not installed / {}", c.install))
+        } else if f.joinable(&ok) {
+            (
+                '~',
+                format!(
+                    "found / connect {} [as <agent>] adds it ({})",
+                    c.id,
+                    link(c.tools)
+                ),
+            )
+        } else {
+            (
+                '~',
+                format!(
+                    "found / runs tools without asking; connect {} --auto-approve adds it",
+                    c.id
+                ),
+            )
+        };
+        out.push((mark, c.id.to_string(), what));
+    }
+    if let Some(c) = &config {
+        let mut custom: Vec<&crate::config::HarnessDef> = c
+            .harnesses
+            .values()
+            .filter(|h| cli(&h.id).is_none())
+            .collect();
+        custom.sort_by(|a, b| a.id.cmp(&b.id));
+        for h in custom {
+            let on = seats(&h.id);
+            let what = if on.is_empty() {
+                format!("{} / no agent on it", h.command)
+            } else {
+                format!(
+                    "in crew: {} / {} / {}",
+                    on.join(", "),
+                    link(h.features.mcp),
+                    h.command
+                )
+            };
+            out.push(('+', h.id.clone(), what));
+        }
+    }
+    out
 }
 
 // ------------------------------------------------------------------ missions
@@ -1229,7 +1662,10 @@ pub fn doctor(db_path: &Path) -> Vec<Check> {
         out.push(check(
             None,
             "found",
-            format!("{} / can't join a crew yet", not_ready.join(", ")),
+            format!(
+                "{} / runs tools without asking; aos connect <name> --auto-approve adds it",
+                not_ready.join(", ")
+            ),
         ));
     }
     out
