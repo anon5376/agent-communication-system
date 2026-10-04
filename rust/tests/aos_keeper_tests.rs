@@ -180,3 +180,21 @@ fn autostart_files_name_the_watcher_and_keep_path() {
     assert!(plist.contains("<string>/opt/aos &amp; co/aos</string><string>--db</string>"));
     assert!(plist.contains("<key>RunAtLoad</key><true/>"));
 }
+
+#[test]
+fn a_default_budget_is_given_once_and_off_stays_off() {
+    let (db, paths, _work) = crew_on("budget");
+    let bus = Bus::open(Some(&db)).unwrap();
+    let ids = vec!["w1".to_string()];
+    assert_eq!(crew::apply_default_budget(&bus, &paths, &ids).unwrap(), ids);
+    let agent = bus.get_agent("w1").unwrap().unwrap();
+    let budget = bus.budget_of(&agent).unwrap();
+    assert_eq!(budget.limits, crew::DEFAULT_BUDGET);
+
+    // The operator turns it off: the next start does not put it back.
+    let op = bus.identify(Some(acs::types::OPERATOR_ID)).unwrap();
+    bus.set_budget(&op, "w1", None).unwrap();
+    assert!(crew::apply_default_budget(&bus, &paths, &ids).unwrap().is_empty());
+    let agent = bus.get_agent("w1").unwrap().unwrap();
+    assert!(agent.meta.get("budget").is_none());
+}

@@ -172,7 +172,17 @@ Each agent's supervisor is built to keep going for days without you:
 - `aos start` also starts `aos watch` in the background. It looks every 10 seconds and restarts any agent whose supervisor went down without `aos stop` (a crash, a kill, an out-of-memory kill). An agent that goes down 5 times within an hour is left down and you get a message. The watcher only restarts into the crew's folder when that folder is still trusted, and it exits once no agent is running. Its log is `logs/aos-watch.log`.
 - `aos autostart on` has your system run `aos watch` when you log in (a systemd user service on Linux, a LaunchAgent on macOS), so a crew that was running before a reboot comes back by itself. A crew you stopped stays stopped. On Linux, `loginctl enable-linger` makes it run at boot before you log in. `aos autostart off` removes it, and `aos autostart status` says whether it is on.
 
-A budget (`budget all 20 turns 60 min`) is still the way to cap spend; nothing sets one for you.
+The first time aos starts an agent, it gets a default budget of 200 turns, 720 min of CLI time or $20 (dollars only as the CLI reports them), whichever comes first. When it reaches that, the agent pauses itself and writes to you, and `resume <agent>` gives it a fresh allowance. Change the budget with `budget <agent|all> ...`. `budget <agent> off` removes it, and aos does not put it back.
+
+### The guard
+
+Unattended agents run behind a guard unless you turn it off for an agent with `"guard": false` in its `harnessOptions` in `crew.json`:
+
+- Code-hosting, registry and cloud credentials (`GITHUB_TOKEN`, `GH_TOKEN`, `NPM_TOKEN`, `AWS_*` keys, `SSH_AUTH_SOCK` and the rest of `GUARDED_SECRETS` in `src/supervisor.rs`) are removed from the agent's environment. The agent's own model keys stay.
+- `git push` fails inside the agent, through an environment-level git setting, while fetch and pull still work. git never waits on a password prompt.
+- Claude Code agents also have `git push` and `sudo` on their disallowed tools.
+
+This is a guardrail against mistakes and injected instructions, not a sandbox. An agent with a shell can still read any file you can, and it can undo the git setting if it sets out to. So keep agents in a project folder, as aos already requires, and review what they did before you push it.
 
 ## What aos cannot do yet
 

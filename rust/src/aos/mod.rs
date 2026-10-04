@@ -1323,6 +1323,14 @@ impl App {
             return Ok(false);
         }
         crew::sync_bus(&self.bus, &config)?;
+        let budgeted = crew::apply_default_budget(&self.bus, &self.paths, &ids)?;
+        if !budgeted.is_empty() {
+            self.say(dim_line(format!(
+                "{} budget: {} each, then it pauses and writes to you / budget <agent> off removes it",
+                budgeted.join(", "),
+                crew::DEFAULT_BUDGET.describe()
+            )));
+        }
         let mut any = false;
         for (id, r) in crew::start(&self.bus.db_path, &self.paths, &ids, &dir) {
             match r {
