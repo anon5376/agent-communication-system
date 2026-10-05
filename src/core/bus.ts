@@ -547,6 +547,22 @@ export class Bus {
     });
   }
 
+  /**
+   * Keep a long turn's claims alive: push the expiry of every unexpired task the caller holds
+   * out by one claim TTL and mark it seen. Returns how many claims moved.
+   */
+  renewClaims(actor: Identity): number {
+    return this.write(() => {
+      const now = this.now();
+      const result = prepared(this.db, `
+        UPDATE tasks SET claim_expires_ms = ?
+        WHERE state = 'claimed' AND assignee = ? AND claim_expires_ms IS NOT NULL AND claim_expires_ms >= ?
+      `).run(now + this.claimTtlMs, actor.agentId, now);
+      this.touch(actor.agentId);
+      return Number(result.changes);
+    });
+  }
+
   /** New mail since the cursor. Advances the cursor unless peek is set. */
   inbox(actor: Identity, options: { peek?: boolean; limit?: number } = {}): { messages: Message[]; cursor: number; remaining: number } {
     const limit = Math.max(1, Math.min(LIMITS.inboxLimit, Math.floor(options.limit ?? 50)));
