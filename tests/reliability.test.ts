@@ -234,6 +234,42 @@ test("with worktree isolation, two queued tasks run one per turn, each in its ow
   await supervisor.stop();
 });
 
+test("with worktree isolation, mail about a task the turn does not hold is kept for a later turn", { timeout: 30_000 }, async (t) => {
+  const f = fixture(t);
+  gitInit(f.project);
+  f.add("fake-small", "cheap-worker");
+  const prompts = join(f.home, "prompts.log");
+  const first = f.bus.createTask(f.op, { title: "first", to: "fake-small", project: f.project });
+  const second = f.bus.createTask(f.op, { title: "second", to: "fake-small", project: f.project });
+  f.bus.send(f.op, { to: "fake-small", type: "question", taskId: second.id, subject: "about the second task", body: "SENTINEL-SECOND" });
+  const record = `require('fs').appendFileSync(${JSON.stringify(prompts)}, process.argv[1] + '\\n----\\n'); process.stdout.write(JSON.stringify({result: 'cwd=' + process.cwd(), usage: {inputTokens: 5, outputTokens: 5, totalTokens: 10, costUSD: 0}}) + '\\n')`;
+  const supervisor = run(f, probeConfig((config) => {
+    config.constraints.isolation = "worktree";
+    config.agents["fake-small"].harnessOptions = { args: ["-e", record, "{prompt}"] };
+  }));
+  t.after(supervisor.stop);
+  await until("both tasks to be submitted", 20_000, () => [first, second].every((task) => f.bus.getTask(task.id).state === "submitted"), () => f.lines.join("\n"));
+  const turns = readFileSync(prompts, "utf8").split("\n----\n").filter(Boolean);
+  const shown = turns.filter((prompt) => prompt.includes("SENTINEL-SECOND"));
+  assert.equal(shown.length, 1, `the message about #${second.id} reaches exactly one turn\n${turns.join("\n====\n")}`);
+  assert.match(shown[0], new RegExp(`#${second.id}\\b`));
+  await supervisor.stop();
+});
+
+test("an unchanged task the agent leaves alone is not offered again at every wait timeout", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t);
+  f.add("fake-small", "cheap-worker");
+  // The agent has bus tools, so the supervisor offers the task and leaves claiming to the CLI, which ignores it.
+  const supervisor = run(f, probeConfig((config) => { config.harnesses.fake.features.mcp = true; }), 200);
+  t.after(supervisor.stop);
+  f.bus.createTask(f.op, { title: "left alone", role: "cheap-worker" });
+  await until("the first offer", 10_000, () => f.lines.some((line) => /turn complete/.test(line)), () => f.lines.join("\n"));
+  await pause(2_000);
+  const turns = f.lines.filter((line) => /turn complete/.test(line)).length;
+  assert.equal(turns, 1, f.lines.join("\n"));
+  await supervisor.stop();
+});
+
 test("worktree isolation refuses to start for an agent that pins one CLI session", async (t) => {
   const f = fixture(t);
   f.add("fake-small", "cheap-worker");

@@ -27,7 +27,8 @@ export interface Permissions {
 /**
  * Limits applied on top of the authority's permissions, usually copied from the project
  * configuration by the supervisor. Stored as `policy` inside identities.permissions_json,
- * so both implementations read it without a schema change. A policy only ever narrows:
+ * so no schema change is needed. The Rust build on rust-port does not read it yet and drops
+ * it when it rotates a token. A policy only ever narrows:
  * the effective permission is the authority's AND the policy's.
  */
 export interface AgentPolicy {

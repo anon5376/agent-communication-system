@@ -126,7 +126,7 @@ export function createBusServer(bus, options) {
         inputSchema: { seq: z.number().int().positive() },
     }, async (input) => run((identity) => `Acknowledged #${bus.ack(identity, input.seq).seq}.`));
     server.registerTool("bus_task_create", {
-        description: "Create a task. With `to` it is assigned and the assignee is sent the brief; without it any agent of the matching role may claim it. The brief must stand alone: the worker has none of your context. You review the result unless the operator does.",
+        description: "Create a task. With `to` it is assigned and the assignee is sent the brief; without it any agent of the matching role may claim it. An agent without delegation rights (workers by default) may only create tasks assigned to itself. The brief must stand alone: the worker has none of your context. You review the result unless the operator does.",
         inputSchema: {
             title: z.string().max(LIMITS.title),
             brief: z.string().max(LIMITS.brief),

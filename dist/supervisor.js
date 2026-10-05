@@ -16,6 +16,8 @@ import { configPathFromProject, loadConfig, resolveAgent } from "./config.js";
 import { Bus } from "./core/bus.js";
 import { BusError, DEFAULT_WAIT_SEC, OPERATOR_ID } from "./core/types.js";
 import { ensureTaskWorktree } from "./worktree.js";
+/** How long an unchanged claimable task the agent left alone waits before it is offered again. */
+const REOFFER_MS = 30 * 60_000;
 /** First non-empty environment variable among `names` (new name first, old name second). */
 function envValue(...names) {
     for (const name of names) {
@@ -452,9 +454,17 @@ export async function supervise(options) {
             }
         };
         // Work already waiting is offered once per change (task updated_ms) so an agent that leaves a
-        // task alone is not woken for it again and again; every wait timeout offers it once more.
+        // task alone is not woken (a paid turn) for it again and again; an unchanged task it left
+        // alone is offered once more after REOFFER_MS.
         const offered = new Map();
-        const backlog = () => bus.claimableTasks(me.agentId).filter((task) => offered.get(task.id) !== task.updatedMs);
+        const backlog = () => bus.claimableTasks(me.agentId).filter((task) => {
+            const seen = offered.get(task.id);
+            return !seen || seen.updatedMs !== task.updatedMs || Date.now() - seen.at >= REOFFER_MS;
+        });
+        const markOffered = (task) => { offered.set(task.id, { updatedMs: task.updatedMs, at: Date.now() }); };
+        // Worktree mode shows only mail about the turn's task; the rest is kept here for later turns,
+        // since reading the inbox has already moved the cursor past it.
+        let deferred = [];
         const holdOrClaim = (id) => {
             const current = bus.getTask(id);
             if (current.state === "claimed" && current.assignee === me.agentId)
@@ -478,21 +488,20 @@ export async function supervise(options) {
             }
             // Existing claimable work or unread mail starts a turn at once; only an idle agent waits.
             const waiting = backlog();
-            if (!waiting.length && bus.unreadCount(me.agentId) === 0) {
+            if (!waiting.length && !deferred.length && bus.unreadCount(me.agentId) === 0) {
                 const waited = await bus.waitForMail(me, { timeoutMs: waitMs, signal: options.signal });
                 if (options.signal?.aborted)
                     break;
                 sweepStalled();
-                if (waited.status === "timeout") {
-                    offered.clear();
+                if (waited.status === "timeout")
                     continue;
-                }
             }
             else {
                 sweepStalled();
             }
             // Consume what is unread, so the next wait does not deliver it again.
-            let messages = bus.inbox(me, { limit: 50 }).messages;
+            let messages = [...deferred, ...bus.inbox(me, { limit: 50 }).messages];
+            deferred = [];
             if (cancellationOnly(messages)) {
                 log("received cancellation control; no model turn started");
                 continue;
@@ -505,7 +514,7 @@ export async function supervise(options) {
             }
             const candidates = backlog();
             for (const task of candidates)
-                offered.set(task.id, task.updatedMs);
+                markOffered(task);
             const tasks = [];
             let worktree = null;
             if (worktreeMode) {
@@ -544,12 +553,15 @@ export async function supervise(options) {
                         catch (releaseError) {
                             log(`task #${focus.id}: could not release after the worktree failure: ${releaseError.message}`);
                         }
-                        const after = bus.getTask(focus.id);
-                        offered.set(focus.id, after.updatedMs);
+                        markOffered(bus.getTask(focus.id));
+                        // Mail about the refused task is answered by its note; other mail waits for a later turn.
+                        const refused = focus.id;
+                        deferred = messages.filter((message) => message.taskId && message.taskId !== refused);
                         continue;
                     }
                     tasks.push(focus);
                     // Mail about tasks this turn does not hold would invite work outside the checkout.
+                    deferred = messages.filter((message) => message.taskId && message.taskId !== focus.id);
                     messages = messages.filter((message) => !message.taskId || message.taskId === focus.id);
                     taskIds.clear();
                     taskIds.add(focus.id);

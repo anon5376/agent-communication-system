@@ -334,7 +334,7 @@ The Codex configuration includes a long tool timeout because `bus_wait` can bloc
 | `bus_inbox` | Read or peek at mail. |
 | `bus_wait` | Block for mail or relevant task activity. |
 | `bus_ack` | Acknowledge a message that requested it. |
-| `bus_task_create` | Create and optionally assign a task. |
+| `bus_task_create` | Create and optionally assign a task. Workers (no delegation rights) may only assign to themselves. |
 | `bus_task_list` | List matching tasks. |
 | `bus_task_get` | Read a task, its notes, and related state. |
 | `bus_task_claim` | Claim an eligible task. |
