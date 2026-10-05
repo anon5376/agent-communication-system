@@ -1,6 +1,22 @@
-# Agent Communication System — Rust port branch
+# Agent Communication System — native macOS and terminal apps
 
-> **You're on `rust-port`** — a from-scratch Rust implementation of ACS plus
+## ACS for macOS (SwiftUI preview)
+
+`swiftui` adds **ACS.app**, a native Mac app for tasks, reviews, agents, and
+messages on the existing ACS bus. It complements the terminals below; it is
+not an embedded terminal or a replacement coordination backend.
+
+Start with **Try the Sample** (simulated, no model calls), or open a project
+and explicitly start coding CLIs you already have installed. Installation,
+first-run guidance, safety limits, and the architecture-specific DMG build
+are in [macos/README.md](macos/README.md).
+
+Requires macOS 14+. Default builds are ad-hoc signed, **not notarized**;
+Gatekeeper may block downloaded copies. No public signed release is implied.
+
+## Rust terminal implementation
+
+> Based on **`rust-port`** — a from-scratch Rust implementation of ACS plus
 > `acs`, an ultra-lightweight terminal control app (~4 MB single binary, ~2 ms
 > CLI calls). It shares the same `bus.db`, tokens, and signal files as the
 > TypeScript version, so the two can drive the same bus interchangeably. Best

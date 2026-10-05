@@ -101,6 +101,8 @@ final class WorkspaceStore: ObservableObject {
             snapshot = state
             providers = []
             detail = nil
+            detailError = nil
+            detailLoading = false
             selectedTask = nil
             notice = nil
             destination = .tasks
@@ -131,7 +133,7 @@ final class WorkspaceStore: ObservableObject {
         detailLoading = true
         detailError = nil
         do {
-            let next: TaskDetail = try await client.request("task", payload: ["id": .number(Double(id))], as: TaskDetail.self)
+            let next: TaskDetail = try await client.request("task", payload: ["id": .integer(id)], as: TaskDetail.self)
             guard current == generation, selectedTask == id else { return }
             detail = next
         } catch {

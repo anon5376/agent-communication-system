@@ -28,6 +28,8 @@
 
 set -euo pipefail
 
+export MACOSX_DEPLOYMENT_TARGET=14.0
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MACOS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${MACOS_DIR}/.." && pwd)"
@@ -130,7 +132,7 @@ codesign "${SIGN_ARGS[@]}" "${APP_DIR}"
 codesign --verify --deep --strict --verbose=2 "${APP_DIR}"
 
 if [[ "${IDENTITY}" == "-" ]]; then
-    log "NOTE: ad-hoc signed, not notarized — Gatekeeper will warn on first launch."
+    log "NOTE: ad-hoc signed, not notarized — Gatekeeper may block downloaded copies."
 fi
 
 # --- 5. DMG ------------------------------------------------------------------

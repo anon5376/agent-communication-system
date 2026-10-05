@@ -127,7 +127,7 @@ struct DecisionSheet: View {
 
     private func submit() async {
         let action = (decision == .accept || decision == .changes) ? "reviewTask" : decision.rawValue
-        var payload: [String: JSONValue] = ["id": .number(Double(task.id))]
+        var payload: [String: JSONValue] = ["id": .integer(task.id)]
         if action == "reviewTask" {
             payload["accept"] = .bool(decision == .accept)
             payload["feedback"] = .string(feedback)
