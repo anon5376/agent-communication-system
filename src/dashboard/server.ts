@@ -16,8 +16,9 @@ import type { AddressInfo } from "node:net";
 import { Bus } from "../core/bus.js";
 import { ChangeWatcher } from "../core/changes.js";
 import { identityForToken } from "../core/identity.js";
-import { type AgentSummary, BusError, CLOSED_STATES, type MessageSummary, OPERATOR_ID } from "../core/types.js";
+import { type AgentSummary, BusError, type MessageSummary, OPERATOR_ID } from "../core/types.js";
 import { type AgentView, type MessageView, renderPage, renderSignedOut, type TaskView, type ViewState } from "./page.js";
+import { taskViews } from "../attention.js";
 import { AuthError, requireLoopbackHost, requireSameOrigin, requireSession, Sessions, sessionOf } from "./session.js";
 
 export const DEFAULT_PORT = 11511;
@@ -86,15 +87,19 @@ interface Delta {
   lastChangeMs: number | null;
   events: { seq: number; tsMs: number; actor: string; kind: string; entity: string; entityId: string }[];
   agents: AgentView[];
-  tasks: TaskView[];
+  /** The whole task list, replacing the page's, when any task changed; absent otherwise. */
+  tasks?: TaskView[];
   messages: MessageView[];
 }
+
+/** Open tasks plus recent failures, with what the attention rules need. Four reads. */
+const TASK_VIEW_QUERIES = 4;
 
 class Reader {
   constructor(private readonly bus: Bus, private readonly stats: DashboardStats) {}
 
   state(): ViewState {
-    this.stats.queries += 5;
+    this.stats.queries += 3 + TASK_VIEW_QUERIES;
     const seq = this.bus.latestSeq();
     const last = seq > 0 ? this.bus.events(seq - 1, 1)[0] : undefined;
     return {
@@ -102,9 +107,7 @@ class Reader {
       seq,
       lastChangeMs: last?.tsMs ?? null,
       agents: this.bus.listAgents().filter((agent) => agent.id !== OPERATOR_ID).map(agentView),
-      tasks: this.bus.listTasks({ limit: 200 }).map((task) => ({
-        id: task.id, title: task.title, assignee: task.assignee, state: task.state, createdMs: task.createdMs, closed: false,
-      })),
+      tasks: taskViews(this.bus, this.bus.now()),
       messages: this.bus.getMessages({ limit: 100 }).map(messageView).reverse(),
     };
   }
@@ -130,14 +133,11 @@ class Reader {
       this.stats.queries += 1;
       agents = this.bus.agentSummaries([...agentIds]).map(agentView);
     }
-    let tasks: TaskView[] = [];
-    const ids = [...taskIds].filter((id) => Number.isInteger(id) && id > 0).slice(0, 500);
-    if (ids.length) {
-      this.stats.queries += 1;
-      tasks = this.bus.taskSummaries(ids).map((task) => ({
-        id: task.id, title: task.title, assignee: task.assignee, state: task.state,
-        createdMs: task.createdMs, closed: CLOSED_STATES.includes(task.state),
-      }));
+    // A task change can unblock or block others (dependencies), so the whole list is re-read and replaced.
+    let tasks: TaskView[] | undefined;
+    if (taskIds.size) {
+      this.stats.queries += TASK_VIEW_QUERIES;
+      tasks = taskViews(this.bus, this.bus.now());
     }
     let messages: MessageView[] = [];
     if (messageSeqs.size) {
