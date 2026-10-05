@@ -832,12 +832,16 @@ fn supervise_survives_a_locked_bus() {
             })
         })
     };
-    wait_for(Duration::from_secs(10), "startup policy to be applied", || {
-        e.bus
-            .get_agent("w5")
-            .unwrap()
-            .is_some_and(|a| a.stored_status == "waiting")
-    });
+    wait_for(
+        Duration::from_secs(10),
+        "startup policy to be applied",
+        || {
+            e.bus
+                .get_agent("w5")
+                .unwrap()
+                .is_some_and(|a| a.stored_status == "waiting")
+        },
+    );
     // Runtime locks are retried; startup must first persist its policy.
     let blocker = rusqlite::Connection::open(e.home.join("bus.db")).unwrap();
     blocker.busy_timeout(Duration::from_secs(5)).unwrap();
