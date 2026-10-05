@@ -436,12 +436,20 @@ test("a supervisor keeps going through a bus locked past the busy timeout", { ti
   });
   let settled = false;
   void running.then(() => { settled = true; }, () => { settled = true; });
+  // Locked at startup: the configuration limits wait for the bus instead of being skipped.
+  await until("a startup retry", 30_000, () => lines.some((l) => l.includes("configuration limits not applied yet")), () => lines.join("\n"));
+  assert.equal(settled, false, "the supervisor must not exit on a locked bus");
+  holder.exec("COMMIT");
+  const created = f.json("operator", ["task", "add", "after the lock", "--to", "fake-small"]);
+  await until("the task to be submitted", 30_000, () => f.bus.getTask(created.id).state === "submitted", () => lines.join("\n"));
+  // Locked while running: the round fails and is retried.
+  holder.exec("BEGIN IMMEDIATE");
   await until("a failed round", 30_000, () => lines.some((l) => l.includes("round failed")), () => lines.join("\n"));
   assert.equal(settled, false, "the supervisor must not exit on a locked bus");
   holder.exec("COMMIT");
   holder.close();
-  const created = f.json("operator", ["task", "add", "after the lock", "--to", "fake-small"]);
-  await until("the task to be submitted", 30_000, () => f.bus.getTask(created.id).state === "submitted", () => lines.join("\n"));
+  const second = f.json("operator", ["task", "add", "after the second lock", "--to", "fake-small"]);
+  await until("the second task to be submitted", 30_000, () => f.bus.getTask(second.id).state === "submitted", () => lines.join("\n"));
   controller.abort();
   await running;
 });

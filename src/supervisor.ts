@@ -472,8 +472,22 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
     }
     let operator: Identity | null = null;
     try { operator = bus.identify(OPERATOR_ID); } catch { /* no operator token on this bus */ }
-    // The configuration's limits go into the bus, where every call path enforces them.
-    bus.setAgentPolicy(operator ?? me, me.agentId, policyFromConfig(config, agent));
+    // The configuration's limits go into the bus, where every call path enforces them. No work
+    // runs until they are in: a rejected policy stops the supervisor, a locked bus is waited out.
+    const startupRetryBaseMs = options.retryBaseMs ?? 2_000;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        bus.setAgentPolicy(operator ?? me, me.agentId, policyFromConfig(config, agent));
+        break;
+      } catch (error) {
+        if (error instanceof BusError || !/database is (locked|busy)/i.test((error as Error).message)) throw error;
+        if (options.signal?.aborted) return;
+        const delay = retryDelayMs(attempt) * startupRetryBaseMs / 2_000;
+        log(`configuration limits not applied yet (${(error as Error).message}); retrying in ${delay / 1000}s`);
+        await sleep(delay, options.signal);
+        if (options.signal?.aborted) return;
+      }
+    }
     const qagentBin = options.qagentBin ?? DEFAULT_QAGENT_BIN;
     const isolationEnv: Record<string, string> = worktreeMode ? { QAGENT_REQUIRE_WORKTREE: "1" } : {};
     const mcpCommand = mcpCommandFor(me.agentId, bus.dbPath, qagentBin, isolationEnv);
