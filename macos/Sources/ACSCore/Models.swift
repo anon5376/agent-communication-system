@@ -35,13 +35,15 @@ public struct Snapshot: Decodable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        dbPath = try container.decodeIfPresent(String.self, forKey: .dbPath) ?? ""
-        simulated = try container.decodeIfPresent(Bool.self, forKey: .simulated) ?? false
-        canOperate = try container.decodeIfPresent(Bool.self, forKey: .canOperate) ?? false
+        // Security-signalling fields are required: a snapshot that omits them
+        // must not silently decode as a normal workspace.
+        dbPath = try container.decode(String.self, forKey: .dbPath)
+        simulated = try container.decode(Bool.self, forKey: .simulated)
+        canOperate = try container.decode(Bool.self, forKey: .canOperate)
         agents = try container.decodeIfPresent([AgentRecord].self, forKey: .agents) ?? []
         tasks = try container.decodeIfPresent([TaskRecord].self, forKey: .tasks) ?? []
         messages = try container.decodeIfPresent([MessageRecord].self, forKey: .messages) ?? []
-        truncated = try container.decodeIfPresent(Bool.self, forKey: .truncated) ?? false
+        truncated = try container.decode(Bool.self, forKey: .truncated)
     }
 
     private enum CodingKeys: String, CodingKey {

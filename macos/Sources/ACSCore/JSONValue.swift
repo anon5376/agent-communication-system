@@ -2,9 +2,13 @@ import Foundation
 
 /// An untyped JSON value, used for request payloads sent to the acs-desktop
 /// helper and for inspecting reply envelopes before typed decoding.
+///
+/// `.integer` carries Int64 without precision loss (task IDs exceed 2^53);
+/// `.number` remains for genuinely fractional values.
 public enum JSONValue: Codable, Sendable, Equatable {
     case string(String)
     case number(Double)
+    case integer(Int64)
     case bool(Bool)
     case array([JSONValue])
     case object([String: JSONValue])
@@ -16,6 +20,8 @@ public enum JSONValue: Codable, Sendable, Equatable {
             self = .null
         } else if let value = try? container.decode(Bool.self) {
             self = .bool(value)
+        } else if let value = try? container.decode(Int64.self) {
+            self = .integer(value)
         } else if let value = try? container.decode(Double.self) {
             self = .number(value)
         } else if let value = try? container.decode(String.self) {
@@ -35,6 +41,7 @@ public enum JSONValue: Codable, Sendable, Equatable {
         switch self {
         case .string(let value): try container.encode(value)
         case .number(let value): try container.encode(value)
+        case .integer(let value): try container.encode(value)
         case .bool(let value): try container.encode(value)
         case .array(let value): try container.encode(value)
         case .object(let value): try container.encode(value)

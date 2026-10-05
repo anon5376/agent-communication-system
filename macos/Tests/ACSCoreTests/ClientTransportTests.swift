@@ -51,12 +51,103 @@ final class ClientTransportTests: XCTestCase {
         // The helper saw exactly one protocol request on stdin.
         let sent = try JSONDecoder().decode(
             [String: JSONValue].self, from: Data(contentsOf: requestFile))
-        XCTAssertEqual(sent["version"], .number(1))
+        XCTAssertEqual(sent["version"], .integer(1))
         XCTAssertEqual(sent["dbPath"], .string(tempDir.appendingPathComponent("bus.db").path))
         XCTAssertEqual(sent["action"], .string("send"))
         XCTAssertEqual(
             sent["payload"],
-            .object(["to": .string("rusty"), "subject": .string("hi"), "n": .number(3)]))
+            .object(["to": .string("rusty"), "subject": .string("hi"), "n": .integer(3)]))
+    }
+
+    func testIntegerPayloadPreservesIdsBeyondDoublePrecision() async throws {
+        let requestFile = tempDir.appendingPathComponent("request.json")
+        let helper = try makeHelper("""
+            cat > "\(requestFile.path)"
+            echo '{"ok":true,"data":{"message":"ok"}}'
+            """)
+        let big: Int64 = 9_007_199_254_740_993 // 2^53 + 1
+        let _: Acknowledgement = try await client(helper)
+            .request("task", payload: ["id": .integer(big)], as: Acknowledgement.self)
+        let raw = try String(contentsOf: requestFile, encoding: .utf8)
+        XCTAssertTrue(
+            raw.contains("9007199254740993"),
+            "integer payload must not degrade to a Double: \(raw)")
+        let sent = try JSONDecoder().decode(
+            [String: JSONValue].self, from: Data(contentsOf: requestFile))
+        XCTAssertEqual(sent["payload"], .object(["id": .integer(big)]))
+    }
+
+    func testResponsePreservesLargeInt64Ids() async throws {
+        let helper = try makeHelper("""
+            cat > /dev/null
+            echo '{"ok":true,"data":{"id":9007199254740993,"title":"big","brief":"","acceptance":"","state":"open","priority":"normal","assignee":null,"reviewer":null,"project":null,"pathScopes":[],"dependencies":[],"updatedMs":1,"createdMs":1,"result":null,"review":null,"notes":[],"messages":[]}}'
+            """)
+        let detail: TaskDetail = try await client(helper)
+            .request("task", payload: ["id": .integer(9)], as: TaskDetail.self)
+        // 2^53 + 1 rounds to 9007199254740992 through a Double.
+        XCTAssertEqual(detail.task.id, 9_007_199_254_740_993)
+    }
+
+    func testSuccessReplyOnNonzeroExitIsRejected() async throws {
+        let helper = try makeHelper("""
+            cat > /dev/null
+            echo '{"ok":true,"data":{"message":"hmm"}}'
+            exit 1
+            """)
+        do {
+            let _: Acknowledgement = try await client(helper)
+                .request("snapshot", as: Acknowledgement.self)
+            XCTFail("expected helperExited")
+        } catch let ACSError.helperExited(status, _) {
+            XCTAssertEqual(status, 1)
+        }
+    }
+
+    func testTimeoutEscalatesWhenHelperIgnoresSigterm() async throws {
+        let helper = try makeHelper("""
+            trap '' TERM
+            while true; do sleep 1; done
+            """)
+        let started = Date()
+        do {
+            let _: Acknowledgement = try await client(helper, timeout: 0.5)
+                .request("snapshot", as: Acknowledgement.self)
+            XCTFail("expected timedOut")
+        } catch ACSError.timedOut {
+            // expected
+        }
+        XCTAssertLessThan(
+            Date().timeIntervalSince(started), 15,
+            "SIGTERM-ignoring helper must be SIGKILLed within the grace period")
+    }
+
+    func testDescendantHoldingPipesDoesNotBlockShutdown() async throws {
+        // The helper spawns a child that inherits our stdout/stderr pipes and
+        // outlives it, then sleeps forever itself. The timeout path must not
+        // wait for the pipe EOF the descendant will never produce.
+        let pidFile = tempDir.appendingPathComponent("child.pid")
+        let helper = try makeHelper("""
+            sleep 60 &
+            echo $! > "\(pidFile.path)"
+            exec sleep 60
+            """)
+        defer {
+            if let text = try? String(contentsOf: pidFile, encoding: .utf8),
+               let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                kill(pid, SIGKILL)
+            }
+        }
+        let started = Date()
+        do {
+            let _: Acknowledgement = try await client(helper, timeout: 0.5)
+                .request("snapshot", as: Acknowledgement.self)
+            XCTFail("expected timedOut")
+        } catch ACSError.timedOut {
+            // expected
+        }
+        XCTAssertLessThan(
+            Date().timeIntervalSince(started), 15,
+            "a descendant holding our pipes open must not block the reply")
     }
 
     func testErrorEnvelopeWinsOverNonZeroExit() async throws {
