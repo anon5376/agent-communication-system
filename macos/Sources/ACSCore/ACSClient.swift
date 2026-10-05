@@ -327,7 +327,7 @@ private final class BoundedBuffer: @unchecked Sendable {
         while true {
             if done.isSet && postDoneBudget <= 0 { return }
             let count = chunk.withUnsafeMutableBytes {
-                read(fd, $0.baseAddress, chunk.count)
+                read(fd, $0.baseAddress, $0.count)
             }
             if count > 0 {
                 if done.isSet { postDoneBudget -= count }
