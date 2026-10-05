@@ -39,7 +39,10 @@ windows/
 └── src-tauri/                   Rust shell
     ├── src/helper.rs            spawn acs-desktop.exe, pipe transport
     ├── src/lib.rs               Tauri commands
-    ├── src/bin/fake-acs-desktop.rs  protocol-identical dev double
+    ├── examples/fake-acs-desktop.rs protocol-identical dev double
+    │                                (an example, not a [[bin]] — Tauri
+    │                                bundles every binary target, which
+    │                                would ship the fake in real installers)
     └── tests/transport.rs       fake-helper transport test set
 ```
 
@@ -62,10 +65,11 @@ from stdout (stderr is diagnostics only). Per `protocol/desktop-v1.md` it:
 ### The helper on this branch
 
 The real `acs-desktop.exe` is the Rust bridge in `rust/` — the same binary
-the macOS app shells out to. A separate effort is porting that crate to
-Windows; until it lands, `windows/scripts/build-installer.ps1` **fails closed** — the
-installer is only ever the real helper. The one opt-in exception is
-`-FakeHelper`, which bundles `src/bin/fake-acs-desktop.rs`, a protocol-v1
+the macOS app shells out to — and `windows/scripts/build-installer.ps1`
+**fails closed**: the installer is only ever real `acs-desktop.exe`,
+`qagent.exe`, and `aos.exe` built `cargo build --locked --release`. The one
+opt-in exception is
+`-FakeHelper`, which bundles `examples/fake-acs-desktop.rs`, a protocol-v1
 double that serves a JSON-file bus seeded with the same fixture `aos demo`
 writes. A fake build can never be mistaken for a real one: the installer is
 renamed `ACS_<ver>_x64-PREVIEW-fake-backend-setup.exe`, and the app pins a

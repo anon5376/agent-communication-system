@@ -317,6 +317,7 @@ fn action_snapshot(db: &Path, state: &Value) -> Value {
             all[TASK_LIMIT..]
                 .iter()
                 .filter(|t| t["state"].as_str() == Some("submitted") && t["id"].as_i64() < Some(oldest))
+                .take(TASK_LIMIT)
                 .map(task_preview),
         );
     }

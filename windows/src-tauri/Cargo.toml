@@ -23,9 +23,13 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
 ] }
 
-[[bin]]
+# The fake helper is an EXAMPLE, not a [[bin]]: Tauri bundles every binary
+# target, which would silently ship the preview double inside real
+# installers. Examples are still built by `cargo test` (transport tests use
+# it) and by `cargo build --example fake-acs-desktop` (the packaging script).
+[[example]]
 name = "fake-acs-desktop"
-path = "src/bin/fake-acs-desktop.rs"
+path = "examples/fake-acs-desktop.rs"
 
 [profile.release]
 opt-level = 2

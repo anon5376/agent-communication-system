@@ -15,6 +15,8 @@
 # is visibly marked three ways:
 #   * installer renamed  ACS_<ver>_x64-PREVIEW-fake-backend-setup.exe
 #   * build-flavor.txt bundled next to the app, read by acs_build_flavor
+#     (the fake lives in src-tauri/examples/ so Tauri never bundles it even
+#     in real builds — cargo would package any [[bin]] target)
 #   * a persistent, non-dismissable "Preview build — not connected to a real
 #     ACS workspace" banner on every screen of the app
 #
@@ -43,16 +45,19 @@ $FlavorFile = Join-Path $Tauri "resources\build-flavor.txt"
 Push-Location $Root
 try {
     New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+    # Clear stale staged sidecars so a preview run can never pick up an old
+    # real acs-desktop/qagent/aos (and vice versa).
+    Remove-Item (Join-Path $BinDir "*-$Triple.exe") -Force -ErrorAction SilentlyContinue
 
     # --- sidecars -----------------------------------------------------------
     $staged = @{}
     if ($FakeHelper) {
         Write-Warning "-FakeHelper: building a PREVIEW installer with the fake backend."
         Push-Location $Tauri
-        cargo build --release --bin fake-acs-desktop
+        cargo build --release --example fake-acs-desktop
         if ($LASTEXITCODE -ne 0) { throw "fake-acs-desktop build failed" }
         Pop-Location
-        Copy-Item (Join-Path $Tauri "target\release\fake-acs-desktop.exe") `
+        Copy-Item (Join-Path $Tauri "target\release\examples\fake-acs-desktop.exe") `
                   (Join-Path $BinDir "acs-desktop-$Triple.exe") -Force
         $staged["acs-desktop"] = "fake"
         "fake" | Set-Content -NoNewline $FlavorFile
@@ -83,10 +88,21 @@ try {
     }
 
     # --- tauri bundle -------------------------------------------------------
+    # externalBin is patched into tauri.conf.json for the build and restored
+    # afterwards: only the sidecars actually staged above get bundled, so a
+    # real build ships acs-desktop/qagent/aos and a -FakeHelper build ships
+    # the fake acs-desktop alone. (Config-file overlays don't reliably merge
+    # externalBin.)
+    $confPath = Join-Path $Tauri "tauri.conf.json"
+    $confOrig = Get-Content $confPath -Raw
+    $binList = ($staged.Keys | Sort-Object | ForEach-Object { "`"binaries/$_`"" }) -join ", "
+    $confOrig -replace '"externalBin"\s*:\s*\[[^\]]*\]', "`"externalBin`": [$binList]" | Set-Content $confPath -NoNewline
     Push-Location $Windows
     npm run tauri -- build
+    $tauriExit = $LASTEXITCODE
     Pop-Location
-    if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
+    $confOrig | Set-Content $confPath -NoNewline
+    if ($tauriExit -ne 0) { throw "tauri build failed" }
 
     # --- name + checksum ----------------------------------------------------
     $nsis = Join-Path $Tauri "target\release\bundle\nsis"

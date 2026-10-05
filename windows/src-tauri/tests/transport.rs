@@ -10,7 +10,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 fn fake() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_fake-acs-desktop"))
+    // The fake is a cargo example so Tauri never bundles it; `cargo test`
+    // builds examples, so the exe is already there when tests run.
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("debug")
+        .join("examples")
+        .join("fake-acs-desktop.exe")
 }
 
 fn scratch_db(test: &str) -> PathBuf {
