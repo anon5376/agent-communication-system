@@ -118,7 +118,7 @@ struct TaskInspector: View {
                     }
                     if !result.artifacts.isEmpty {
                         DisclosureGroup("Attached references (\(result.artifacts.count))") {
-                            ForEach(result.artifacts, id: \.self) { item in
+                            ForEach(Array(result.artifacts.enumerated()), id: \.offset) { _, item in
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("\(item.type): \(item.value)").font(.caption.monospaced()).textSelection(.enabled)
                                     if let note = item.description, !note.isEmpty {
