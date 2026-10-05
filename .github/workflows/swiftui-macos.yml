@@ -1,0 +1,57 @@
+name: SwiftUI macOS app
+
+# Builds the ACS SwiftUI app, runs its package tests, and packages ACS.app as
+# a DMG on a native-architecture macOS runner. The DMG and its SHA-256
+# checksum are uploaded as workflow artifacts only — this workflow never
+# creates releases.
+
+on:
+  push:
+    branches:
+      - swiftui
+      - "devin/swiftui-*"
+    paths:
+      - "macos/**"
+      - "rust/**"
+      - ".github/workflows/swiftui-macos.yml"
+  pull_request:
+    branches:
+      - swiftui
+    paths:
+      - "macos/**"
+      - "rust/**"
+      - ".github/workflows/swiftui-macos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, test, package DMG
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Swift toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Swift package tests
+        run: swift test --package-path macos
+
+      - name: Build DMG
+        run: macos/scripts/build-dmg.sh
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ACS-${{ runner.arch }}.dmg
+          path: |
+            macos/dist/ACS-*.dmg
+            macos/dist/ACS-*.dmg.sha256
+          if-no-files-found: error
