@@ -11,9 +11,9 @@ import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AdapterContext, HarnessInvocation, McpCommand, getHarnessAdapter } from "./adapters.js";
-import { BusConfig, ResolvedAgent, configPathFromProject, loadConfig, resolveAgent } from "./config.js";
+import { AgentDefinition, BusConfig, ResolvedAgent, configPathFromProject, loadConfig, resolveAgent } from "./config.js";
 import { Bus } from "./core/bus.js";
-import type { Identity } from "./core/identity.js";
+import type { AgentPolicy, Identity } from "./core/identity.js";
 import { budgetOver, pausedOf } from "./core/control.js";
 import { BusError, DEFAULT_WAIT_SEC, Message, OPERATOR_ID, Task } from "./core/types.js";
 
@@ -24,6 +24,16 @@ function envValue(...names: string[]): string | undefined {
     if (typeof value === "string" && value.trim()) return value;
   }
   return undefined;
+}
+
+export function policyFromConfig(config: BusConfig, agent: AgentDefinition): AgentPolicy {
+  const policy: AgentPolicy = {
+    canDelegate: agent.permissions.canDelegate,
+    maxDelegationDepth: Math.min(agent.permissions.maxDelegationDepth, config.constraints.maxDelegationDepth),
+    maxConcurrentTasks: config.constraints.maxConcurrentTasks,
+  };
+  if (agent.permissions.allowedChildAgentIds?.length) policy.allowedChildAgentIds = [...agent.permissions.allowedChildAgentIds];
+  return policy;
 }
 
 export interface ProcessResult {
@@ -336,6 +346,10 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
     const agent = resolveAgent(config, options.agentId);
     if (!agent.enabled) throw new Error(`agent ${agent.id} is disabled in the harness configuration`);
     release = acquireLock(join(home, "supervisors"), agent.id);
+
+    let operator: Identity | null = null;
+    try { operator = bus.identify(OPERATOR_ID); } catch { /* no operator token on this bus */ }
+    bus.setAgentPolicy(operator ?? me, me.agentId, policyFromConfig(config, agent));
 
     const adapter = getHarnessAdapter(agent.harnessDefinition.adapter);
     const managed = supervisorManaged(agent);

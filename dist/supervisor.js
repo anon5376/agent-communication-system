@@ -24,6 +24,16 @@ function envValue(...names) {
     }
     return undefined;
 }
+export function policyFromConfig(config, agent) {
+    const policy = {
+        canDelegate: agent.permissions.canDelegate,
+        maxDelegationDepth: Math.min(agent.permissions.maxDelegationDepth, config.constraints.maxDelegationDepth),
+        maxConcurrentTasks: config.constraints.maxConcurrentTasks,
+    };
+    if (agent.permissions.allowedChildAgentIds?.length)
+        policy.allowedChildAgentIds = [...agent.permissions.allowedChildAgentIds];
+    return policy;
+}
 export function sanitizedEnvironment(agent, additions) {
     const env = { ...process.env, ...additions, MCP_TOOL_TIMEOUT: "3600000" };
     if (envValue("QAGENT_ALLOW_API_KEY", "AGENT_BUS_ALLOW_API_KEY") === "1" || !agent.providerDefinition.subscriptionBacked)
@@ -309,6 +319,12 @@ export async function supervise(options) {
         if (!agent.enabled)
             throw new Error(`agent ${agent.id} is disabled in the harness configuration`);
         release = acquireLock(join(home, "supervisors"), agent.id);
+        let operator = null;
+        try {
+            operator = bus.identify(OPERATOR_ID);
+        }
+        catch { /* no operator token on this bus */ }
+        bus.setAgentPolicy(operator ?? me, me.agentId, policyFromConfig(config, agent));
         const adapter = getHarnessAdapter(agent.harnessDefinition.adapter);
         const managed = supervisorManaged(agent);
         const sessionPath = join(sessionDir, `${agent.id}.json`);

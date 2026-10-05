@@ -105,6 +105,18 @@ Verified live in this repo: TS `send` → Rust `inbox` (and reverse), shared
 cursors, signal files written by either side, `qagent wait` on Rust woken by a
 TS send and vice versa (~ms-scale wake latency through the WAL + signal file).
 
+Both bus cores enforce stored delegation, allowed-child, depth and concurrent
+claim policies inside write transactions and preserve them across token rotation.
+Both supervisors stop before running work if the configured policy cannot be
+applied (for example, widening an existing restriction without an operator token).
+Correct the config to retain the stored restriction, or have the operator
+explicitly authorise the wider policy, then restart. A rejected mixed update
+does not partially apply its tighter fields.
+
+Supervisor ownership remains different on this branch: Rust has the atomic
+lock protocol; the TypeScript supervisor here still has its older pid-file lock.
+Do not run both supervisors for the same agent.
+
 ## Layout notes vs the TS source
 
 - `Bus::write` = the `write()` transaction wrapper: BEGIN IMMEDIATE on the
