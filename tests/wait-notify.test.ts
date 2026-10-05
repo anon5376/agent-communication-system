@@ -170,3 +170,30 @@ test("the signal file alone wakes a waiter when the database watcher is slow", a
   assert.ok(at - sent.tsMs < 500, `latency ${at - sent.tsMs} ms`);
   assert.equal(bus.unreadCount("bob"), 1, "waitForMail does not advance the cursor");
 });
+
+test("a message or open task that lands just as a wait starts wakes the waiter instead of waiting out the timeout", async (t) => {
+  const { dbPath, bus } = setup(t);
+  const bob = bus.identify("bob");
+  const other = Bus.open({ dbPath });
+  t.after(() => other.close());
+  const operator = other.identify("operator");
+  // Land the write between waitForMail's empty inbox check and the event that marks the
+  // start of the wait, the window a concurrent sender can hit.
+  const internals = bus as unknown as { write: <T>(fn: () => T) => T };
+  const write = internals.write.bind(bus);
+  let inject: (() => void) | null = null;
+  internals.write = <T>(fn: () => T): T => { const pending = inject; inject = null; pending?.(); return write(fn); };
+
+  inject = () => { other.send(operator, { to: "bob", type: "question", subject: "racing mail", body: "x" }); };
+  let started = Date.now();
+  const mail = await bus.waitForMail(bob, { timeoutMs: 3000 });
+  assert.equal(mail.status, "mail");
+  assert.ok(Date.now() - started < 2000, `woke after ${Date.now() - started} ms`);
+  bus.inbox(bob, { limit: 50 });
+
+  inject = () => { other.createTask(operator, { title: "racing task", role: "worker" }); };
+  started = Date.now();
+  const task = await bus.waitForMail(bob, { timeoutMs: 3000 });
+  assert.equal(task.status, "task");
+  assert.ok(Date.now() - started < 2000, `woke after ${Date.now() - started} ms`);
+});

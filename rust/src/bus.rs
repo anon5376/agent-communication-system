@@ -422,6 +422,57 @@ impl Bus {
         Ok(token_path)
     }
 
+    /// Store the policy that narrows `agent_id`'s permissions (None clears it). The
+    /// operator may set any policy; an agent may set its own only when the new one
+    /// allows nothing the stored one forbids, so a supervisor can apply its project
+    /// configuration without the operator token but can never widen what the operator
+    /// or an earlier policy allowed. Mirror: setAgentPolicy in src/core/bus.ts on main
+    /// (#29); the TypeScript copy on rust-port does not have it yet.
+    pub fn set_agent_policy(
+        &self,
+        actor: &Identity,
+        agent_id: &str,
+        policy: Option<&identity::AgentPolicy>,
+    ) -> Result<identity::Permissions> {
+        let id = identity::assert_safe_agent_id(agent_id)?.to_string();
+        if actor.authority != "operator" && actor.agent_id != id {
+            return Err(BusError::forbidden(format!(
+                "only the operator or {id} itself may set {id}'s policy"
+            )));
+        }
+        let next = policy.cloned().unwrap_or_default();
+        // Normalise exactly as a reader would, so what is stored is what is enforced.
+        let next = identity::parse_policy(&next.to_json());
+        self.write(|bus| {
+            if identity::stored_identity(&bus.conn, &id)?.is_none() {
+                return Err(BusError::not_found(format!("unknown agent: {id}")));
+            }
+            let mut value = identity::stored_permissions_json(&bus.conn, &id)?;
+            let current = identity::parse_policy(value.get("policy").unwrap_or(&serde_json::Value::Null));
+            if actor.authority != "operator" && identity::policy_widens(&current, &next) {
+                return Err(BusError::forbidden(format!(
+                    "{id} may only narrow its own policy; ask the operator to widen it"
+                )));
+            }
+            let now = bus.now();
+            if next.is_empty() {
+                value.remove("policy");
+            } else {
+                let mut stored = next.to_json();
+                stored["updatedMs"] = json!(now);
+                stored["by"] = json!(actor.agent_id);
+                value.insert("policy".into(), stored);
+            }
+            bus.conn
+                .prepare_cached("UPDATE identities SET permissions_json = ?, updated_ms = ? WHERE agent_id = ?")?
+                .execute(params![serde_json::to_string(&value)?, now, id])?;
+            bus.event(&actor.agent_id, "agent_policy", "agent", &id, json!({
+                "policy": value.get("policy").cloned().unwrap_or(serde_json::Value::Null),
+            }))?;
+            Ok(identity::current_permissions(&bus.conn, &id)?.expect("identity checked above"))
+        })
+    }
+
     // ----------------------------------------------------- pause and budgets
     // Stored in agents.meta_json; see control.rs for the shape.
 
@@ -1471,6 +1522,28 @@ impl Bus {
 
     /// Claimed tasks with no claim/note activity for `stall_ms` — a probably-dead claim.
     /// `updated_ms` moves on claim and on every note, so it is the last-activity clock.
+    /// Whether open work is waiting that `agent_id` may claim: assigned to it, or
+    /// unassigned for its role (or for no role).
+    /// Nothing is claimable once the agent holds its claim limit.
+    pub fn has_claimable(&self, agent_id: &str, role: &str) -> Result<bool> {
+        let limit = identity::current_permissions(&self.conn, agent_id)?
+            .and_then(|p| p.max_concurrent_tasks);
+        if let Some(limit) = limit {
+            if self.claimed_count(agent_id)? >= limit {
+                return Ok(false);
+            }
+        }
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT 1 FROM tasks WHERE state IN ('open', 'changes_requested')
+                   AND (assignee = ? OR (assignee IS NULL AND (role = '' OR role = ?))) LIMIT 1",
+            )?
+            .query_row(params![agent_id, role], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
     pub fn stalled_tasks(&self, stall_ms: i64) -> Result<Vec<Task>> {
         let cutoff = self.now() - stall_ms.max(0);
         self.to_tasks(
@@ -1702,6 +1775,7 @@ impl Bus {
             if let Some(parent_id) = input.parent_id {
                 bus.require_task(parent_id)?;
             }
+            bus.assert_may_delegate(actor, to.as_deref(), input.parent_id)?;
             let mut blocked = false;
             for dep in &dependencies {
                 blocked = bus.require_task(*dep)?.state != "accepted" || blocked;
@@ -1747,6 +1821,67 @@ impl Bus {
         })
     }
 
+    /// Delegation rules, checked inside the creating transaction against the permissions
+    /// stored now (not those resolved when the caller identified itself). Creating work for
+    /// someone else, or for anyone to claim, needs canDelegate; a policy can also name the
+    /// only agents this one may assign and how deep under existing tasks it may create work.
+    /// Mirror: assertMayDelegate in src/core/bus.ts on main (#29); the TypeScript copy on
+    /// rust-port does not check delegation yet.
+    fn assert_may_delegate(&self, actor: &Identity, to: Option<&str>, parent_id: Option<i64>) -> Result<()> {
+        if actor.authority == "operator" {
+            return Ok(());
+        }
+        let permissions = identity::current_permissions(&self.conn, &actor.agent_id)?
+            .unwrap_or_else(|| actor.permissions.clone());
+        let me = actor.agent_id.as_str();
+        let for_someone_else = to != Some(me);
+        if for_someone_else && !permissions.can_delegate {
+            return Err(BusError::forbidden(format!(
+                "{me} may not delegate: it can only create tasks assigned to itself (--to {me})"
+            )));
+        }
+        if let (Some(to), Some(allowed)) = (to, &permissions.allowed_child_agent_ids) {
+            if to != me && !allowed.is_empty() && !allowed.iter().any(|id| id == to) {
+                return Err(BusError::forbidden(format!(
+                    "{me} may only assign work to {}, not {to}",
+                    allowed.join(", ")
+                )));
+            }
+        }
+        if let (true, Some(max), Some(parent_id)) =
+            (for_someone_else, permissions.max_delegation_depth, parent_id)
+        {
+            let mut depth: i64 = 0;
+            let mut next = Some(parent_id);
+            while let Some(id) = next {
+                if depth > max {
+                    break;
+                }
+                next = self
+                    .conn
+                    .prepare_cached("SELECT parent_id FROM tasks WHERE id = ?")?
+                    .query_row([id], |row| row.get::<_, Option<i64>>(0))
+                    .optional()?
+                    .flatten();
+                depth += 1;
+            }
+            if depth > max {
+                return Err(BusError::forbidden(format!(
+                    "{me} may create work at most {max} level(s) below a top-level task"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// How many tasks the agent holds claimed right now.
+    fn claimed_count(&self, agent_id: &str) -> Result<i64> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT COUNT(*) FROM tasks WHERE state = 'claimed' AND assignee = ?")?
+            .query_row([agent_id], |row| row.get(0))?)
+    }
+
     /**
      * Claim a task atomically. The claim is one UPDATE ... WHERE state IN ('open','changes_requested')
      * AND (assignee IS NULL OR assignee = me) RETURNING; it wins only if that row came back.
@@ -1757,6 +1892,17 @@ impl Bus {
         let explicit = task_id.is_some();
         self.write(|bus| {
             bus.reopen_expired_claims()?;
+            let limit = identity::current_permissions(&bus.conn, &me)?
+                .unwrap_or_else(|| actor.permissions.clone())
+                .max_concurrent_tasks;
+            if let Some(limit) = limit {
+                let held = bus.claimed_count(&me)?;
+                if held >= limit {
+                    return Err(BusError::conflict(format!(
+                        "{me} already holds {held} claimed task(s), its limit; submit or release one first"
+                    )));
+                }
+            }
             let role = if explicit { String::new() } else { bus.agent_role(&me)? };
             // Assigned-to-me first, then urgent before older ordinary work. Pages past the first
             // 100 too: a pile of lease-conflicted urgent tasks must not starve later claimable ones.

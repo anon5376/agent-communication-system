@@ -954,3 +954,345 @@ fn guard_is_on_unless_the_agent_turns_it_off() {
     let context = acs::adapters::AdapterContext { agent: &agent, ..context };
     assert!(!(claude.build)(&context).args.iter().any(|a| a == "--disallowedTools"));
 }
+
+// ------------------------------------------------- backlog without fresh mail
+
+fn spawn_supervisor(
+    e: &E2E,
+    agent_id: &str,
+    wait_ms: u64,
+) -> (Arc<AtomicBool>, std::thread::JoinHandle<acs::error::Result<()>>) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = {
+        let stop = Arc::clone(&stop);
+        let db_path = e.home.join("bus.db");
+        let workdir = e.workdir.display().to_string();
+        let config_path = e.workdir.join("agent-bus.config.json");
+        let agent_id = agent_id.to_string();
+        std::thread::spawn(move || {
+            supervise(SuperviseOptions {
+                agent_id,
+                workdir,
+                db_path,
+                config_path: Some(config_path),
+                stop,
+                wait_ms: Some(wait_ms),
+                retry_base_ms: None,
+                fake_harness_path: Some("fake-harness".to_string()),
+                qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
+                log: Some(Box::new(|_| {})),
+            })
+        })
+    };
+    (stop, handle)
+}
+
+fn unassigned_task(e: &E2E, title: &str) -> i64 {
+    e.bus
+        .create_task(
+            &e.operator,
+            CreateTaskInput {
+                title: title.to_string(),
+                role: Some("worker".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id
+}
+
+#[test]
+fn supervise_works_backlog_already_queued_at_startup() {
+    let e = e2e("w1", "");
+    // Queued before the supervisor starts: no mail and no fresh event will ever arrive for it.
+    let id = unassigned_task(&e, "queued before start");
+    // A wait far longer than the test allows: the backlog must not wait for a timeout.
+    let (stop, handle) = spawn_supervisor(&e, "w1", 60_000);
+    wait_for(Duration::from_secs(15), "backlog task submitted", || {
+        e.bus
+            .get_task(id)
+            .map(|t| t.task.state == "submitted")
+            .unwrap_or(false)
+    });
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap().unwrap();
+}
+
+#[test]
+fn supervise_works_backlog_queued_while_paused_after_resume() {
+    let e = e2e("w1", "");
+    e.bus.pause_agent(&e.operator, "w1", Some("test")).unwrap();
+    let (stop, handle) = spawn_supervisor(&e, "w1", 60_000);
+    std::thread::sleep(Duration::from_millis(500));
+    // Its creation event passes while the agent is paused and not waiting.
+    let id = unassigned_task(&e, "queued while paused");
+    std::thread::sleep(Duration::from_millis(500));
+    e.bus.resume_agent(&e.operator, "w1").unwrap();
+    wait_for(Duration::from_secs(15), "task queued while paused submitted", || {
+        e.bus
+            .get_task(id)
+            .map(|t| t.task.state == "submitted")
+            .unwrap_or(false)
+    });
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap().unwrap();
+}
+
+// ------------------------------------------------- worktree isolation fails closed
+
+fn set_constraint(e: &E2E, key: &str, value: serde_json::Value) {
+    let path = e.workdir.join("agent-bus.config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    config["constraints"][key] = value;
+    fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+}
+
+#[test]
+fn supervise_refuses_worktree_isolation_instead_of_using_the_shared_checkout() {
+    let e = e2e("w1", "");
+    set_constraint(&e, "isolation", serde_json::json!("worktree"));
+    let id = unassigned_task(&e, "must not run in the shared checkout");
+    let (stop, handle) = spawn_supervisor(&e, "w1", 1_000);
+    let finished = Instant::now() + Duration::from_secs(10);
+    while !handle.is_finished() && Instant::now() < finished {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    stop.store(true, Ordering::SeqCst);
+    let error = handle.join().unwrap().unwrap_err();
+    assert!(
+        error.message.contains("worktree isolation is not available"),
+        "{}",
+        error.message
+    );
+    assert_eq!(e.bus.get_task(id).unwrap().task.state, "open");
+    assert!(!e.home.join("supervisors/w1.pid").exists());
+}
+
+#[test]
+fn task_claim_with_worktree_fails_without_claiming() {
+    let e = e2e("w1", "");
+    let id = unassigned_task(&e, "asked for a worktree");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_qagent"))
+        .args(["--db", &e.home.join("bus.db").display().to_string(), "--as", "w1"])
+        .args(["task", "claim", "--worktree", &id.to_string()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("worktree isolation is not available"), "{stderr}");
+    assert_eq!(e.bus.get_task(id).unwrap().task.state, "open");
+}
+
+// ------------------------------------------------- one supervisor per agent
+
+#[test]
+fn simultaneous_supervisors_for_one_agent_leave_exactly_one_running() {
+    // Check-then-write ownership lets several starters win only now and then, so race a few rounds.
+    const STARTERS: usize = 16;
+    let e = e2e("w1", "");
+    let config_path = e.workdir.join("agent-bus.config.json");
+    let db = e.home.join("bus.db");
+    for round in 0..4 {
+        // A stale pid file left by a crash: every starter has to decide to take it over.
+        fs::create_dir_all(e.home.join("supervisors")).unwrap();
+        fs::write(e.home.join("supervisors/w1.pid"), "999999\n").unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(STARTERS));
+        let starters: Vec<_> = (0..STARTERS)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let (db, workdir, config) = (db.clone(), e.workdir.clone(), config_path.clone());
+                std::thread::spawn(move || {
+                    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_qagent"));
+                    command
+                        .arg("--db").arg(&db).args(["--as", "w1", "supervise", "w1"])
+                        .arg(&workdir).arg("--config").arg(&config)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::piped());
+                    barrier.wait();
+                    command.spawn().unwrap()
+                })
+            })
+            .collect();
+        let mut children: Vec<_> = starters.into_iter().map(|t| t.join().unwrap()).collect();
+        // Every loser exits once it reaches the lock; a slow starter may still be opening
+        // the bus behind the winner, so wait for them rather than for a fixed time. Two
+        // owners never exit, and fail the count below.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline
+            && children.iter_mut().map(|c| c.try_wait().unwrap().is_none()).filter(|alive| *alive).count() > 1
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let mut running = 0;
+        for child in &mut children {
+            if child.try_wait().unwrap().is_none() {
+                running += 1;
+            }
+        }
+        let mut refusals = 0;
+        for child in &mut children {
+            if child.try_wait().unwrap().is_none() {
+                unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+            }
+            if child.wait_with_output_ref().contains("is already running") {
+                refusals += 1;
+            }
+        }
+        assert_eq!(running, 1, "round {round}: supervisors left running");
+        assert_eq!(refusals, STARTERS - 1, "round {round}");
+    }
+}
+
+trait WaitOutput {
+    fn wait_with_output_ref(&mut self) -> String;
+}
+
+impl WaitOutput for std::process::Child {
+    fn wait_with_output_ref(&mut self) -> String {
+        use std::io::Read;
+        let mut text = String::new();
+        if let Some(mut stderr) = self.stderr.take() {
+            let _ = stderr.read_to_string(&mut text);
+        }
+        let _ = self.wait();
+        text
+    }
+}
+
+// ------------------------------------------------- configuration limits and budgets
+
+#[test]
+fn supervise_applies_the_configuration_limits_to_the_bus_at_start() {
+    let e = e2e("w1", "");
+    set_constraint(&e, "maxConcurrentTasks", serde_json::json!(3));
+    let (stop, handle) = spawn_supervisor(&e, "w1", 60_000);
+    wait_for(Duration::from_secs(10), "the supervisor to wait", || {
+        e.bus
+            .get_agent("w1")
+            .unwrap()
+            .is_some_and(|a| a.stored_status == "waiting")
+    });
+    let me = e.bus.identify(Some("w1")).unwrap();
+    assert!(!me.permissions.can_delegate);
+    assert_eq!(me.permissions.max_concurrent_tasks, Some(3));
+    assert_eq!(me.permissions.max_delegation_depth, Some(0));
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap().unwrap();
+}
+
+#[test]
+fn supervise_stops_new_turns_once_the_configuration_token_budget_is_used() {
+    let e = e2e("w1", "");
+    // The fake harness reports well over 10 tokens a turn.
+    set_constraint(&e, "optionalTokenBudget", serde_json::json!(10));
+    let logs: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = {
+        let (stop, logs) = (Arc::clone(&stop), Arc::clone(&logs));
+        let db_path = e.home.join("bus.db");
+        let workdir = e.workdir.display().to_string();
+        let config_path = e.workdir.join("agent-bus.config.json");
+        std::thread::spawn(move || {
+            supervise(SuperviseOptions {
+                agent_id: "w1".into(),
+                workdir,
+                db_path,
+                config_path: Some(config_path),
+                stop,
+                wait_ms: Some(500),
+                retry_base_ms: None,
+                fake_harness_path: Some("fake-harness".to_string()),
+                qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
+                log: Some(Box::new(move |line| logs.lock().unwrap().push(line.to_string()))),
+            })
+        })
+    };
+    let first = unassigned_task(&e, "first");
+    wait_for(Duration::from_secs(15), "first task submitted", || {
+        e.bus.get_task(first).is_ok_and(|t| t.task.state == "submitted")
+    });
+    let second = unassigned_task(&e, "second");
+    wait_for(Duration::from_secs(10), "the budget notice", || {
+        logs.lock().unwrap().iter().any(|l| l.contains("budget reached (") && l.contains("reported tokens used"))
+    });
+    std::thread::sleep(Duration::from_millis(1_000));
+    assert_eq!(e.bus.get_task(second).unwrap().task.state, "open");
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap().unwrap();
+}
+
+#[test]
+fn supervise_refuses_a_dollar_budget_on_a_cli_that_reports_no_usage() {
+    let e = e2e("w1", "");
+    set_constraint(&e, "optionalApiCostBudgetUSD", serde_json::json!(5));
+    let (stop, handle) = spawn_supervisor(&e, "w1", 1_000);
+    let finished = Instant::now() + Duration::from_secs(10);
+    while !handle.is_finished() && Instant::now() < finished {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    stop.store(true, Ordering::SeqCst);
+    let error = handle.join().unwrap().unwrap_err();
+    assert!(
+        error.message.contains("reports no usage, so the budget could never be counted"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn supervise_offers_no_turn_to_an_agent_already_at_its_claim_limit() {
+    let e = e2e("w1", "");
+    set_constraint(&e, "maxConcurrentTasks", serde_json::json!(1));
+    // A CLI with bus tools: the supervisor offers it open work instead of claiming for it.
+    let path = e.workdir.join("agent-bus.config.json");
+    let mut config: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    config["harnesses"]["fake-harness"]["features"]["mcp"] = serde_json::json!(true);
+    fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+    let held = e
+        .bus
+        .create_task(
+            &e.operator,
+            CreateTaskInput {
+                title: "already held".to_string(),
+                to: Some("w1".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id;
+    let w1 = e.bus.identify(Some("w1")).unwrap();
+    e.bus.claim_task(&w1, Some(held)).unwrap();
+    e.bus.inbox(&w1, false, None).unwrap();
+    let other = unassigned_task(&e, "open but over the limit");
+    let logs: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = {
+        let (stop, logs) = (Arc::clone(&stop), Arc::clone(&logs));
+        let db_path = e.home.join("bus.db");
+        let workdir = e.workdir.display().to_string();
+        let config_path = e.workdir.join("agent-bus.config.json");
+        std::thread::spawn(move || {
+            supervise(SuperviseOptions {
+                agent_id: "w1".into(),
+                workdir,
+                db_path,
+                config_path: Some(config_path),
+                stop,
+                wait_ms: Some(300),
+                retry_base_ms: None,
+                fake_harness_path: Some("fake-harness".to_string()),
+                qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
+                log: Some(Box::new(move |line| logs.lock().unwrap().push(line.to_string()))),
+            })
+        })
+    };
+    // Several wait periods end with no mail; none may start a turn for the open task.
+    std::thread::sleep(Duration::from_millis(2_500));
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap().unwrap();
+    let turns = logs.lock().unwrap().iter().filter(|l| l.contains("turn complete")).count();
+    assert_eq!(turns, 0, "turns started while at the claim limit: {:?}", logs.lock().unwrap());
+    assert_eq!(e.bus.get_task(other).unwrap().task.state, "open");
+}

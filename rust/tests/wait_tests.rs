@@ -229,3 +229,54 @@ fn signal_file_alone_updates_on_every_delivery() {
         .seq;
     assert_eq!(wait::read_signal_file(&f.home, "w"), Some(second));
 }
+
+#[test]
+fn mail_or_an_open_task_landing_as_a_wait_starts_wakes_the_waiter() {
+    let f = fixture();
+    let worker = add_worker(&f.bus, "w1");
+    let other = Bus::open(Some(&f.home.join("bus.db"))).unwrap();
+    let operator = other.identify(Some(OPERATOR_ID)).unwrap();
+    let stop = AtomicBool::new(false);
+
+    // Land each write between the waiter's empty inbox check and the event that marks
+    // the start of its wait, the window a concurrent sender can hit.
+    let started = Instant::now();
+    let mail = wait::wait_for_mail_with(&f.bus, &worker, Duration::from_secs(3), &stop, || {
+        other
+            .send(
+                &operator,
+                SendInput {
+                    to: "w1".into(),
+                    subject: Some("racing mail".into()),
+                    body: "x".into(),
+                    msg_type: Some("question".into()),
+                    thread: None,
+                    task_id: None,
+                    refs: None,
+                    requires_ack: false,
+                },
+            )
+            .unwrap();
+    })
+    .unwrap();
+    assert_eq!(mail.status, "mail");
+    assert!(started.elapsed() < Duration::from_secs(2), "woke after {:?}", started.elapsed());
+    f.bus.inbox(&worker, false, None).unwrap();
+
+    let started = Instant::now();
+    let task = wait::wait_for_mail_with(&f.bus, &worker, Duration::from_secs(3), &stop, || {
+        other
+            .create_task(
+                &operator,
+                CreateTaskInput {
+                    title: "racing task".into(),
+                    role: Some("implementation".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    })
+    .unwrap();
+    assert_eq!(task.status, "task");
+    assert!(started.elapsed() < Duration::from_secs(2), "woke after {:?}", started.elapsed());
+}
