@@ -24,6 +24,10 @@ use std::path::{Path, PathBuf};
 
 /// Newest tasks a snapshot carries (closed states included).
 const TASK_LIMIT: i64 = 1000;
+/// Characters of brief, acceptance and submission details a snapshot carries
+/// per task; `task` returns them in full. Keeps a large bus's snapshot well
+/// under the client's output limit.
+const PREVIEW_CHARS: usize = 1000;
 /// Newest messages a snapshot carries.
 const MESSAGE_LIMIT: i64 = 100;
 
@@ -434,7 +438,12 @@ fn action_snapshot(bus: &Bus) -> Result<Value> {
             .into_iter()
             .map(|(agent, _unread)| agent)
             .collect::<Vec<_>>();
-        let (tasks, truncated) = bus.recent_tasks(TASK_LIMIT)?;
+        let (mut tasks, truncated) = bus.recent_tasks(TASK_LIMIT)?;
+        if truncated {
+            if let Some(oldest) = tasks.last().map(|task| task.id) {
+                tasks.extend(bus.submitted_before(oldest)?);
+            }
+        }
         let can_operate = bus.identify(Some(OPERATOR_ID)).is_ok();
         let messages = bus.get_messages(None, Some(MESSAGE_LIMIT), None, None)?;
         Ok::<_, BusError>((agents, tasks, truncated, can_operate, messages))
@@ -448,10 +457,24 @@ fn action_snapshot(bus: &Bus) -> Result<Value> {
         "simulated": simulated,
         "canOperate": can_operate,
         "agents": agents.iter().map(|a| agent_record(&paths, a)).collect::<Vec<_>>(),
-        "tasks": tasks.iter().map(TaskRecord::from).collect::<Vec<_>>(),
+        "tasks": tasks.iter().map(task_preview).collect::<Result<Vec<_>>>()?,
         "messages": messages.iter().map(MessageRecord::from).collect::<Vec<_>>(),
         "truncated": truncated,
     }))
+}
+
+/// A snapshot task record with long prose cut to `PREVIEW_CHARS`.
+fn task_preview(task: &Task) -> Result<Value> {
+    let mut record = serde_json::to_value(TaskRecord::from(task))?;
+    for pointer in ["/brief", "/acceptance", "/result/details"] {
+        if let Some(Value::String(text)) = record.pointer_mut(pointer) {
+            if let Some((cut, _)) = text.char_indices().nth(PREVIEW_CHARS) {
+                text.truncate(cut);
+                text.push('…');
+            }
+        }
+    }
+    Ok(record)
 }
 
 /// `task {id}` — the flattened TaskDetail: TaskRecord fields + notes + messages.

@@ -635,6 +635,103 @@ fn snapshot_orders_newest_first_and_truncates_honestly() {
 }
 
 #[test]
+fn snapshot_keeps_submitted_tasks_older_than_recent_page() {
+    let db = temp_db("old-submission");
+    init_bus(&db);
+    let bus = Bus::open(Some(&db)).unwrap();
+    let operator = bus.identify(Some(OPERATOR_ID)).unwrap();
+    bus.add_agent(
+        &operator,
+        "review-worker",
+        Some("worker"),
+        Some("test-model"),
+        Some("test"),
+        None,
+        Some("worker"),
+    )
+    .unwrap();
+    let worker = bus.identify(Some("review-worker")).unwrap();
+    let submitted = bus
+        .create_task(
+            &operator,
+            acs::bus::CreateTaskInput {
+                title: "older submission".into(),
+                to: Some("review-worker".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    bus.claim_task(&worker, Some(submitted.id)).unwrap();
+    bus.submit_task(
+        &worker,
+        submitted.id,
+        SubmitInput {
+            summary: "ready for review".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for i in 0..1000 {
+        bus.create_task(
+            &operator,
+            acs::bus::CreateTaskInput {
+                title: format!("newer task {i}"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let (reply, code) = call(&db, "snapshot", json!({}));
+    let data = ok(&reply, code);
+    assert_eq!(data["truncated"], true);
+    let tasks = data["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 1001);
+    assert_eq!(tasks[0]["id"], 1001);
+    assert_eq!(tasks[999]["id"], 2);
+    assert_eq!(tasks[1000]["id"], submitted.id);
+    assert_eq!(tasks[1000]["state"], "submitted");
+}
+
+#[test]
+fn snapshot_previews_multibyte_brief_but_task_action_returns_full_text() {
+    let db = temp_db("brief-preview");
+    init_bus(&db);
+    let bus = Bus::open(Some(&db)).unwrap();
+    let operator = bus.identify(Some(OPERATOR_ID)).unwrap();
+    let brief = "界".repeat(1001);
+    let task = bus
+        .create_task(
+            &operator,
+            acs::bus::CreateTaskInput {
+                title: "long brief".into(),
+                brief: Some(brief.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let (reply, code) = call(&db, "snapshot", json!({}));
+    let data = ok(&reply, code);
+    assert_eq!(data["truncated"], false);
+    let snapshot_task = data["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["id"] == task.id)
+        .unwrap();
+    let expected_preview = format!("{}…", "界".repeat(1000));
+    assert_eq!(
+        snapshot_task["brief"].as_str(),
+        Some(expected_preview.as_str())
+    );
+
+    let (reply, code) = call(&db, "task", json!({"id": task.id}));
+    let detail = ok(&reply, code);
+    assert_eq!(detail["brief"].as_str(), Some(brief.as_str()));
+}
+
+#[test]
 fn snapshot_returns_the_latest_100_messages() {
     let db = temp_db("latest");
     init_bus(&db);

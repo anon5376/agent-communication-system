@@ -165,15 +165,17 @@ public struct TaskResult: Decodable, Sendable {
     public let summary: String
     public let details: String
     public let changedFiles: [String]
+    public let artifacts: [ContextReference]
     public let validation: [ValidationObservation]
 
     public init(
         summary: String, details: String, changedFiles: [String],
-        validation: [ValidationObservation]
+        artifacts: [ContextReference] = [], validation: [ValidationObservation]
     ) {
         self.summary = summary
         self.details = details
         self.changedFiles = changedFiles
+        self.artifacts = artifacts
         self.validation = validation
     }
 
@@ -182,11 +184,27 @@ public struct TaskResult: Decodable, Sendable {
         summary = try container.decodeIfPresent(String.self, forKey: .summary) ?? ""
         details = try container.decodeIfPresent(String.self, forKey: .details) ?? ""
         changedFiles = try container.decodeIfPresent([String].self, forKey: .changedFiles) ?? []
+        artifacts = try container.decodeIfPresent([ContextReference].self, forKey: .artifacts) ?? []
         validation = try container.decodeIfPresent([ValidationObservation].self, forKey: .validation) ?? []
     }
 
     private enum CodingKeys: String, CodingKey {
-        case summary, details, changedFiles, validation
+        case summary, details, changedFiles, artifacts, validation
+    }
+}
+
+/// A file, link, or other reference a worker attached to its submission.
+public struct ContextReference: Decodable, Sendable, Hashable {
+    public let type: String
+    public let value: String
+    public let description: String?
+    public let digest: String?
+
+    public init(type: String, value: String, description: String? = nil, digest: String? = nil) {
+        self.type = type
+        self.value = value
+        self.description = description
+        self.digest = digest
     }
 }
 
