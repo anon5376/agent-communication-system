@@ -66,6 +66,7 @@ for helper in "${HELPERS[@]}"; do
 done
 cargo build --release --locked \
     --manifest-path "${REPO_ROOT}/rust/Cargo.toml" \
+    --target-dir "${REPO_ROOT}/rust/target" \
     "${BIN_ARGS[@]}"
 
 RUST_BIN_DIR="${REPO_ROOT}/rust/target/release"
@@ -86,7 +87,7 @@ SWIFT_BIN="${SWIFT_BIN_DIR}/${APP_NAME}"
 # --- 3. Assemble ACS.app -----------------------------------------------------
 
 log "Assembling ${APP_DIR}"
-rm -rf "${APP_DIR}"
+rm -rf "${STAGE_DIR}"
 mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Helpers" "${APP_DIR}/Contents/Resources"
 
 cp "${SWIFT_BIN}" "${APP_DIR}/Contents/MacOS/${APP_NAME}"
@@ -145,7 +146,7 @@ hdiutil create \
     -ov -format UDZO \
     "${DMG_PATH}"
 
-shasum -a 256 "${DMG_PATH}" > "${SHA_PATH}"
+(cd "${DIST_DIR}" && shasum -a 256 "${APP_NAME}-${ARCH}.dmg") > "${SHA_PATH}"
 
 # --- 6. Verify the image: attach, list, detach --------------------------------
 

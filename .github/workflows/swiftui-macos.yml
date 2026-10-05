@@ -17,6 +17,7 @@ on:
   pull_request:
     branches:
       - swiftui
+      - rust-port
     paths:
       - "macos/**"
       - "rust/**"

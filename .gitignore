@@ -19,5 +19,6 @@ rust/target/
 # Native macOS app outputs
 macos/.build/
 macos/output/
+macos/dist/
 macos/build/
 macos/.swiftpm/
