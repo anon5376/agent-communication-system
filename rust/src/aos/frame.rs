@@ -335,7 +335,11 @@ impl Frame {
                 .is_some_and(|d| d.iter().any(|&d| is_open(d)));
             let recent_goal =
                 t.parent_id.is_none() && t.creator == OPERATOR_ID && now - t.updated_ms < DAY_MS;
-            if !(goal_open || waited_on || recent_goal) {
+            // Already re-created: a newer task with the same title under the same goal.
+            let redone = tasks
+                .iter()
+                .any(|n| n.id > t.id && n.parent_id == t.parent_id && n.title == t.title);
+            if redone || !(goal_open || waited_on || recent_goal) {
                 continue;
             }
             let mut g = Gate::new(GateKind::Failed, t, &dependents);

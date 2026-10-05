@@ -284,3 +284,46 @@ fn the_demo_is_marked_simulated_and_starts_nothing() {
     assert!(text(&app).contains("simulated sample"), "{}", text(&app));
     assert!(app.ui.pending.is_none(), "no trust prompt on a sample bus");
 }
+
+#[test]
+fn a_redone_failure_stops_needing_you() {
+    let db = temp_db("redone");
+    troubled_bus(&db);
+    let bus = Bus::open(Some(&db)).unwrap();
+    let op = bus.identify(Some(OPERATOR_ID)).unwrap();
+    bus.create_task(
+        &op,
+        CreateTaskInput {
+            parent_id: Some(1),
+            ..task("flaky step", "quitter")
+        },
+    )
+    .unwrap();
+    let f = Frame::load(&bus, STALL_MS).unwrap();
+    assert_eq!(f.count(GateKind::Failed), 0);
+}
+
+#[test]
+fn the_demo_never_marks_a_bus_that_was_already_in_use() {
+    let db = temp_db("real");
+    troubled_bus(&db);
+    assert!(!demo::seed(&db).unwrap());
+    let home = db.parent().unwrap();
+    assert!(!demo::is_simulated(home));
+    // A bus with tasks but no agents besides you is in use too.
+    let bare = temp_db("bare");
+    let bus = Bus::open(Some(&bare)).unwrap();
+    bus.init().unwrap();
+    let op = bus.identify(Some(OPERATOR_ID)).unwrap();
+    bus.create_task(
+        &op,
+        CreateTaskInput {
+            title: "mine".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    drop(bus);
+    assert!(!demo::seed(&bare).unwrap());
+    assert!(!demo::is_simulated(bare.parent().unwrap()));
+}

@@ -2044,7 +2044,7 @@ fn shell_line(db_path: &Path, words: &[String], yes: bool, stall_ms: i64) -> i32
     i32::from(failed)
 }
 
-const USD_NOTE: &str = "turns and minutes are always counted; dollars only from CLIs that report a cost (Claude Code), so a $ limit does not stop Codex or Cursor agents";
+const USD_NOTE: &str = "turns and minutes are always counted; dollars only when a CLI reports a cost (Claude Code does, Codex never does, others only sometimes), so a $ limit does not stop an agent whose CLI reports none";
 
 /// "20 turns 60 min $2" (also "1 h", "2 usd") into budget limits.
 fn parse_limits(words: &[&str]) -> std::result::Result<crate::control::Limits, String> {

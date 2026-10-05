@@ -740,12 +740,13 @@ pub fn reviewer_for(config: &BusConfig, worker: &str) -> String {
         .unwrap_or_else(|| OPERATOR_ID.to_string())
 }
 
-/// The agent a goal goes to: the lead when the crew has one, else the first
-/// worker that is not a reviewer.
+/// The agent a goal goes to: the lead when the crew has one, else the
+/// builder, else the first worker that is not a reviewer.
 pub fn goal_owner(config: &BusConfig) -> Option<String> {
     let ids = member_ids(config);
     ids.iter()
         .find(|id| config.agents[*id].authority == "manager")
+        .or_else(|| ids.iter().find(|id| *id == "builder"))
         .or_else(|| ids.iter().find(|id| config.agents[*id].role != "reviewer"))
         .or_else(|| ids.first())
         .cloned()
@@ -2120,6 +2121,14 @@ mod tests {
         let config = load_config(&path).unwrap();
         assert_eq!(goal_owner(&config).as_deref(), Some("builder"));
         assert_eq!(reviewer_for(&config, "builder"), "reviewer");
+        // A connected CLI that sorts before "builder" does not take the goals.
+        let mut v = crew_json(&plan(&f), &f);
+        let mut aider = v["agents"]["builder"].clone();
+        aider["id"] = json!("aider");
+        v["agents"]["aider"] = aider;
+        fs::write(&path, v.to_string()).unwrap();
+        let joined = load_config(&path).unwrap();
+        assert_eq!(goal_owner(&joined).as_deref(), Some("builder"));
         let one = found(&["claude"]);
         fs::write(&path, crew_json(&plan(&one), &one).to_string()).unwrap();
         let config = load_config(&path).unwrap();
