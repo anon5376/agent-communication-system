@@ -651,7 +651,7 @@ fn action_start(bus: &Bus, payload: &Value) -> Result<Value> {
     let mut lines = started.clone();
     if !budgeted.is_empty() {
         lines.push(format!(
-            "{} default limits {} each — turns and minutes always count; the dollar cap only holds on CLIs that report usage / the agent pauses and writes to you at a limit",
+            "{} configured defaults: {} each. Limits are checked between turns; cost accounting depends on the provider. This is not a guaranteed dollar cap.",
             budgeted.join(", "),
             crew::DEFAULT_BUDGET.describe()
         ));
