@@ -508,9 +508,9 @@ fn fake_qagent(dir: &Path) -> PathBuf {
          }\r\n\
          $busHome = Split-Path $db -Parent\r\n\
          New-Item -ItemType Directory -Force \"$busHome\\supervisors\" | Out-Null\r\n\
-         $pidFile = \"$busHome\\supervisors\\$id.pid\"\r\n\
+         $pidFile = \"$busHome\\supervisors\\${id}.pid\"\r\n\
          Set-Content $pidFile \"$PID`n\"\r\n\
-         $stopFile = \"$busHome\\supervisors\\$id.stop\"\r\n\
+         $stopFile = \"$busHome\\supervisors\\${id}.stop\"\r\n\
          $deadline = (Get-Date).AddSeconds(120)\r\n\
          while ((Get-Date) -lt $deadline) {\r\n\
          \x20 if (Test-Path $stopFile) {\r\n\
