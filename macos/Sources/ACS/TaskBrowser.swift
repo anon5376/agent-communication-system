@@ -90,7 +90,7 @@ struct TaskInspector: View {
                 }
                 HStack(alignment: .top, spacing: 34) {
                     Fact(label: "Worker", value: task.assignee ?? "Not assigned")
-                    Fact(label: "Reviewer", value: task.reviewer == "operator" ? "You (operator)" : task.reviewer ?? "Independent reviewer")
+                    Fact(label: "Reviewer", value: task.reviewer == "operator" ? "You (operator)" : task.reviewer ?? "Task creator / operator")
                 }
                 if task.state == "submitted" {
                     HStack {

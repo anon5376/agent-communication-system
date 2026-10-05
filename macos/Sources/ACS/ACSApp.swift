@@ -50,8 +50,8 @@ enum Destination: String, CaseIterable, Identifiable {
 extension TaskRecord {
     var stateTitle: String {
         switch state {
-        case "open": return "Ready"
-        case "claimed": return "Working"
+        case "open": return "Queued"
+        case "claimed": return "Claimed"
         case "submitted": return "Needs review"
         case "changes_requested": return "Changes requested"
         case "blocked": return "Blocked"
@@ -85,7 +85,7 @@ extension TaskRecord {
         switch state {
         case "open": return "Waiting for \(assignee ?? "an eligible worker") to claim this task."
         case "claimed": return "Claimed by \(assignee ?? "a worker"). Check recent messages for progress."
-        case "submitted": return "Work submitted. Waiting for \(reviewer ?? "an independent reviewer") to review it."
+        case "submitted": return "Work submitted. Waiting for \(reviewer ?? "the task creator or operator") to review it."
         case "changes_requested": return "The reviewer requested changes. The task is not accepted yet."
         case "blocked": return dependencies.isEmpty ? "This task is blocked. Check its notes and messages." : "Waiting on dependencies: \(dependencies.map { "#\($0)" }.joined(separator: ", "))."
         case "failed": return "This task failed. Read its submission and messages before deciding what to do next."

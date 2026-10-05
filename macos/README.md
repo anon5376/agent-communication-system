@@ -88,11 +88,10 @@ carries the arch and no universal build is claimed.
 
 ## Signing and Gatekeeper
 
-Default output is **ad-hoc signed and not notarized**. On first launch macOS
-will warn that the app is from an unidentified developer; open it via
-right-click → Open, or approve it in System Settings → Privacy & Security. For
-distribution outside trusted machines, configure a Developer ID identity via
-`ACS_CODESIGN_IDENTITY` and notarize separately.
+Default output is **ad-hoc signed and not notarized**. It has no Apple-verified
+developer identity; Gatekeeper may block downloaded copies. For normal public
+distribution, configure a Developer ID identity via `ACS_CODESIGN_IDENTITY`
+and notarize separately. The build script does not disable security controls.
 
 ## CI
 

@@ -119,6 +119,8 @@ struct StartAgentSheet: View {
                 }
             }
             Toggle("I trust this project and approve this agent running in it.", isOn: $approved)
+            Text("The agent keeps running if you close ACS. Use Stop in Agents to stop its supervisor.")
+                .font(.caption).foregroundStyle(.secondary)
             if let failure { Text(failure).foregroundStyle(.red).textSelection(.enabled) }
             HStack {
                 Spacer()
