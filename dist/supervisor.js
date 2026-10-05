@@ -554,9 +554,9 @@ export async function supervise(options) {
                             log(`task #${focus.id}: could not release after the worktree failure: ${releaseError.message}`);
                         }
                         markOffered(bus.getTask(focus.id));
-                        // Mail about the refused task is answered by its note; other mail waits for a later turn.
+                        // Mail about the refused task is answered by its note; all other mail waits for a later turn.
                         const refused = focus.id;
-                        deferred = messages.filter((message) => message.taskId && message.taskId !== refused);
+                        deferred = messages.filter((message) => message.taskId !== refused);
                         continue;
                     }
                     tasks.push(focus);
