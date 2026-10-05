@@ -118,3 +118,27 @@ describe("taskExplanation", () => {
     expect(taskExplanation(t)).toContain("rev-1");
   });
 });
+
+import { groupTasks, parseSubjectTag, relativeTime, taskGroup } from "./model";
+
+describe("task grouping and message tags", () => {
+  it("groups states into the list sections", () => {
+    expect(taskGroup("submitted")).toBe("review");
+    expect(taskGroup("failed")).toBe("stuck");
+    expect(taskGroup("changes_requested")).toBe("active");
+    expect(taskGroup("open")).toBe("queued");
+    expect(taskGroup("accepted")).toBe("done");
+    const groups = groupTasks([{ state: "open" }, { state: "submitted" }] as never);
+    expect(groups.map((g) => g.group.id)).toEqual(["review", "queued"]);
+  });
+  it("parses bus subject tags", () => {
+    expect(parseSubjectTag("[DONE #7 r1] hard usd cap")).toMatchObject({ label: "Submitted", taskId: "7", round: 1, rest: "hard usd cap" });
+    expect(parseSubjectTag("[ACCEPTED #12] x")).toMatchObject({ label: "Accepted", taskId: "12", round: null });
+    expect(parseSubjectTag("plain subject")).toBeNull();
+  });
+  it("formats relative time", () => {
+    expect(relativeTime(1_000_000, 1_000_000 + 30_000)).toBe("just now");
+    expect(relativeTime(0, 5 * 60_000)).toBe("5 min ago");
+    expect(relativeTime(0, 3 * 3_600_000)).toBe("3 h ago");
+  });
+});

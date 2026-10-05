@@ -4,7 +4,7 @@
 import { useState } from "preact/hooks";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Icon } from "../icons";
-import type { AgentRecord } from "../model";
+import { relativeTime, type AgentRecord } from "../model";
 import { store } from "../store";
 
 export function AgentsView() {
@@ -51,21 +51,23 @@ export function AgentsView() {
           <div>
             {agents.map((agent) => (
               <div class="agent-row" key={agent.id}>
-                <span class="a-icon">
-                  <Icon name="person" size={30} hidden />
+                <span class="a-badge" aria-hidden="true">
+                  {agent.harness.charAt(0).toUpperCase()}
                 </span>
                 <div style={{ minWidth: 0 }}>
                   <div class="a-id">{agent.id}</div>
                   <div class="a-meta">
                     {agent.role} · {agent.harness} · {agent.model}
                   </div>
-                  <div class="a-status">
-                    {agent.paused
-                      ? "Paused — no new turns"
-                      : agent.running
-                        ? `Supervisor running · bus status: ${agent.status}`
-                        : `Supervisor not running · bus status: ${agent.status}`}
-                  </div>
+                </div>
+                <div class={`a-state ${agent.paused ? "paused" : agent.running ? "running" : "stopped"}`}>
+                  <span class="a-dot" aria-hidden="true" />
+                  <span>
+                    <span class="a-word">{agent.paused ? "Paused" : agent.running ? "Running" : "Not running"}</span>
+                    <span class="a-seen">
+                      {agent.lastSeenMs != null ? `Seen ${relativeTime(agent.lastSeenMs)}` : "Not seen on the bus yet"}
+                    </span>
+                  </span>
                 </div>
                 <div class="a-actions">
                   {agent.running ? (
@@ -82,17 +84,20 @@ export function AgentsView() {
                       </button>
                     </>
                   ) : (
-                    <button class="btn" disabled={!canWrite || simulated} onClick={() => setStarting(agent)}>
-                      Start…
-                    </button>
+                    <span class="a-start">
+                      <button class="btn" disabled={!canWrite || simulated} onClick={() => setStarting(agent)}>
+                        Start…
+                      </button>
+                      {simulated && <span class="fine">Sample agents can’t start</span>}
+                    </span>
                   )}
                 </div>
               </div>
             ))}
             <p class="fine" style={{ marginTop: 16 }}>
-              “Supervisor running” means ACS is managing that process, not that the provider is
-              authenticated or actively making progress. Bus presence can also come from a CLI
-              started elsewhere.
+              “Running” means ACS is managing that agent’s process. It doesn’t prove the provider is
+              signed in or making progress. “Seen” is the agent’s last activity on the bus, which can
+              also come from a CLI started elsewhere.
             </p>
           </div>
         )}

@@ -428,3 +428,101 @@ export function filterTasks(
       return Number(b.updatedMs) - Number(a.updatedMs);
     });
 }
+
+// ---------------------------------------------------------------------------
+// Grouping, progress and message tags for the task list and inspector.
+// ---------------------------------------------------------------------------
+
+export type TaskGroup = "review" | "stuck" | "active" | "queued" | "done";
+
+export const TASK_GROUPS: { id: TaskGroup; title: string; hint: string }[] = [
+  { id: "review", title: "Needs review", hint: "Submitted work waiting for a decision" },
+  { id: "stuck", title: "Stuck", hint: "Blocked or failed" },
+  { id: "active", title: "In progress", hint: "An agent is working on it" },
+  { id: "queued", title: "Queued", hint: "Waiting for a worker" },
+  { id: "done", title: "Finished", hint: "Accepted or cancelled" },
+];
+
+export function taskGroup(state: string): TaskGroup {
+  switch (state) {
+    case "submitted": return "review";
+    case "blocked":
+    case "failed":
+      return "stuck";
+    case "claimed":
+    case "changes_requested":
+      return "active";
+    case "accepted":
+    case "cancelled":
+      return "done";
+    default: return "queued";
+  }
+}
+
+export function groupTasks(tasks: TaskRecord[]): { group: (typeof TASK_GROUPS)[number]; tasks: TaskRecord[] }[] {
+  return TASK_GROUPS.map((group) => ({ group, tasks: tasks.filter((t) => taskGroup(t.state) === group.id) })).filter(
+    (g) => g.tasks.length > 0,
+  );
+}
+
+/** The state label a row needs only when its group header doesn't already say it. */
+export function rowStateLabel(state: string): string | null {
+  switch (state) {
+    case "changes_requested":
+    case "failed":
+    case "cancelled":
+      return stateTitle(state);
+    default:
+      return null;
+  }
+}
+
+export const TASK_STAGES = ["Created", "Claimed", "Submitted", "Reviewed"] as const;
+
+/** Index of the last reached stage, and whether the task ended off the happy path. */
+export function taskStage(task: TaskRecord): { reached: number; outcome: "ok" | "warn" | "bad" | null } {
+  switch (task.state) {
+    case "open": return { reached: 0, outcome: null };
+    case "blocked": return { reached: task.assignee ? 1 : 0, outcome: "warn" };
+    case "claimed": return { reached: 1, outcome: null };
+    case "changes_requested": return { reached: 1, outcome: "warn" };
+    case "submitted": return { reached: 2, outcome: null };
+    case "accepted": return { reached: 3, outcome: "ok" };
+    case "failed": return { reached: task.result ? 2 : 1, outcome: "bad" };
+    case "cancelled": return { reached: task.result ? 2 : task.assignee ? 1 : 0, outcome: "bad" };
+    default: return { reached: 0, outcome: null };
+  }
+}
+
+export function relativeTime(ms: Id | number, now: number = Date.now()): string {
+  const diff = Math.max(0, now - Number(ms));
+  const min = Math.floor(diff / 60_000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min} min ago`;
+  const hours = Math.floor(min / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return days === 1 ? "yesterday" : `${days} days ago`;
+  return msToDate(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+const TAG_LABELS: Record<string, { label: string; tone: StateTone }> = {
+  DONE: { label: "Submitted", tone: "warn" },
+  CHANGES: { label: "Changes requested", tone: "warn" },
+  ACCEPTED: { label: "Accepted", tone: "ok" },
+  FAILED: { label: "Failed", tone: "bad" },
+  BLOCKED: { label: "Blocked", tone: "warn" },
+  TASK: { label: "New task", tone: "accent" },
+};
+
+/** "[DONE #7 r1] title" -> { label: "Submitted", taskId: "7", round: 1, rest: "title" }. */
+export function parseSubjectTag(
+  subject: string,
+): { label: string; tone: StateTone; taskId: string; round: number | null; rest: string } | null {
+  const m = /^\[([A-Z]+) #(\d+)(?: r(\d+))?\]\s*(.*)$/s.exec(subject);
+  if (!m) return null;
+  const [, kind = "", taskId = "", round, rest = ""] = m;
+  const known = TAG_LABELS[kind];
+  const label = known?.label ?? kind.charAt(0) + kind.slice(1).toLowerCase();
+  return { label, tone: known?.tone ?? "muted", taskId, round: round ? Number(round) : null, rest };
+}

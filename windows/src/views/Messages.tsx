@@ -3,7 +3,7 @@
 
 import { useState } from "preact/hooks";
 import { EmptyState } from "../App";
-import { timestamp, type MessageRecord } from "../model";
+import { parseSubjectTag, relativeTime, timestamp, type MessageRecord } from "../model";
 import { store } from "../store";
 
 export function MessagesView() {
@@ -50,16 +50,49 @@ export function MessagesView() {
 
 export function MessageRow(props: { message: MessageRecord }) {
   const m = props.message;
+  const [expanded, setExpanded] = useState(false);
+  const tag = parseSubjectTag(m.subject);
+  const task = tag ? store.tasks.value.find((t) => String(t.id) === tag.taskId) : undefined;
+  const long = m.body.length > 360 || m.body.split("\n").length > 5;
   return (
     <div class="msg-row">
       <div class="m-head">
-        <span>
-          {m.sender} → {m.recipient ?? "Everyone"}
+        <span class="m-who">
+          <span class="m-from">{m.sender}</span>
+          <span class="m-arrow" aria-hidden="true">→</span>
+          <span>{m.recipient ?? "Everyone"}</span>
         </span>
-        <span class="m-time">{timestamp(m.tsMs)}</span>
+        <span class="m-time" title={timestamp(m.tsMs)}>{relativeTime(m.tsMs)}</span>
       </div>
-      <div class="m-subject">{m.subject}</div>
-      <div class="m-body">{m.body}</div>
+      <div class="m-subject">
+        {tag && (
+          <span class={`m-tag tone-${tag.tone}`}>
+            {tag.label}
+            {tag.round != null && tag.round > 1 ? `, round ${tag.round}` : ""}
+          </span>
+        )}
+        <span>{tag ? tag.rest : m.subject}</span>
+        {tag &&
+          (task ? (
+            <button
+              class="link-btn m-task"
+              onClick={() => {
+                store.destination.value = "tasks";
+                store.selectTask(task.id);
+              }}
+            >
+              Open task #{tag.taskId}
+            </button>
+          ) : (
+            <span class="t-id">#{tag.taskId}</span>
+          ))}
+      </div>
+      <div class={`m-body${long && !expanded ? " clamped" : ""}`}>{m.body}</div>
+      {long && (
+        <button class="link-btn m-more" onClick={() => setExpanded((v) => !v)} aria-expanded={expanded}>
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
     </div>
   );
 }

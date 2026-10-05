@@ -5,8 +5,13 @@ import { useMemo, useState } from "preact/hooks";
 import { EmptyState } from "../App";
 import { Icon } from "../icons";
 import {
+  TASK_STAGES,
   filterTasks,
+  groupTasks,
   idEq,
+  relativeTime,
+  rowStateLabel,
+  taskStage,
   isClosed,
   stateIcon,
   stateTitle,
@@ -37,6 +42,15 @@ export function TaskBrowser(props: { reviewOnly: boolean }) {
           <div class="pane-title">
             <span>{props.reviewOnly ? "Needs review" : "Tasks"}</span>
             <span class="count">{filtered.length}</span>
+            <button
+              class="btn primary small new-task"
+              disabled={!store.canWrite.value}
+              onClick={() => (store.showNewTask.value = true)}
+              title="New task (Ctrl+N)"
+            >
+              <Icon name="plus" size={14} hidden />
+              New task
+            </button>
           </div>
           <input
             class="search-box"
@@ -69,13 +83,23 @@ export function TaskBrowser(props: { reviewOnly: boolean }) {
           />
         ) : (
           <div class="task-list" role="listbox" aria-label={props.reviewOnly ? "Needs review" : "Tasks"}>
-            {filtered.map((task) => (
-              <TaskRow
-                key={String(task.id)}
-                task={task}
-                selected={store.selectedTask.value != null && idEq(store.selectedTask.value, task.id)}
-                onSelect={() => store.selectTask(task.id)}
-              />
+            {groupTasks(filtered).map(({ group, tasks: inGroup }) => (
+              <div class="task-group" key={group.id} role="group" aria-label={group.title}>
+                {!props.reviewOnly && (
+                  <div class={`group-head g-${group.id}`} title={group.hint}>
+                    <span>{group.title}</span>
+                    <span class="g-count">{inGroup.length}</span>
+                  </div>
+                )}
+                {inGroup.map((task) => (
+                  <TaskRow
+                    key={String(task.id)}
+                    task={task}
+                    selected={store.selectedTask.value != null && idEq(store.selectedTask.value, task.id)}
+                    onSelect={() => store.selectTask(task.id)}
+                  />
+                ))}
+              </div>
             ))}
           </div>
         )}
@@ -90,6 +114,7 @@ export function TaskBrowser(props: { reviewOnly: boolean }) {
 
 function TaskRow(props: { task: TaskRecord; selected: boolean; onSelect: () => void }) {
   const task = props.task;
+  const label = rowStateLabel(task.state);
   return (
     <button
       class={`task-row ${props.selected ? "selected" : ""}`}
@@ -97,16 +122,15 @@ function TaskRow(props: { task: TaskRecord; selected: boolean; onSelect: () => v
       aria-selected={props.selected}
       onClick={props.onSelect}
     >
-      <span class={`state-ico tone-${stateTone(task.state)}`}>
-        <Icon name={stateIcon(task.state)} size={16} hidden />
-      </span>
-      <span style={{ minWidth: 0, flex: 1 }}>
+      <span class={`state-dot tone-${stateTone(task.state)}`} aria-hidden="true" />
+      <span class="t-main">
         <span class="t-title">{task.title}</span>
         <span class="t-line">
-          <span class="t-meta">{stateTitle(task.state)}</span>
-          <span class="t-meta">#{String(task.id)}</span>
+          {label && <span class={`t-state tone-${stateTone(task.state)}`}>{label}</span>}
+          <span class="t-meta">{task.assignee ?? "Unassigned"}</span>
+          <span class="t-meta t-age">{relativeTime(task.updatedMs)}</span>
+          <span class="t-id">#{String(task.id)}</span>
         </span>
-        <span class="t-sub" style={{ display: "block" }}>{task.assignee ?? "Unassigned"}</span>
       </span>
     </button>
   );
@@ -157,40 +181,28 @@ function TaskInspector(props: { detail: TaskDetail }) {
     <div class="inspector">
       <div class="inspector-inner">
         <div>
-          <div class="kicker">
-            <span>TASK #{String(task.id)}</span>
-            {task.priority !== "normal" && (
-              <span style={{ marginLeft: "auto", textTransform: "capitalize", fontWeight: 400 }}>
-                {task.priority} priority
-              </span>
-            )}
-          </div>
           <h2 class="task-title">{task.title}</h2>
-          <div class={`state-line tone-${stateTone(task.state)}`}>
-            <Icon name={stateIcon(task.state)} size={17} hidden />
-            <span>{stateTitle(task.state)}</span>
+          <div class="title-meta">
+            <span class={`state-pill tone-${stateTone(task.state)}`}>
+              <Icon name={stateIcon(task.state)} size={14} hidden />
+              {stateTitle(task.state)}
+            </span>
+            <span class="t-id">Task #{String(task.id)}</span>
+            {task.priority !== "normal" && <span class="prio">{task.priority} priority</span>}
           </div>
           <p class="explain">{taskExplanation(task)}</p>
         </div>
+
+        <StageStrip task={task} />
 
         <div class="facts">
           <Fact label="Worker" value={task.assignee ?? "Not assigned"} />
           <Fact
             label="Reviewer"
-            value={task.reviewer === "operator" ? "You (operator)" : task.reviewer ?? "Task creator / operator"}
+            value={task.reviewer === "operator" ? "You" : task.reviewer ?? "Task creator or you"}
           />
+          <Fact label="Last update" value={relativeTime(task.updatedMs)} />
         </div>
-
-        {task.state === "submitted" && (
-          <div style={{ display: "flex", gap: 10 }}>
-            <button class="btn primary" disabled={!canWrite} onClick={() => setDecision("accept")}>
-              Accept Work
-            </button>
-            <button class="btn" disabled={!canWrite} onClick={() => setDecision("changes")}>
-              Request Changes…
-            </button>
-          </div>
-        )}
 
         <hr class="divider" />
         <ProseSection title="Task brief" text={task.brief || "No brief provided."} />
@@ -341,8 +353,46 @@ function TaskInspector(props: { detail: TaskDetail }) {
           )}
         </div>
       </div>
+      {task.state === "submitted" && (
+        <div class="review-bar" role="region" aria-label="Review decision">
+          <span class="rb-text">
+            {task.reviewer === "operator" || task.reviewer == null
+              ? "Does this meet the acceptance criteria?"
+              : `Assigned reviewer: ${task.reviewer}. You can still decide as operator.`}
+          </span>
+          <button class="btn" disabled={!canWrite} onClick={() => setDecision("changes")}>
+            Request changes…
+          </button>
+          <button class="btn primary" disabled={!canWrite} onClick={() => setDecision("accept")}>
+            Accept work
+          </button>
+        </div>
+      )}
       {decision && <DecisionSheet task={task} decision={decision} onClose={() => setDecision(null)} />}
     </div>
+  );
+}
+
+function StageStrip(props: { task: TaskRecord }) {
+  const { reached, outcome } = taskStage(props.task);
+  return (
+    <ol class="stages" aria-label="Progress">
+      {TASK_STAGES.map((name, i) => {
+        const current = i === reached;
+        const tone = current && outcome ? ` tone-${outcome}` : "";
+        const label = current && outcome && props.task.state !== "accepted" ? stateTitle(props.task.state) : name;
+        return (
+          <li
+            key={name}
+            class={`stage${i <= reached ? " done" : ""}${current ? " current" : ""}${tone}`}
+            aria-current={current ? "step" : undefined}
+          >
+            <span class="s-dot" aria-hidden="true" />
+            <span class="s-name">{label}</span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 

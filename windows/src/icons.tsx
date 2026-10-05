@@ -137,13 +137,13 @@ const PATHS: Record<string, JSX.Element> = {
       <path d="M19 4v4h-4" />
     </g>
   ),
-  plus: <path d="M12 5v14M5 12h14" />,
   "sidebar-right": (
     <g>
       <rect x="3.5" y="5" width="17" height="14" rx="2" />
       <path d="M15.5 5v14" />
     </g>
   ),
+  plus: <path d="M12 5v14M5 12h14" />,
   lock: (
     <g>
       <rect x="6" y="10.5" width="12" height="9" rx="1.5" />
