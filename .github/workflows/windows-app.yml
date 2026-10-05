@@ -49,10 +49,6 @@ jobs:
           npm run test
           npm run build
 
-      - name: Backend tests
-        working-directory: windows/src-tauri
-        run: cargo test
-
       - name: Build installer
         shell: powershell
         # Real helper only: the script fails closed if rust/ stops compiling
@@ -60,6 +56,10 @@ jobs:
         # never produced by CI.
         run: |
           windows\scripts\build-installer.ps1 -SkipNpm
+
+      - name: Backend tests
+        working-directory: windows/src-tauri
+        run: cargo test
 
       - name: Upload installer
         uses: actions/upload-artifact@v4

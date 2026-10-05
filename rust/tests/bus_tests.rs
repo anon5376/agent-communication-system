@@ -11,14 +11,17 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+static NEXT_HOME_ID: AtomicI64 = AtomicI64::new(0);
+
 fn fresh_home() -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "acs-rust-test-{}-{}",
+        "acs-rust-test-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        NEXT_HOME_ID.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(&dir).unwrap();
     dir
