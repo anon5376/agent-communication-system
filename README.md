@@ -30,12 +30,12 @@ powershell -ExecutionPolicy Bypass -File windows\scripts\build-installer.ps1
 
 This produces `ACS-<version>-x64-setup.exe` (NSIS, per-user install, Start
 menu shortcut) plus a `.sha256` under
-`windows/src-tauri/target/release/bundle/nsis/`. When `rust/` compiles on
-Windows the script builds `acs-desktop.exe`, `qagent.exe`, and `aos.exe` from
-source and bundles them; until the Windows core port lands it stages
-`fake-acs-desktop` — a protocol-identical double that keeps a JSON bus instead
-of SQLite — and the installer still works end to end (agent starts then
-report "no bundled qagent", matching the real helper's own error path).
+`windows/src-tauri/target/release/bundle/nsis/`. The script fails closed: it
+only ships `acs-desktop.exe`, `qagent.exe`, and `aos.exe` built from `rust/`
+source. An explicit `-FakeHelper` flag produces a preview build instead —
+installer renamed `ACS_<ver>_x64-PREVIEW-fake-backend-setup.exe` and a
+persistent "Preview build" banner in the app — useful until the Windows core
+port lands, but never silent.
 
 The installer is **unsigned**: SmartScreen will warn on downloaded copies.
 Details, layout, and protocol notes are in

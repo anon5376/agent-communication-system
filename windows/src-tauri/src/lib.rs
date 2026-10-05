@@ -63,6 +63,21 @@ fn acs_sample_db_path() -> Result<String, AcsError> {
         .into_owned())
 }
 
+/// "real" or "fake": which helper build the installer bundled. The build
+/// script stamps resources/build-flavor.txt; a missing file means a dev run
+/// or a real build, both reported as "real". The frontend pins a
+/// non-dismissable preview banner on every screen when this says "fake".
+#[tauri::command]
+fn acs_build_flavor() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("build-flavor.txt")))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| text.trim().to_string())
+        .filter(|flavor| !flavor.is_empty())
+        .unwrap_or_else(|| "real".to_string())
+}
+
 /// Select the bus database in Explorer.
 #[tauri::command]
 fn acs_reveal(path: String) -> Result<(), AcsError> {
@@ -86,6 +101,7 @@ pub fn run() {
             acs_base_dir,
             acs_workspace_db_path,
             acs_sample_db_path,
+            acs_build_flavor,
             acs_reveal,
         ])
         .run(tauri::generate_context!())

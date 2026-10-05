@@ -225,6 +225,25 @@ function TaskInspector(props: { detail: TaskDetail }) {
                 </div>
               </details>
             )}
+            {task.result.artifacts.length > 0 && (
+              <details class="details">
+                <summary>Attached references ({task.result.artifacts.length})</summary>
+                <div class="details-body">
+                  {task.result.artifacts.map((item, i) => (
+                    <div key={i} style={{ textAlign: "left" }}>
+                      <span class="mono" style={{ fontSize: 12, userSelect: "text" }}>
+                        {item.type}: {item.value}
+                      </span>
+                      {item.description && (
+                        <span class="tone-muted" style={{ display: "block", fontSize: 12 }}>
+                          {item.description}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
             {task.result.validation.length > 0 && (
               <div>
                 <h4 class="section-title">Worker-reported checks</h4>

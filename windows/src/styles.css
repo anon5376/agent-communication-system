@@ -80,10 +80,39 @@ select {
   font-family: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
 }
 
-.app-shell {
+.app-outer {
   display: flex;
+  flex-direction: column;
   height: 100%;
   overflow: hidden;
+}
+
+.app-shell {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Preview-build stripe: shown on every screen when the bundled helper is
+   the fake double. Non-dismissable on purpose — it is the marker that keeps
+   a preview build from being mistaken for the real thing. */
+.preview-banner {
+  flex: 0 0 auto;
+  padding: 5px 12px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  color: #fff;
+  background: #b45309;
+  user-select: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  .preview-banner {
+    background: #92400e;
+  }
 }
 
 /* ------------------------------------------------------------- sidebar */

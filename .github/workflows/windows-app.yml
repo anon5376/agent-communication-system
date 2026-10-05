@@ -55,8 +55,11 @@ jobs:
 
       - name: Build installer
         shell: powershell
+        # -FakeHelper is explicit opt-in while rust/ does not compile on
+        # Windows; the produced installer is marked PREVIEW. Drop the flag
+        # once the windows-core port lands so this fails closed instead.
         run: |
-          windows\scripts\build-installer.ps1 -SkipNpm
+          windows\scripts\build-installer.ps1 -SkipNpm -FakeHelper
 
       - name: Upload installer
         uses: actions/upload-artifact@v4

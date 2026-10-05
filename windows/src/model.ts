@@ -68,10 +68,19 @@ export interface ValidationObservation {
   summary: string;
 }
 
+/// A file, link, or other reference a worker attached to its submission.
+export interface ContextReference {
+  type: string;
+  value: string;
+  description?: string;
+  digest?: string;
+}
+
 export interface TaskResult {
   summary: string;
   details: string;
   changedFiles: string[];
+  artifacts: ContextReference[];
   validation: ValidationObservation[];
 }
 
@@ -239,6 +248,17 @@ function parseResult(value: unknown): TaskResult | null {
     summary: asString(obj.summary),
     details: asString(obj.details),
     changedFiles: asStringList(obj.changedFiles),
+    artifacts: Array.isArray(obj.artifacts)
+      ? obj.artifacts.map((item) => {
+          const a = (item ?? {}) as Record<string, unknown>;
+          return {
+            type: asString(a.type),
+            value: asString(a.value),
+            description: asOptString(a.description) ?? undefined,
+            digest: asOptString(a.digest) ?? undefined,
+          };
+        })
+      : [],
     validation: Array.isArray(obj.validation)
       ? obj.validation.map((check) => {
           const c = (check ?? {}) as Record<string, unknown>;

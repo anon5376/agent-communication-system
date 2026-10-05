@@ -6,6 +6,7 @@ import { computed, signal } from "@preact/signals";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   acsRequest,
+  acsBuildFlavor,
   sampleDbPath,
   workspaceDbPath,
   revealDatabase,
@@ -58,6 +59,8 @@ export class WorkspaceStore {
   detailError = signal<string | null>(null);
   showNewTask = signal(false);
   lastRefresh = signal<Date | null>(null);
+  /// True when the bundled helper is the preview double, not the real bridge.
+  previewBuild = signal(false);
 
   private generation = 0;
   private restored = false;
@@ -84,6 +87,11 @@ export class WorkspaceStore {
   async restore(): Promise<void> {
     if (this.restored) return;
     this.restored = true;
+    try {
+      this.previewBuild.value = (await acsBuildFlavor()) === "fake";
+    } catch {
+      this.previewBuild.value = false;
+    }
     const dbPath = localStorage.getItem(DB_KEY);
     if (!dbPath) return;
     const folder = localStorage.getItem(PROJECT_KEY);

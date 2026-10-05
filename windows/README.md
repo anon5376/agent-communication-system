@@ -63,11 +63,17 @@ from stdout (stderr is diagnostics only). Per `protocol/desktop-v1.md` it:
 
 The real `acs-desktop.exe` is the Rust bridge in `rust/` — the same binary
 the macOS app shells out to. A separate effort is porting that crate to
-Windows; until it lands, `windows/scripts/build-installer.ps1` falls back to
-`src/bin/fake-acs-desktop.rs`, a protocol-v1 double that serves a JSON-file
-bus seeded with the same fixture `aos demo` writes. The app cannot tell the
-difference, and once the real Windows helper builds, the same script bundles
-it (plus `qagent.exe` and `aos.exe`) with no app changes.
+Windows; until it lands, `windows/scripts/build-installer.ps1` **fails closed** — the
+installer is only ever the real helper. The one opt-in exception is
+`-FakeHelper`, which bundles `src/bin/fake-acs-desktop.rs`, a protocol-v1
+double that serves a JSON-file bus seeded with the same fixture `aos demo`
+writes. A fake build can never be mistaken for a real one: the installer is
+renamed `ACS_<ver>_x64-PREVIEW-fake-backend-setup.exe`, and the app pins a
+non-dismissable "Preview build — not connected to a real ACS workspace"
+banner on every screen (the `acs_build_flavor` command reads the
+`build-flavor.txt` resource the script stamps). Once the real Windows helper
+builds, the same script bundles it plus `qagent.exe` and `aos.exe` with no
+app changes.
 
 ## Building
 
@@ -94,6 +100,16 @@ npm run test        # vitest (model/transport copy tests)
 cd src-tauri && cargo test   # fake-helper transport tests
 npm run tauri dev   # hot-reload dev run (needs the fake staged, see script)
 ```
+
+## Snapshot previews and submission artifacts
+
+Like the real bridge, `snapshot` trims `brief`, `acceptance`, and
+`result.details` to 1000 characters plus `…` per task — the inspector reads
+the full text through the `task` action when a task is selected — and appends
+older `submitted` tasks after the newest-1000 page so review work is never
+hidden. `result.artifacts` (`{type, value, description?, digest?}`) renders
+as a collapsible "Attached references (N)" list, matching the macOS
+inspector.
 
 ## Signing
 

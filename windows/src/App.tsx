@@ -34,7 +34,13 @@ export function App() {
   }, []);
 
   return (
-    <div class="app-shell">
+    <div class="app-outer">
+      {store.previewBuild.value && (
+        <div class="preview-banner" role="status">
+          Preview build — not connected to a real ACS workspace
+        </div>
+      )}
+      <div class="app-shell">
       <Sidebar />
       <div class="main">
         <div class="main-body">
@@ -78,6 +84,7 @@ export function App() {
         </div>
       </div>
       {store.showNewTask.value && <NewTaskSheet />}
+      </div>
     </div>
   );
 }

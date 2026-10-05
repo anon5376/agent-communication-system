@@ -17,6 +17,11 @@ use std::process::exit;
 use std::time::Duration;
 
 const MARKER: &str = "SIMULATED";
+/// Same preview contract as the real bridge: snapshot cuts brief, acceptance
+/// and result.details at 1000 chars + '…'; `task` returns them in full.
+const PREVIEW_CHARS: usize = 1000;
+/// Same page size as the real bridge's snapshot.
+const TASK_LIMIT: usize = 1000;
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -181,7 +186,12 @@ fn fixture() -> Value {
                     "summary": "Runs stop at the usd cap; agents with unknown cost are refused when a cap is set.",
                     "details": "",
                     "changedFiles": ["src/core/bus.ts", "rust/src/bus.rs"],
-                    "artifacts": [],
+                    // One reference so the inspector's "Attached references"
+                    // section has something to show (the real demo has none).
+                    "artifacts": [
+                        { "type": "file", "value": "docs/usd-cap-notes.md",
+                          "description": "Comparison of per-run cost signals by provider" }
+                    ],
                     "validation": [
                         { "command": "cargo test budget", "passed": true, "summary": "6 passed" },
                         { "command": "node scripts/v2-interop-smoke.mjs", "passed": false, "summary": "usd cap column missing from the TS schema" }
@@ -261,20 +271,56 @@ fn fixture() -> Value {
 
 // --------------------------------------------------------------- actions
 
+/// Snapshot preview of one task record: strips the fake's private `_notes`
+/// and cuts long prose exactly like the real bridge's `task_preview`.
+fn task_preview(task: &Value) -> Value {
+    let mut record = task.clone();
+    if let Some(object) = record.as_object_mut() {
+        object.remove("_notes");
+        for key in ["brief", "acceptance"] {
+            if let Some(Value::String(text)) = object.get_mut(key) {
+                preview_cut(text);
+            }
+        }
+        if let Some(mut text) = object
+            .get("result")
+            .and_then(|r| r.get("details"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            preview_cut(&mut text);
+            if let Some(result) = object.get_mut("result").and_then(Value::as_object_mut) {
+                result.insert("details".into(), json!(text));
+            }
+        }
+    }
+    record
+}
+
+/// Truncate at the char boundary past `PREVIEW_CHARS` and append '…'.
+fn preview_cut(text: &mut String) {
+    if let Some((cut, _)) = text.char_indices().nth(PREVIEW_CHARS) {
+        text.truncate(cut);
+        text.push('…');
+    }
+}
+
 fn action_snapshot(db: &Path, state: &Value) -> Value {
-    let public_tasks: Vec<Value> = state["tasks"]
-        .as_array()
-        .map(|tasks| {
-            tasks
+    let all = state["tasks"].as_array().cloned().unwrap_or_default();
+    // Same paging rule as the real bridge: newest TASK_LIMIT tasks, then —
+    // only when the page is full — older 'submitted' tasks appended after it.
+    let truncated = all.len() > TASK_LIMIT;
+    let mut tasks: Vec<Value> = all.iter().take(TASK_LIMIT).map(task_preview).collect();
+    if truncated {
+        let oldest = all[TASK_LIMIT - 1]["id"].as_i64().unwrap_or(0);
+        tasks.extend(
+            all[TASK_LIMIT..]
                 .iter()
-                .map(|t| {
-                    let mut t = t.clone();
-                    t.as_object_mut().map(|o| o.remove("_notes"));
-                    t
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+                .filter(|t| t["state"].as_str() == Some("submitted") && t["id"].as_i64() < Some(oldest))
+                .map(task_preview),
+        );
+    }
+    let public_tasks = tasks;
     let public_messages: Vec<Value> = state["messages"]
         .as_array()
         .map(|ms| {

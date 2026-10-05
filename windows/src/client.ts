@@ -72,6 +72,11 @@ export async function sampleDbPath(): Promise<string> {
   return invoke<string>("acs_sample_db_path");
 }
 
+/** "real" or "fake" — which helper the installer bundled (build flavor). */
+export async function acsBuildFlavor(): Promise<string> {
+  return invoke<string>("acs_build_flavor");
+}
+
 /** Reveal the bus database in Explorer (selects the file). */
 export async function revealDatabase(dbPath: string): Promise<void> {
   await invoke("acs_reveal", { path: dbPath });

@@ -125,6 +125,31 @@ fn descendant_holding_pipes_does_not_hang() {
 }
 
 #[test]
+fn snapshot_previews_long_prose_task_returns_full() {
+    // Same contract as the real bridge: snapshot cuts brief/acceptance/
+    // result.details at 1000 chars + '…'; `task` returns the full text.
+    let db = scratch_db("preview");
+    call(&db, "demo", json!({})).expect("demo should seed");
+    let long = "x".repeat(1500);
+    call(&db, "createTask", json!({ "title": "long brief", "brief": long }))
+        .expect("createTask");
+    let snap: Value = serde_json::from_str(&call(&db, "snapshot", json!({})).unwrap()).unwrap();
+    let task = snap["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["title"] == "long brief")
+        .unwrap();
+    let brief = task["brief"].as_str().unwrap();
+    assert_eq!(brief.chars().count(), 1001, "preview should be 1000 + ellipsis");
+    assert!(brief.ends_with('…'));
+    let id = task["id"].as_i64().unwrap();
+    let detail: Value =
+        serde_json::from_str(&call(&db, "task", json!({ "id": id })).unwrap()).unwrap();
+    assert_eq!(detail["brief"].as_str().unwrap().len(), 1500, "task returns full text");
+}
+
+#[test]
 fn i64_ids_pass_through_exactly() {
     // Above f64's 2^53 precise range: serde_json arbitrary_precision must
     // preserve the digits verbatim in the reply text.

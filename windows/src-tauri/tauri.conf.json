@@ -28,6 +28,9 @@
     "active": true,
     "targets": ["nsis"],
     "externalBin": ["binaries/acs-desktop"],
+    "resources": {
+      "resources/build-flavor.txt": "build-flavor.txt"
+    },
     "windows": {
       "nsis": {
         "installMode": "currentUser",
