@@ -186,7 +186,7 @@ test("creating a worktree leaves other worktrees' registrations alone", async (t
   assert.ok(git(f.repo, ["worktree", "list"]).includes("elsewhere"));
 });
 
-test("`task claim --worktree` on a non-git project: explicit id leaves the task unclaimed, bare claim keeps the claim with a warning", (t) => {
+test("`task claim --worktree` on a non-git project fails closed: explicit or bare, the task ends up unclaimed", (t) => {
   const f = fixture(t);
   const env: NodeJS.ProcessEnv = { ...process.env, QAGENT_BUS_DB: f.dbPath };
   for (const name of ["QAGENT_AGENT_ID", "AGENT_ID", "QAGENT_HOME", "AGENT_BUS_HOME"]) delete env[name];
@@ -202,12 +202,10 @@ test("`task claim --worktree` on a non-git project: explicit id leaves the task 
 
   const bare = JSON.parse(run(["--as", "operator", "task", "add", "b", "--to", "w1", "--project", plain]).stdout);
   const claimed = run(["--as", "w1", "task", "claim", "--worktree"]);
-  assert.equal(claimed.status, 0, claimed.stderr);
-  const out = JSON.parse(claimed.stdout);
-  assert.equal(out.worktree, null);
-  assert.match(out.worktreeError, /not inside a git repository/);
-  assert.equal(f.bus.getTask(out.id).state, "claimed");
-  void bare;
+  assert.notEqual(claimed.status, 0, "a claim that asked for isolation and cannot get it is not kept");
+  assert.match(claimed.stderr, /claim was released: .*not inside a git repository/);
+  assert.equal(f.bus.getTask(bare.id).state, "open");
+  assert.equal(f.bus.getTask(bare.id).assignee, "w1", "the task stays assigned to w1 for a later try");
 });
 
 test("only the assignee or the operator may open or remove a task's worktree; --force is operator-only", async (t) => {

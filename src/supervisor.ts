@@ -7,15 +7,19 @@
  * imports this module.
  */
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { appendFileSync, linkSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AdapterContext, HarnessInvocation, McpCommand, getHarnessAdapter } from "./adapters.js";
-import { BusConfig, ResolvedAgent, configPathFromProject, loadConfig, resolveAgent } from "./config.js";
+import { AgentDefinition, BusConfig, ResolvedAgent, configPathFromProject, loadConfig, resolveAgent } from "./config.js";
 import { Bus } from "./core/bus.js";
-import type { Identity } from "./core/identity.js";
+import type { AgentPolicy, Identity } from "./core/identity.js";
 import { BusError, DEFAULT_WAIT_SEC, Message, OPERATOR_ID, Task } from "./core/types.js";
 import { TaskWorktree, ensureTaskWorktree } from "./worktree.js";
+
+/** How long an unchanged claimable task the agent left alone waits before it is offered again. */
+const REOFFER_MS = 30 * 60_000;
 
 /** First non-empty environment variable among `names` (new name first, old name second). */
 function envValue(...names: string[]): string | undefined {
@@ -150,7 +154,7 @@ export interface SuperviseOptions {
   log?: (line: string) => void;
 }
 
-interface SessionRecord {
+export interface SessionRecord {
   sessionId: string | null;
   turns: number;
   inputTokens: number;
@@ -176,8 +180,36 @@ function readSession(path: string): SessionRecord {
 }
 
 /** The MCP launch line handed to the vendor CLI: `qagent mcp` as this agent, on this database. */
-export function mcpCommandFor(agentId: string, dbPath: string, qagentBin = DEFAULT_QAGENT_BIN): McpCommand {
-  return { command: process.execPath, args: [qagentBin, "mcp"], env: { QAGENT_AGENT_ID: agentId, QAGENT_BUS_DB: resolve(dbPath) } };
+export function mcpCommandFor(agentId: string, dbPath: string, qagentBin = DEFAULT_QAGENT_BIN, extraEnv: Record<string, string> = {}): McpCommand {
+  return { command: process.execPath, args: [qagentBin, "mcp"], env: { QAGENT_AGENT_ID: agentId, QAGENT_BUS_DB: resolve(dbPath), ...extraEnv } };
+}
+
+/**
+ * The project configuration's limits for this agent, as the policy the bus core enforces on
+ * every call path (MCP, CLI, supervisor): delegation, the agents it may assign, delegation
+ * depth, and how many tasks it may hold claimed at once.
+ */
+export function policyFromConfig(config: BusConfig, agent: AgentDefinition): AgentPolicy {
+  const policy: AgentPolicy = {
+    canDelegate: agent.permissions.canDelegate,
+    maxDelegationDepth: Math.min(agent.permissions.maxDelegationDepth, config.constraints.maxDelegationDepth),
+    maxConcurrentTasks: config.constraints.maxConcurrentTasks,
+  };
+  if (agent.permissions.allowedChildAgentIds?.length) policy.allowedChildAgentIds = [...agent.permissions.allowedChildAgentIds];
+  return policy;
+}
+
+/**
+ * Why the configuration's usage budget stops new turns, or null. The budget counts what the
+ * CLI itself reported into sessions/<agent>.json and is checked between turns, so one turn
+ * can overshoot it, and a CLI that reports no cost never moves the dollar count.
+ */
+export function budgetReached(config: BusConfig, session: Pick<SessionRecord, "totalTokens" | "costUSD">): string | null {
+  const tokens = config.constraints.optionalTokenBudget;
+  const dollars = config.constraints.optionalApiCostBudgetUSD;
+  if (tokens !== null && tokens !== undefined && session.totalTokens >= tokens) return `${session.totalTokens} of ${tokens} reported tokens used`;
+  if (dollars !== null && dollars !== undefined && session.costUSD >= dollars) return `$${session.costUSD.toFixed(2)} of $${dollars.toFixed(2)} reported cost used`;
+  return null;
 }
 
 /** Whether the supervisor claims and submits for this CLI. Harnesses without MCP cannot call bus tools. */
@@ -248,21 +280,86 @@ function claimableBy(task: Task, agentId: string, role: string): boolean {
     && (task.assignee === agentId || (task.assignee === null && (task.role === "" || task.role === role)));
 }
 
-/** One pid file per agent so two supervisors never drive the same CLI session. */
-function acquireLock(dir: string, agentId: string): () => void {
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
+
+/**
+ * Whether `pid` is a live supervisor for `agentId`. After a reboot a stale pid file can name
+ * an unrelated process that reused the pid, so where /proc shows the command line it must
+ * mention supervise; elsewhere any live pid counts (the safe direction: refuse to start).
+ */
+export function supervisorAlive(pid: number, agentId: string): boolean {
+  if (pid <= 0 || !pidAlive(pid)) return false;
+  if (pid === process.pid) return true;
+  try {
+    const words = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+    return words.includes("supervise") && (words.includes(agentId) || words.includes("--roster"));
+  } catch {
+    return true;
+  }
+}
+
+function readPid(path: string): number {
+  try { return Number(readFileSync(path, "utf8").trim()) || 0; } catch { return 0; }
+}
+
+/**
+ * One pid file per agent so two supervisors never drive the same CLI session. Taking it is
+ * atomic: the pid is written to a private file first and hard-linked into place, which fails
+ * if any supervisor holds it, so the file is never empty and two starters cannot both win.
+ * A stale file (its pid is gone) is removed only while holding <agent>.pid.reap, so a
+ * supervisor that just took the lock is never removed by a slower starter.
+ */
+export function acquireSupervisorLock(dir: string, agentId: string): () => void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const path = join(dir, `${agentId}.pid`);
-  let holder = 0;
-  try { holder = Number(readFileSync(path, "utf8").trim()) || 0; } catch { /* no holder */ }
-  if (holder && holder !== process.pid) {
-    let alive = true;
-    try { process.kill(holder, 0); } catch (error) { alive = (error as NodeJS.ErrnoException).code === "EPERM"; }
-    if (alive) throw new BusError("conflict", `a supervisor for ${agentId} is already running (pid ${holder})`);
+  const mine = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  writeFileSync(mine, `${process.pid}\n`, { mode: 0o600 });
+  try {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        linkSync(mine, path);
+        return () => { if (readPid(path) === process.pid) rmSync(path, { force: true }); };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+      const holder = readPid(path);
+      if (holder === process.pid) return () => { if (readPid(path) === process.pid) rmSync(path, { force: true }); };
+      if (holder && supervisorAlive(holder, agentId)) throw new BusError("conflict", `a supervisor for ${agentId} is already running (pid ${holder})`);
+      reapStaleLock(path, holder);
+    }
+    throw new BusError("conflict", `could not take the supervisor lock for ${agentId}; another supervisor keeps starting`);
+  } finally {
+    rmSync(mine, { force: true });
   }
-  writeFileSync(path, `${process.pid}\n`, { mode: 0o600 });
-  return () => {
-    try { if (Number(readFileSync(path, "utf8").trim()) === process.pid) rmSync(path, { force: true }); } catch { /* already gone */ }
-  };
+}
+
+function reapStaleLock(path: string, stalePid: number): void {
+  const reap = `${path}.reap`;
+  const mine = `${reap}.${process.pid}.tmp`;
+  writeFileSync(mine, `${process.pid}\n`, { mode: 0o600 });
+  try {
+    try {
+      linkSync(mine, reap);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      // Another starter is reaping. A reaper that died mid-way leaves its file behind; clear it once it is clearly abandoned.
+      const reaper = readPid(reap);
+      let age = 0;
+      try { age = Date.now() - statSync(reap).mtimeMs; } catch { return; }
+      if (!reaper || (!pidAlive(reaper) && age > 2_000)) rmSync(reap, { force: true });
+      return;
+    }
+    try {
+      // Holding the reap lock, nobody else can remove the pid file; only a link can create it, which fails while it exists.
+      if (readPid(path) === stalePid) rmSync(path, { force: true });
+    } finally {
+      rmSync(reap, { force: true });
+    }
+  } finally {
+    rmSync(mine, { force: true });
+  }
 }
 
 function killGroup(pid: number, signal: NodeJS.Signals): void {
@@ -319,7 +416,12 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
     const config = options.config ?? loadConfig(options.configPath ?? configPathFromProject(workdir));
     const agent = resolveAgent(config, options.agentId);
     if (!agent.enabled) throw new Error(`agent ${agent.id} is disabled in the harness configuration`);
-    release = acquireLock(join(home, "supervisors"), agent.id);
+    const worktreeMode = config.constraints.isolation === "worktree";
+    const pinnedForCheck = agent.resumeSessionId?.trim() || null;
+    if (worktreeMode && pinnedForCheck) {
+      throw new BusError("invalid", `isolation "worktree" cannot run ${agent.id}: it pins session ${pinnedForCheck}, and a CLI session is tied to one directory. Remove resumeSessionId or set isolation to "path-locks".`);
+    }
+    release = acquireSupervisorLock(join(home, "supervisors"), agent.id);
 
     const adapter = getHarnessAdapter(agent.harnessDefinition.adapter);
     const managed = supervisorManaged(agent);
@@ -330,39 +432,80 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
       session.sessionId = pinnedSessionId;
       writeFileSync(sessionPath, JSON.stringify(session, null, 2));
     }
+    const dollarBudget = config.constraints.optionalApiCostBudgetUSD;
+    if (dollarBudget !== null && dollarBudget !== undefined && !agent.harnessDefinition.features.usageReporting) {
+      throw new BusError("invalid", `optionalApiCostBudgetUSD is set, but ${agent.harnessDefinition.id} reports no usage, so the budget could never be counted. Remove it or use a CLI that reports cost.`);
+    }
+    let operator: Identity | null = null;
+    try { operator = bus.identify(OPERATOR_ID); } catch { /* no operator token on this bus */ }
+    // The configuration's limits go into the bus, where every call path enforces them.
+    bus.setAgentPolicy(operator ?? me, me.agentId, policyFromConfig(config, agent));
     const qagentBin = options.qagentBin ?? DEFAULT_QAGENT_BIN;
-    const mcpCommand = mcpCommandFor(me.agentId, bus.dbPath, qagentBin);
+    const isolationEnv: Record<string, string> = worktreeMode ? { QAGENT_REQUIRE_WORKTREE: "1" } : {};
+    const mcpCommand = mcpCommandFor(me.agentId, bus.dbPath, qagentBin, isolationEnv);
     const blockSec = agent.harnessDefinition.id === "claude" ? "900" : "240";
     const waitMs = options.waitMs ?? DEFAULT_WAIT_SEC * 1000;
-    let sweeper: Identity | null = null;
-    let sweeperTried = false;
     const sweepStalled = () => {
       if (!options.autoRequeueMs) return;
-      if (!sweeperTried) {
-        sweeperTried = true;
-        try { sweeper = bus.identify(OPERATOR_ID); } catch { log("auto-requeue off: no operator token on this bus"); }
+      if (!operator) {
+        log("auto-requeue off: no operator token on this bus");
+        options.autoRequeueMs = undefined;
+        return;
       }
-      if (!sweeper) return;
       for (const task of bus.deadClaims(options.autoRequeueMs)) {
         try {
-          bus.requeueTask(sweeper, task.id, `auto-requeue: claim idle beyond ${Math.round(options.autoRequeueMs / 60_000)} min`);
+          bus.requeueTask(operator, task.id, `auto-requeue: claim idle beyond ${Math.round(options.autoRequeueMs / 60_000)} min`);
           log(`auto-requeued stalled task #${task.id} (was claimed by ${task.assignee ?? "nobody"})`);
         } catch (error) {
           log(`auto-requeue of task #${task.id} failed: ${(error as Error).message}`);
         }
       }
     };
+    // Work already waiting is offered once per change (task updated_ms) so an agent that leaves a
+    // task alone is not woken (a paid turn) for it again and again; an unchanged task it left
+    // alone is offered once more after REOFFER_MS.
+    const offered = new Map<number, { updatedMs: number; at: number }>();
+    const backlog = (): Task[] => bus.claimableTasks(me.agentId).filter((task) => {
+      const seen = offered.get(task.id);
+      return !seen || seen.updatedMs !== task.updatedMs || Date.now() - seen.at >= REOFFER_MS;
+    });
+    const markOffered = (task: Task): void => { offered.set(task.id, { updatedMs: task.updatedMs, at: Date.now() }); };
+    // Worktree mode shows only mail about the turn's task; the rest is kept here for later turns,
+    // since reading the inbox has already moved the cursor past it.
+    let deferred: Message[] = [];
+    const holdOrClaim = (id: number): Task | null => {
+      const current = bus.getTask(id);
+      if (current.state === "claimed" && current.assignee === me.agentId) return current;
+      if (claimableBy(current, me.agentId, busAgent.role)) return bus.claimTask(me, id);
+      return null;
+    };
+    let budgetNoticed: string | null = null;
+    let costNoticed = false;
     let consecutiveFailures = 0;
-    log(`supervising ${agent.id} via ${agent.harnessDefinition.id} in ${workdir} (bus ${bus.dbPath}${managed ? ", supervisor-managed tasks" : ""})`);
+    log(`supervising ${agent.id} via ${agent.harnessDefinition.id} in ${workdir} (bus ${bus.dbPath}${managed ? ", supervisor-managed tasks" : ""}${worktreeMode ? ", one task per turn in its own git worktree" : ""})`);
 
     while (!options.signal?.aborted) {
-      const waited = await bus.waitForMail(me, { timeoutMs: waitMs, signal: options.signal });
-      if (options.signal?.aborted) break;
-      sweepStalled();
-      if (waited.status === "timeout") continue;
+      const over = budgetReached(config, session);
+      if (over) {
+        if (budgetNoticed !== over) log(`budget reached (${over}); no new turns until the configuration budget is raised`);
+        budgetNoticed = over;
+        await sleep(waitMs, options.signal);
+        continue;
+      }
+      // Existing claimable work or unread mail starts a turn at once; only an idle agent waits.
+      const waiting = backlog();
+      if (!waiting.length && !deferred.length && bus.unreadCount(me.agentId) === 0) {
+        const waited = await bus.waitForMail(me, { timeoutMs: waitMs, signal: options.signal });
+        if (options.signal?.aborted) break;
+        sweepStalled();
+        if (waited.status === "timeout") continue;
+      } else {
+        sweepStalled();
+      }
 
-      // Consume what the wait saw, so the next wait does not deliver it again.
-      const messages = waited.status === "mail" ? bus.inbox(me, { limit: 50 }).messages : [];
+      // Consume what is unread, so the next wait does not deliver it again.
+      let messages = [...deferred, ...bus.inbox(me, { limit: 50 }).messages];
+      deferred = [];
       if (cancellationOnly(messages)) {
         log("received cancellation control; no model turn started");
         continue;
@@ -373,47 +516,83 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
       for (const message of messages) {
         if (message.taskId && (message.type === "task" || message.type === "feedback") && !message.subject.startsWith("[ACCEPTED")) taskIds.add(message.taskId);
       }
+      const candidates = backlog();
+      for (const task of candidates) markOffered(task);
       const tasks: Task[] = [];
-      if (managed) {
+      let worktree: TaskWorktree | null = null;
+      if (worktreeMode) {
+        // isolation "worktree": the supervisor claims exactly one task per turn and runs the turn in
+        // that task's checkout. If no checkout can be made, the claim is released and no turn runs:
+        // the work never falls back to the shared directory. Other tasks wait for later turns.
+        const order = [...taskIds, ...candidates.map((task) => task.id)];
+        let focus: Task | null = null;
+        let claimedNow = false;
+        for (const id of new Set(order)) {
+          try {
+            const before = bus.getTask(id);
+            const held = holdOrClaim(id);
+            if (held) { focus = held; claimedNow = before.state !== "claimed"; break; }
+          } catch (error) {
+            log(`claim of task #${id} failed: ${(error as Error).message}`);
+          }
+        }
+        if (focus) {
+          try {
+            worktree = await ensureTaskWorktree(focus, home);
+          } catch (error) {
+            const reason = `worktree isolation unavailable, so no turn ran in the shared checkout: ${(error as Error).message}`;
+            log(`task #${focus.id}: ${reason}`);
+            try {
+              bus.noteTask(me, focus.id, reason);
+              if (claimedNow) bus.releaseTask(me, focus.id, "worktree isolation unavailable");
+            } catch (releaseError) {
+              log(`task #${focus.id}: could not release after the worktree failure: ${(releaseError as Error).message}`);
+            }
+            markOffered(bus.getTask(focus.id));
+            // Mail about the refused task is answered by its note; all other mail waits for a later turn.
+            const refused = focus.id;
+            deferred = messages.filter((message) => message.taskId !== refused);
+            continue;
+          }
+          tasks.push(focus);
+          // Mail about tasks this turn does not hold would invite work outside the checkout.
+          deferred = messages.filter((message) => message.taskId && message.taskId !== focus!.id);
+          messages = messages.filter((message) => !message.taskId || message.taskId === focus!.id);
+          taskIds.clear();
+          taskIds.add(focus.id);
+        }
+      } else if (managed) {
         // Port of /task/start: claim for a CLI that has no bus tools.
         for (const id of taskIds) {
           try {
-            const current = bus.getTask(id);
-            if (claimableBy(current, me.agentId, role)) tasks.push(bus.claimTask(me, id));
-            else if (current.state === "claimed" && current.assignee === me.agentId) tasks.push(current);
+            const held = holdOrClaim(id);
+            if (held) tasks.push(held);
           } catch (error) {
             log(`claim of task #${id} failed: ${(error as Error).message}`);
           }
         }
         if (!messages.length) {
-          try { tasks.push(bus.claimTask(me, null)); } catch (error) { if (!(error instanceof BusError && error.code === "not_found")) throw error; }
+          try {
+            tasks.push(bus.claimTask(me, null));
+          } catch (error) {
+            if (!(error instanceof BusError && (error.code === "not_found" || error.code === "conflict"))) throw error;
+          }
         }
       } else if (!messages.length) {
-        tasks.push(...bus.listTasks({ states: ["open", "changes_requested"], limit: 50 }).filter((task) => claimableBy(task, me.agentId, role)));
+        tasks.push(...candidates);
       }
       if (!messages.length && !tasks.length) continue;
 
-      // isolation "worktree": a turn about exactly one task this agent holds (or is assigned)
-      // runs in that task's checkout. Unclaimed candidates are never isolated: every same-role
-      // supervisor would race for the same checkout.
-      let worktree: TaskWorktree | null = null;
-      const focus = new Set<number>([...taskIds, ...tasks.map((task) => task.id)]);
-      if (config.constraints.isolation === "worktree" && focus.size === 1) {
-        const [focusId] = focus;
-        try {
-          const task = bus.getTask(focusId);
-          if (pinnedSessionId) log(`task #${focusId}: worktree isolation skipped, ${agent.id} pins session ${pinnedSessionId}`);
-          else if (task.project && task.assignee === me.agentId) worktree = await ensureTaskWorktree(task, home);
-        } catch (error) {
-          log(`task #${focusId}: worktree unavailable, running in ${workdir}: ${(error as Error).message}`);
-        }
-      }
       const turnDir = worktree?.workdir ?? workdir;
       // CLI sessions are tied to their directory: a worktree turn resumes that task's own session.
       const taskSession = worktree ? session.taskSessions?.[worktree.branch] ?? null : null;
       if (worktree) log(`task #${worktree.taskId}: running in worktree ${worktree.workdir} (branch ${worktree.branch})`);
       let prompt = buildBrief(agent, messages, tasks, managed);
-      if (worktree) prompt += `\nWork only in the git worktree ${worktree.workdir} on branch ${worktree.branch}; commit your changes there.`;
+      if (worktree) {
+        prompt += `\nTask #${worktree.taskId} is claimed for you. Work only in the git worktree ${worktree.workdir} on branch ${worktree.branch}; commit your changes there.`;
+      } else if (worktreeMode) {
+        prompt += "\nThis bus isolates each task in its own git worktree: claim a task before editing files, and edit only in the worktree the claim returns.";
+      }
 
       const context: AdapterContext = {
         agent,
@@ -423,7 +602,7 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
         workdir: turnDir,
         mcpServerPath: qagentBin,
         fakeHarnessPath: options.fakeHarnessPath ?? DEFAULT_FAKE_HARNESS,
-        busEnvironment: { QAGENT_AGENT_ID: me.agentId, QAGENT_BUS_DB: bus.dbPath, QAGENT_BLOCK_SEC: blockSec, AGENT_BUS_BLOCK_SEC: blockSec },
+        busEnvironment: { QAGENT_AGENT_ID: me.agentId, QAGENT_BUS_DB: bus.dbPath, QAGENT_BLOCK_SEC: blockSec, AGENT_BUS_BLOCK_SEC: blockSec, ...isolationEnv },
         mcpCommand,
       };
       await adapter.prepare?.(context);
@@ -448,6 +627,10 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
       session.totalTokens += normalized.usage.totalTokens;
       session.costUSD += normalized.usage.costUSD;
       session.latencyMs += processResult.durationMs;
+      if (dollarBudget !== null && dollarBudget !== undefined && !costNoticed && normalized.usage.costUSD === 0) {
+        costNoticed = true;
+        log(`${agent.harnessDefinition.id} reported no cost for this turn; the $${dollarBudget} budget only counts cost the CLI reports`);
+      }
       if (pinnedSessionId) session.sessionId = pinnedSessionId;
       else if (normalized.sessionId && worktree) session.taskSessions = { ...session.taskSessions, [worktree.branch]: normalized.sessionId };
       else if (normalized.sessionId) session.sessionId = normalized.sessionId;

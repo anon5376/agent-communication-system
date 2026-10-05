@@ -58,11 +58,14 @@ function busCli(): number[] {
     return JSON.parse(result.stdout) as Record<string, unknown>;
   };
   // Every task the brief names ([TASK #n] assignments, [CHANGES #n r2] review feedback), else any claimable one.
-  const wanted = [...new Set([...prompt.matchAll(/\[(?:TASK|CHANGES) #(\d+)/g)].map((match) => match[1]))];
+  // Also the task a worktree-isolating supervisor claimed for this turn ("Task #n is claimed for you").
+  const wanted = [...new Set([...prompt.matchAll(/\[(?:TASK|CHANGES) #(\d+)|^Task #(\d+) is claimed for you/gm)].map((match) => match[1] ?? match[2]))];
   const reportDir = process.env.FAKE_HARNESS_REPORTS;
   const done: number[] = [];
   for (const target of wanted.length ? wanted : [undefined]) {
-    const claimed = qagent(["task", "claim", ...(target ? [target] : [])]);
+    // A supervisor that isolates tasks in worktrees claims before the turn; claim only what is not already ours.
+    const shown = target ? qagent(["task", "show", target]) : null;
+    const claimed = shown && shown.state === "claimed" && shown.assignee === agent ? shown : qagent(["task", "claim", ...(target ? [target] : [])]);
     const id = String(claimed.id);
     qagent(["task", "note", id, `fake ${agent} started task #${id}`]);
     const submit = ["task", "submit", id, "--summary", `fake ${agent} submitted task #${id} through qagent`];

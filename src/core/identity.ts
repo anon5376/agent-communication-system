@@ -16,6 +16,26 @@ import { Authority, BusError, OPERATOR_ID } from "./types.js";
 export interface Permissions {
   canDelegate: boolean;
   canReview: boolean;
+  /** When set and non-empty, the only agents this one may assign work to. */
+  allowedChildAgentIds?: string[];
+  /** Deepest parent chain (ancestors of the new task) this agent may create work under. */
+  maxDelegationDepth?: number;
+  /** Most tasks this agent may hold claimed at once. */
+  maxConcurrentTasks?: number;
+}
+
+/**
+ * Limits applied on top of the authority's permissions, usually copied from the project
+ * configuration by the supervisor. Stored as `policy` inside identities.permissions_json,
+ * so no schema change is needed. The Rust build on rust-port does not read it yet and drops
+ * it when it rotates a token. A policy only ever narrows:
+ * the effective permission is the authority's AND the policy's.
+ */
+export interface AgentPolicy {
+  canDelegate?: boolean;
+  allowedChildAgentIds?: string[];
+  maxDelegationDepth?: number;
+  maxConcurrentTasks?: number;
 }
 
 export interface Identity {
@@ -111,17 +131,74 @@ function rowFor(db: DatabaseSync, agentId: string): IdentityRow | undefined {
   return prepared(db, "SELECT * FROM identities WHERE agent_id = ?").get(agentId) as IdentityRow | undefined;
 }
 
-function parsePermissions(json: string, authority: Authority): Permissions {
+function wholeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+/** The policy stored in a permissions_json value, with anything malformed dropped. */
+export function parsePolicy(value: unknown): AgentPolicy {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const raw = value as Record<string, unknown>;
+  const policy: AgentPolicy = {};
+  if (typeof raw.canDelegate === "boolean") policy.canDelegate = raw.canDelegate;
+  if (Array.isArray(raw.allowedChildAgentIds)) policy.allowedChildAgentIds = raw.allowedChildAgentIds.filter((id): id is string => typeof id === "string");
+  const depth = wholeNumber(raw.maxDelegationDepth);
+  if (depth !== undefined) policy.maxDelegationDepth = depth;
+  const concurrent = wholeNumber(raw.maxConcurrentTasks);
+  if (concurrent !== undefined && concurrent >= 1) policy.maxConcurrentTasks = concurrent;
+  return policy;
+}
+
+export function parsePermissions(json: string, authority: Authority): Permissions {
+  let value: Record<string, unknown>;
   try {
-    const value = JSON.parse(json) as Partial<Permissions>;
-    const base = defaultPermissions(authority);
-    return {
-      canDelegate: typeof value.canDelegate === "boolean" ? value.canDelegate : base.canDelegate,
-      canReview: typeof value.canReview === "boolean" ? value.canReview : base.canReview,
-    };
+    const parsed = JSON.parse(json) as unknown;
+    value = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
   } catch {
-    return defaultPermissions(authority);
+    value = {};
   }
+  const base = defaultPermissions(authority);
+  const policy = parsePolicy(value.policy);
+  const permissions: Permissions = {
+    canDelegate: (typeof value.canDelegate === "boolean" ? value.canDelegate : base.canDelegate) && policy.canDelegate !== false,
+    canReview: typeof value.canReview === "boolean" ? value.canReview : base.canReview,
+  };
+  if (policy.allowedChildAgentIds?.length) permissions.allowedChildAgentIds = policy.allowedChildAgentIds;
+  if (policy.maxDelegationDepth !== undefined) permissions.maxDelegationDepth = policy.maxDelegationDepth;
+  if (policy.maxConcurrentTasks !== undefined) permissions.maxConcurrentTasks = policy.maxConcurrentTasks;
+  return permissions;
+}
+
+/** Whether `next` would allow anything `current` forbids. */
+export function policyWidens(current: AgentPolicy, next: AgentPolicy): boolean {
+  if (current.canDelegate === false && next.canDelegate !== false) return true;
+  const currentIds = current.allowedChildAgentIds?.length ? current.allowedChildAgentIds : null;
+  const nextIds = next.allowedChildAgentIds?.length ? next.allowedChildAgentIds : null;
+  if (currentIds && (!nextIds || nextIds.some((id) => !currentIds.includes(id)))) return true;
+  for (const key of ["maxDelegationDepth", "maxConcurrentTasks"] as const) {
+    const was = current[key];
+    const now = next[key];
+    if (was !== undefined && (now === undefined || now > was)) return true;
+  }
+  return false;
+}
+
+/** The permissions_json row value for `agentId`, parsed ({} when there is none or it is malformed). */
+export function storedPermissionsJson(db: DatabaseSync, agentId: string): Record<string, unknown> {
+  const row = rowFor(db, agentId);
+  if (!row) return {};
+  try {
+    const parsed = JSON.parse(row.permissions_json) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The effective permissions stored for `agentId` right now (read inside a write transaction). */
+export function currentPermissions(db: DatabaseSync, agentId: string): Permissions | null {
+  const row = rowFor(db, agentId);
+  return row ? parsePermissions(row.permissions_json, row.authority) : null;
 }
 
 /**
@@ -158,12 +235,16 @@ export function requireOperator(identity: Identity, action: string): void {
 export function storeNewToken(db: DatabaseSync, agentId: string, authority: Authority, nowMs: number, permissions?: Permissions): string {
   const token = createBearerToken();
   const existing = rowFor(db, agentId);
+  // A rotation keeps the stored permissions and policy; only a new identity or a new authority starts from defaults.
+  const permissionsJson = permissions
+    ? JSON.stringify(permissions)
+    : existing && existing.authority === authority ? existing.permissions_json : JSON.stringify(defaultPermissions(authority));
   prepared(db, `
     INSERT INTO identities(agent_id, token_hash, authority, permissions_json, created_ms, updated_ms)
     VALUES(?, ?, ?, ?, ?, ?)
     ON CONFLICT(agent_id) DO UPDATE SET token_hash = excluded.token_hash, authority = excluded.authority,
       permissions_json = excluded.permissions_json, updated_ms = excluded.updated_ms
-  `).run(agentId, hashToken(token), authority, JSON.stringify(permissions ?? defaultPermissions(authority)), existing?.created_ms ?? nowMs, nowMs);
+  `).run(agentId, hashToken(token), authority, permissionsJson, existing?.created_ms ?? nowMs, nowMs);
   return token;
 }
 

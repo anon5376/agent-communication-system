@@ -11,27 +11,87 @@
 </p>
 
 <p align="center">
-  <b>Durable mail, task handoffs and review gates for Claude Code, Codex, Gemini, Hermes and any other agent CLI.<br>No daemon, no cloud, no broker.</b>
+  <b>Run different coding agents together without being their message bus.</b><br>
+  Claude Code, Codex and other agent CLIs claim work from one local task board, recover when a worker dies, and get checked by a reviewer who did not write the code.
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> ·
+  <a href="#try-it-in-two-minutes">Try it</a> ·
+  <a href="#watch-a-worker-die-and-the-work-survive">Recovery example</a> ·
+  <a href="#see-what-needs-you">What needs you</a> ·
+  <a href="#what-is-tested-and-what-is-not">Limits</a> ·
   <a href="docs/FULL-GUIDE.md">Full guide</a> ·
-  <a href="#terminal-ui">Terminal UI</a> ·
   <a href="docs/security.md">Security</a>
 </p>
 
-The command is `qagent` (`agent-bus` remains as a compatibility alias). The CLI and MCP server open one SQLite file directly, so messaging and task work need no background process. An optional supervisor wakes agent CLIs when work arrives, and an optional local dashboard shows activity.
+If you run more than one coding agent, you end up as the glue: pasting briefs between terminals, remembering who is editing what, and checking the work yourself. ACS puts that state in one SQLite file on your machine, so the agents coordinate through it instead of through you. No daemon, no cloud, no broker: every command opens the file directly.
+
+- **Ownership.** A task has one assignee at a time. Claims are atomic, claims on overlapping paths are refused (path leases are cooperative, not enforced by the filesystem), and every agent acts under its own token.
+- **Recovery.** When a worker dies mid-task its claim shows up in `task stalled`; requeue it and another agent picks it up from the notes the first one left. `qagent trace` shows the whole chain afterwards.
+- **Independent review.** A worker cannot accept its own submission. Only the named reviewer (or the creator when none is named) or you, the operator, can accept or send it back.
 
 ![aos terminal demo: accepting a review, sending one back, a message and a new task from command home, then the goal tree and swarm](docs/assets/aos-demo.gif)
 
-*`aos demo`, the terminal console from the Rust implementation on the `rust-port` branch. To try it: `git checkout rust-port && ./rust/install-aos.sh && aos demo`. See [Terminal UI](#terminal-ui).*
+*`aos demo`: a sample team on a temporary bus. Nothing real runs.*
 
-**Why not…**
+## Try it in two minutes
 
-- *…CrewAI/AutoGen/LangGraph?* Different layer. Those define agents inside a runtime; ACS is the mailbox and task board underneath the standalone CLIs you already run — mix Claude Code, Codex, and a local model on one bus.
-- *…a message queue?* A broker moves bytes; it doesn't know what an agent task is. ACS ships agent-shaped primitives — token identities, atomic claims, path leases, review gates — with no server to run.
-- *…tmux send-keys and a shared doc?* A doc can't push, can't expire stale claims, and can't wake an agent. ACS delivers addressed durable mail, claims with leases, and signal-file wake-ups.
+`aos` is the terminal console. Prebuilt binaries exist for Linux (x86_64, ARM64) and macOS (Apple Silicon, Intel), released as [`aos-v0.1.0`](https://github.com/anon5376/agent-communication-system/releases/tag/aos-v0.1.0). There is no Windows build.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/anon5376/agent-communication-system/rust-port/install.sh | sh
+aos demo
+```
+
+`aos demo` seeds a sample team in a bus under your temp folder (`$TMPDIR/aos-demo`). It needs no account, starts no agent CLI and never opens your real bus. Quit with `q`, then `y`.
+
+### Your first real task
+
+```bash
+cd your-project
+aos
+```
+
+The first run looks for agent CLIs on your machine and writes a crew of three (lead, builder, reviewer), taking the reviewer from a different CLI than the builder when you have two. In the `aos-v0.1.0` release, Claude Code, Codex CLI and Cursor CLI can join a crew. On `rust-port`, and in the next release, `aos connect <cli> --auto-approve` also adds Gemini CLI, Kimi, OpenCode, Hermes, Grok and other CLIs; those run unattended without approval prompts, so aos asks you to type `--auto-approve` once. None of them has been live-tested. `aos doctor` says what is missing. Type a goal as a sentence and press Enter; the agents work in this folder, and the result comes back to you to accept. Real turns run on the agent CLIs' own accounts and cost what those CLIs charge. Keys, commands and limits are in [`rust/AOS.md`](https://github.com/anon5376/agent-communication-system/blob/rust-port/rust/AOS.md).
+
+The `aos` source lives on the [`rust-port`](https://github.com/anon5376/agent-communication-system/tree/rust-port) branch. This branch, `main`, holds the TypeScript implementation, `qagent`, described below. Both open the same `bus.db`, tokens and signal files, and the bus commands (`task`, `send`, `inbox`, `log`, `trace`, `mcp` and the rest) also work as `aos <command>`. `aos doctor` is aos's own check, not `qagent doctor`.
+
+## Watch a worker die and the work survive
+
+[`examples/worker-death-recovery.sh`](examples/worker-death-recovery.sh) runs the whole loop on a throwaway bus with no agent CLI and no account: a worker claims a scoped task and leaves a note, its process is killed with `SIGKILL`, the bus reports the claim as stalled, the operator requeues it, a second worker claims and submits it, the worker's attempt to accept the work is refused, and the reviewer accepts it.
+
+```bash
+QAGENT=aos sh examples/worker-death-recovery.sh     # with the released binary
+QAGENT=qagent sh examples/worker-death-recovery.sh  # with the TypeScript build below
+```
+
+```text
+== worker-2 cannot accept the work; only the named reviewer or the operator can
+qagent: only reviewer or the operator may review task 1
+
+== the bus is the trace (abridged)
+  10-04 11:35:02 worker-1 task_claimed — task claimed
+  10-04 11:35:02 worker-1 note — reproduced the offset bug, starting the fix
+  10-04 11:35:06 operator task_released — task released
+  10-04 11:35:06 worker-2 task_claimed — task claimed
+  10-04 11:35:06 worker-2 task_submitted — task submitted
+  10-04 11:35:06 reviewer task_accepted — task accepted
+```
+
+Recovery here is one operator command. The TypeScript supervisor can requeue dead claims unattended (`qagent supervise <agent> --auto-requeue-min <n>`); the Rust build cannot yet.
+
+## See what needs you
+
+`qagent doctor`, `qagent trace <task>` and the dashboard sort open work the same way: needs review, failed or blocked, stalled, then active and queued. Each item comes with the reason, the evidence and the next command:
+
+```text
+attention 1 task(s) need you
+  #2 needs review: Submitted by w; waiting for review by r, who is offline. Read it with qagent task show 2; --revise sends it back.
+    evidence: submitted now · summary: "done" · round 1
+    next: qagent task review 2 --accept --feedback "..." --as operator
+```
+
+This is in the TypeScript build on `main`; `aos` has its own gate strip for the same purpose.
 
 ## What it provides
 
@@ -39,13 +99,17 @@ The command is `qagent` (`agent-bus` remains as a compatibility alias). The CLI 
 - Direct, multi-recipient, and broadcast messages.
 - Threads, acknowledgements, typed messages, and file or URL references.
 - Tasks with assignment, dependencies, claims, path leases, progress notes, submission, and review by someone other than the assignee.
+- Stalled-claim detection, requeue, and `qagent trace <task>` for a task's full timeline (text, JSON or a self-contained HTML file).
+- An attention list in `qagent doctor`, `qagent trace` and the dashboard: what needs you first, with reason, evidence and next command.
 - A stdio MCP server with 14 agent tools and one operator-only tool.
 - Harness adapters: `claude`, `codex`, `gemini`, `kimi`, `cursor`, `grok`, `opencode`, `hermes`, `devin`, plus any other CLI through the `command` adapter.
 - A localhost-only dashboard and an optional supervisor.
 - A Claude Code hook that wakes an idle interactive session when mail arrives.
 - Import tools for earlier Qagent and Python prototype stores.
 
-## Quick start
+An adapter means the command line and output parsing are implemented and unit-tested. It does not mean that provider was run live; see [provider support](docs/provider-support.md).
+
+## qagent: the TypeScript CLI and MCP server
 
 Requires Node.js 22.13 or newer. The package is not on npm yet, so build from source:
 
@@ -63,7 +127,7 @@ qagent agent add codex --role worker
 
 After the first npm release (not published yet), `npm install -g agent-communication-system` or `npx -p agent-communication-system qagent <command>` will replace the clone-and-build steps.
 
-Every agent names itself with `QAGENT_AGENT_ID` or `--as <id>`:
+The command is `qagent` (`agent-bus` remains as a compatibility alias). Every agent names itself with `QAGENT_AGENT_ID` or `--as <id>`:
 
 ```bash
 qagent --as claude send codex "parser" "Please take the parser task."
@@ -86,9 +150,18 @@ qagent --as claude hook claude-code --settings
 
 See [Wake an idle Claude Code session](docs/FULL-GUIDE.md#wake-an-idle-claude-code-session) for what it shows Claude and its limits.
 
+## What is tested and what is not
+
+- **Platforms.** CI runs on Linux. The `aos` binaries are built for macOS but have only been run by hand on Linux. No Windows build.
+- **Providers.** No provider CLI runs in CI; adapters are tested against recorded command lines and output. No live provider run is recorded in this repository. [Provider support](docs/provider-support.md) has the per-provider status.
+- **Two implementations.** The TypeScript and Rust builds share one schema and interoperate on the same `bus.db` (`scripts/v2-interop-smoke.mjs` checks mail, cursors, claims and wake-ups across both, in CI on `rust-port`). Some features exist in only one: per-task git worktrees and automatic requeue are TypeScript-only; `aos` and the pause, resume and budget commands are Rust-only. The TypeScript supervisor enforces the config budgets (`optionalTokenBudget`, `optionalApiCostBudgetUSD`) between turns from reported usage, and refuses a dollar budget for a CLI that reports no usage. See [implementation differences](docs/FULL-GUIDE.md#implementation-differences).
+- **Cost.** Budgets in `aos` always count turns and minutes; the TypeScript config budgets count tokens and dollars. Dollars and tokens are counted only when a CLI reports them, and every budget is checked between turns, so one turn can overshoot and a dollar budget is not a hard cap. Codex reports tokens, not a price.
+- **Speed.** A CLI call takes about 2 ms with the Rust binary and about 77 ms with Node (`inbox --peek`, mean of 20 calls on a Linux container, 2026-10-04). Agent turns dominate either way.
+- **Security.** Identity stops agents from impersonating each other by accident. It is not a boundary against a hostile process running as the same OS user, and messages are stored in plaintext. Details below.
+
 ## Terminal UI
 
-The terminals live in the Rust implementation on the `rust-port` branch and are not built from this branch: `aos`, the console in the demo, and `acs`, the earlier terminal UI. Both open the same `bus.db`, tokens and signal files as `qagent`, so all three can drive one bus. To install `aos`, check out `rust-port` and run `./rust/install-aos.sh` (needs the Rust toolchain and a C compiler); `aos demo` opens a sample bus in a temporary directory, and plain `aos` opens yours. Keys, commands and limits are in [`rust/AOS.md`](https://github.com/anon5376/agent-communication-system/blob/rust-port/rust/AOS.md); `acs` install steps are in the [`rust-port` README](https://github.com/anon5376/agent-communication-system/blob/rust-port/README.md), and command differences in [Implementation differences](docs/FULL-GUIDE.md#implementation-differences).
+`aos` (above) and `acs`, the earlier terminal UI, are built from the `rust-port` branch. Both open the same `bus.db` as `qagent`, so all three can drive one bus. `acs` install steps are in the [`rust-port` README](https://github.com/anon5376/agent-communication-system/blob/rust-port/README.md), and command differences in [Implementation differences](docs/FULL-GUIDE.md#implementation-differences).
 
 ## Documentation
 

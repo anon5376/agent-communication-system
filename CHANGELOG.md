@@ -6,6 +6,81 @@ All notable changes to the Agent Communication System. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Supervisors stop before running work when configuration limits cannot be
+  applied, instead of continuing after rejecting an entire mixed policy update.
+- `qagent` no longer prints Node's `node:sqlite` ExperimentalWarning on every
+  command; other warnings still print.
+- `docs/free-ai-setup.md` now builds a config that validates: it says the
+  supervisor reads `<project>/.qagent/config.json` (started from a copy of the
+  shipped `agent-bus.config.json`) and adds the provider and harness entries its
+  models refer to. It and `docs/provider-support.md` no longer say that
+  `qagent doctor` scans for providers, prints login commands or checks logins.
+- README leads with ownership, recovery and independent review, installs the
+  released `aos` binary, and states what is and is not tested. Provider support
+  no longer labels unit-tested adapters "invocation tested"; they are "live
+  unverified". Older marketing docs carry a superseded note.
+- **Delegation and claim limits are enforced by the core.** `createTask`
+  refuses an agent without `canDelegate` (workers by default) that assigns work
+  to someone else or files unassigned work; it may still file tasks for
+  itself. The supervisor copies the project configuration's limits
+  (`canDelegate`, `allowedChildAgentIds`, `maxDelegationDepth`,
+  `constraints.maxConcurrentTasks`) into the bus as a policy stored in
+  `identities.permissions_json` (no schema change), so the TypeScript MCP
+  server, CLI and supervisor all enforce them inside the write transaction
+  (the Rust build on rust-port does not read the policy yet). An agent
+  can narrow its own policy but only the operator can widen it. Token
+  rotation now keeps stored permissions.
+- **Queued work is scheduled without fresh mail.** A supervisor starts a turn
+  for claimable tasks that were already waiting when it started, and checks
+  again after every wait timeout, so work freed by an event about another
+  agent's task is no longer stranded. Each task is offered once per change;
+  an unchanged task the agent leaves alone is offered again after 30 minutes,
+  not at every wait timeout, so an idle agent does not pay for a turn every
+  few minutes.
+- **A wait no longer misses mail that lands as it starts.** Mail or a task
+  event written between `waitForMail`'s empty inbox check and the start of the
+  wait was invisible until the wait timed out; the waiter now checks that gap
+  and wakes at once (seen as a flaky supervisor test in CI).
+- **Worktree isolation fails closed.** Under `"isolation": "worktree"` the
+  supervisor runs one claimed task per turn in its worktree; if no worktree
+  can be made it notes why, releases the claim and runs no turn. A pinned
+  session under worktree isolation is refused at start. `claim --worktree`
+  and `bus_task_claim` with `worktree: true` release the claim instead of
+  keeping it without a checkout.
+  Mail about a task other than the one a turn holds is kept for a later turn
+  instead of being marked read unseen.
+- **Supervisor ownership is atomic.** The pid file is taken with a hard link
+  (it fails if held), and a stale file is removed only under a reap lock, so
+  two simultaneous starters can no longer both run one agent. A pid reused by
+  an unrelated process after a reboot no longer blocks a start on Linux.
+- **Configuration budgets are enforced, honestly.** `optionalTokenBudget` and
+  `optionalApiCostBudgetUSD` stop new turns once the usage the CLI reported
+  reaches them. They are checked between turns, so one turn can overshoot, and
+  a dollar budget on a CLI that reports no usage is refused at start.
+- Worktree creation no longer blocks on a stale lock: a lock whose holder
+  died, never wrote its owner file, or stopped heartbeating (pid reuse) is
+  swept. Worktree cleanup (`task worktree --remove`, `prune`) now works after
+  the task's project directory is deleted; if the whole repository is gone the
+  orphaned checkout is deleted with `--force`.
+- README and docs no longer claim what the code does not back: the install
+  section leads with clone-and-build (the package is not on npm yet), review is
+  described as "by someone other than the assignee" (the gate does not check
+  model family), the `acs` TUI is labelled as the `rust-port` branch's, the
+  adapter list matches `ADAPTERS`, and the competitive analysis now includes
+  Hermes Agent. `npm run audit:public` also runs `scripts/check-readme-claims.mjs`.
+- `tests/wait-notify.test.ts` no longer fails on one slow wake-up under load:
+  the `bus_wait` test holds the median of five rounds to the bound, the signal-file test
+  asserts against the poll interval, and a fake-clock test pins the poll bound.
+- Expired claims can be released and requeued; a batch of expired claims
+  requeues correctly after the mid-batch expiry sweep; the auto-requeue
+  sweep no longer eats live claims.
+- `public-release-audit` accepts an exact-address `allowedEmails` whitelist
+  (the published SECURITY.md contact) — main's CI is green again.
+- Claim-race test no longer crashes the suite on an expected child-stdin
+  EPIPE.
+
 ### Added
 
 - **Devin CLI adapter** — `adapter: "devin"` runs `devin -p <brief>
@@ -59,6 +134,12 @@ All notable changes to the Agent Communication System. Format follows
 - **Demo + docs** — `acs` TUI demo GIF in the README, competitive analysis,
   promotion playbook, standout-features list, launch copy, and a full
   marketing strategy with a 30-day calendar.
+- **Recovery example** — `examples/worker-death-recovery.sh` kills a worker
+  mid-task with SIGKILL and walks the task through stalled detection, requeue,
+  a second worker's submission, its refused review and an independent
+  review, on a throwaway bus with no agent CLI. Runs with `qagent` or `aos`.
+- **Launch docs** — `docs/launch-copy.md` rewritten around a claims-and-evidence
+  table; `docs/launch-checklist.md` lists the owner-only steps.
 
 ### Changed
 
@@ -69,37 +150,6 @@ All notable changes to the Agent Communication System. Format follows
   `publishConfig`, `prepack` build, `repository` and `mcpName` metadata;
   the README install section is written for the post-publish state; until the
   first publish it leads with clone, `npm ci`, `npm run build`, `npm link`.
-
-### Fixed
-
-- `qagent` no longer prints Node's `node:sqlite` ExperimentalWarning on every
-  command; other warnings still print.
-- `docs/free-ai-setup.md` now builds a config that validates: it says the
-  supervisor reads `<project>/.qagent/config.json` (started from a copy of the
-  shipped `agent-bus.config.json`) and adds the provider and harness entries its
-  models refer to. It and `docs/provider-support.md` no longer say that
-  `qagent doctor` scans for providers, prints login commands or checks logins.
-- Worktree creation no longer blocks on a stale lock: a lock whose holder
-  died, never wrote its owner file, or stopped heartbeating (pid reuse) is
-  swept. Worktree cleanup (`task worktree --remove`, `prune`) now works after
-  the task's project directory is deleted; if the whole repository is gone the
-  orphaned checkout is deleted with `--force`.
-- README and docs no longer claim what the code does not back: the install
-  section leads with clone-and-build (the package is not on npm yet), review is
-  described as "by someone other than the assignee" (the gate does not check
-  model family), the `acs` TUI is labelled as the `rust-port` branch's, the
-  adapter list matches `ADAPTERS`, and the competitive analysis now includes
-  Hermes Agent. `npm run audit:public` also runs `scripts/check-readme-claims.mjs`.
-- `tests/wait-notify.test.ts` no longer fails on one slow wake-up under load:
-  the `bus_wait` test holds the median of five rounds to the bound, the signal-file test
-  asserts against the poll interval, and a fake-clock test pins the poll bound.
-- Expired claims can be released and requeued; a batch of expired claims
-  requeues correctly after the mid-batch expiry sweep; the auto-requeue
-  sweep no longer eats live claims.
-- `public-release-audit` accepts an exact-address `allowedEmails` whitelist
-  (the published SECURITY.md contact) — main's CI is green again.
-- Claim-race test no longer crashes the suite on an expected child-stdin
-  EPIPE.
 
 ## [0.2.0] — 2026-09-30
 

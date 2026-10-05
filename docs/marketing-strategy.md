@@ -1,5 +1,7 @@
 # ACS Marketing Strategy
 
+> **Superseded for launch (2026-10-04).** Use [launch-copy.md](launch-copy.md) for wording and [launch-checklist.md](launch-checklist.md) for steps. This file is kept as background research; its numbers and claims (binary size, speed, star counts, feature status) were not re-checked and some are wrong, for example the `aos` binary is about 5 MB, not 3 or 4 MB. Check any claim against the [claims table](launch-copy.md#claims-and-evidence) before reusing it.
+
 The complete go-to-market plan for `qagent` / the `acs` TUI. Builds on
 `competitive-analysis.md` (where the market gap is), `promotion-playbook.md`
 (channel mechanics), `standout-features.md` (what to lead with), and

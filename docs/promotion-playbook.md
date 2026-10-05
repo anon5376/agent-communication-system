@@ -1,5 +1,7 @@
 # ACS Promotion Plan
 
+> **Superseded for launch (2026-10-04).** Use [launch-copy.md](launch-copy.md) for wording and [launch-checklist.md](launch-checklist.md) for steps. This file is kept as background research; its numbers and claims (binary size, speed, star counts, feature status) were not re-checked and some are wrong, for example the `aos` binary is about 5 MB, not 3 or 4 MB. Check any claim against the [claims table](launch-copy.md#claims-and-evidence) before reusing it.
+
 **Positioning wedge.** The crowded corner of this space is "run agents in parallel" UIs (Vibe Kanban, Claude Squad). ACS is different: it's the coordination *substrate* — durable agent-to-agent mail, task queues with claims/leases, review gates, shared state in one SQLite file. Lead everywhere with: **"your coding agents get an inbox, a task queue, and shared state — in one SQLite file, no daemon, no cloud."**
 
 ## Fix before promoting (gates several channels)
