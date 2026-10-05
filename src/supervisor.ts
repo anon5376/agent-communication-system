@@ -8,7 +8,7 @@
  */
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, linkSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, fstatSync, ftruncateSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AdapterContext, HarnessInvocation, McpCommand, getHarnessAdapter } from "./adapters.js";
@@ -152,6 +152,38 @@ export interface SuperviseOptions {
   autoRequeueMs?: number;
   fakeHarnessPath?: string;
   log?: (line: string) => void;
+  /** First retry delay after a failed turn or round, doubling up to 30x. Default 2000. */
+  retryBaseMs?: number;
+}
+
+/**
+ * Turns that fail in a row before the supervisor stops itself and tells the operator:
+ * a CLI that lost its login should not burn every task and the night.
+ */
+export const MAX_FAILED_TURNS = 5;
+/** Size at which logs/<agent>.log and logs/<agent>.out move to <file>.1 (one older copy kept). */
+export const MAX_LOG_BYTES = 10 * 1024 * 1024;
+/** How often a running turn renews the agent's claims. */
+export const KEEPALIVE_MS = 60_000;
+
+function rotateLog(path: string): void {
+  try { if (statSync(path).size > MAX_LOG_BYTES) renameSync(path, `${path}.1`); } catch { /* no log yet */ }
+}
+
+/**
+ * The launcher appends the supervisor's stdout to logs/<agent>.out and every turn's CLI output
+ * is teed there. When that file is our stdout and past the cap, copy it to .out.1 and truncate
+ * it in place (it is open for append, so writing carries on at the new end).
+ */
+function capStdoutFile(path: string): void {
+  try {
+    const file = statSync(path);
+    if (file.size <= MAX_LOG_BYTES) return;
+    const out = fstatSync(1);
+    if (out.ino !== file.ino || out.dev !== file.dev) return;
+    copyFileSync(path, `${path}.1`);
+    ftruncateSync(1, 0);
+  } catch { /* best effort */ }
 }
 
 export interface SessionRecord {
@@ -396,7 +428,9 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
   const log = (line: string) => {
     const stamped = `[${new Date().toISOString()}] ${line}`;
     write(stamped);
-    try { appendFileSync(join(logDir, `${options.agentId}.log`), `${stamped}\n`); } catch { /* best effort */ }
+    const logPath = join(logDir, `${options.agentId}.log`);
+    rotateLog(logPath);
+    try { appendFileSync(logPath, `${stamped}\n`); } catch { /* best effort */ }
   };
 
   let release: (() => void) | null = null;
@@ -438,8 +472,22 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
     }
     let operator: Identity | null = null;
     try { operator = bus.identify(OPERATOR_ID); } catch { /* no operator token on this bus */ }
-    // The configuration's limits go into the bus, where every call path enforces them.
-    bus.setAgentPolicy(operator ?? me, me.agentId, policyFromConfig(config, agent));
+    // The configuration's limits go into the bus, where every call path enforces them. No work
+    // runs until they are in: a rejected policy stops the supervisor, a locked bus is waited out.
+    const startupRetryBaseMs = options.retryBaseMs ?? 2_000;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        bus.setAgentPolicy(operator ?? me, me.agentId, policyFromConfig(config, agent));
+        break;
+      } catch (error) {
+        if (error instanceof BusError || !/database is (locked|busy)/i.test((error as Error).message)) throw error;
+        if (options.signal?.aborted) return;
+        const delay = retryDelayMs(attempt) * startupRetryBaseMs / 2_000;
+        log(`configuration limits not applied yet (${(error as Error).message}); retrying in ${delay / 1000}s`);
+        await sleep(delay, options.signal);
+        if (options.signal?.aborted) return;
+      }
+    }
     const qagentBin = options.qagentBin ?? DEFAULT_QAGENT_BIN;
     const isolationEnv: Record<string, string> = worktreeMode ? { QAGENT_REQUIRE_WORKTREE: "1" } : {};
     const mcpCommand = mcpCommandFor(me.agentId, bus.dbPath, qagentBin, isolationEnv);
@@ -482,205 +530,259 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
     let budgetNoticed: string | null = null;
     let costNoticed = false;
     let consecutiveFailures = 0;
+    const retryBaseMs = options.retryBaseMs ?? 2_000;
+    const backoff = (failures: number) => retryDelayMs(failures) * retryBaseMs / 2_000;
+    // A bus or file error inside a round (a locked database, a full disk) ends the round, not
+    // the supervisor. Mail the round read but no turn used goes back to deferred for the next one.
+    let errorStreak = 0;
+    let unused: Message[] = [];
     log(`supervising ${agent.id} via ${agent.harnessDefinition.id} in ${workdir} (bus ${bus.dbPath}${managed ? ", supervisor-managed tasks" : ""}${worktreeMode ? ", one task per turn in its own git worktree" : ""})`);
 
     while (!options.signal?.aborted) {
-      const over = budgetReached(config, session);
-      if (over) {
-        if (budgetNoticed !== over) log(`budget reached (${over}); no new turns until the configuration budget is raised`);
-        budgetNoticed = over;
-        await sleep(waitMs, options.signal);
-        continue;
-      }
-      // Existing claimable work or unread mail starts a turn at once; only an idle agent waits.
-      const waiting = backlog();
-      if (!waiting.length && !deferred.length && bus.unreadCount(me.agentId) === 0) {
-        const waited = await bus.waitForMail(me, { timeoutMs: waitMs, signal: options.signal });
-        if (options.signal?.aborted) break;
-        sweepStalled();
-        if (waited.status === "timeout") continue;
-      } else {
-        sweepStalled();
-      }
-
-      // Consume what is unread, so the next wait does not deliver it again.
-      let messages = [...deferred, ...bus.inbox(me, { limit: 50 }).messages];
-      deferred = [];
-      if (cancellationOnly(messages)) {
-        log("received cancellation control; no model turn started");
-        continue;
-      }
-
-      const role = busAgent.role;
-      const taskIds = new Set<number>();
-      for (const message of messages) {
-        if (message.taskId && (message.type === "task" || message.type === "feedback") && !message.subject.startsWith("[ACCEPTED")) taskIds.add(message.taskId);
-      }
-      const candidates = backlog();
-      for (const task of candidates) markOffered(task);
-      const tasks: Task[] = [];
-      let worktree: TaskWorktree | null = null;
-      if (worktreeMode) {
-        // isolation "worktree": the supervisor claims exactly one task per turn and runs the turn in
-        // that task's checkout. If no checkout can be made, the claim is released and no turn runs:
-        // the work never falls back to the shared directory. Other tasks wait for later turns.
-        const order = [...taskIds, ...candidates.map((task) => task.id)];
-        let focus: Task | null = null;
-        let claimedNow = false;
-        for (const id of new Set(order)) {
-          try {
-            const before = bus.getTask(id);
-            const held = holdOrClaim(id);
-            if (held) { focus = held; claimedNow = before.state !== "claimed"; break; }
-          } catch (error) {
-            log(`claim of task #${id} failed: ${(error as Error).message}`);
-          }
-        }
-        if (focus) {
-          try {
-            worktree = await ensureTaskWorktree(focus, home);
-          } catch (error) {
-            const reason = `worktree isolation unavailable, so no turn ran in the shared checkout: ${(error as Error).message}`;
-            log(`task #${focus.id}: ${reason}`);
-            try {
-              bus.noteTask(me, focus.id, reason);
-              if (claimedNow) bus.releaseTask(me, focus.id, "worktree isolation unavailable");
-            } catch (releaseError) {
-              log(`task #${focus.id}: could not release after the worktree failure: ${(releaseError as Error).message}`);
-            }
-            markOffered(bus.getTask(focus.id));
-            // Mail about the refused task is answered by its note; all other mail waits for a later turn.
-            const refused = focus.id;
-            deferred = messages.filter((message) => message.taskId !== refused);
-            continue;
-          }
-          tasks.push(focus);
-          // Mail about tasks this turn does not hold would invite work outside the checkout.
-          deferred = messages.filter((message) => message.taskId && message.taskId !== focus!.id);
-          messages = messages.filter((message) => !message.taskId || message.taskId === focus!.id);
-          taskIds.clear();
-          taskIds.add(focus.id);
-        }
-      } else if (managed) {
-        // Port of /task/start: claim for a CLI that has no bus tools.
-        for (const id of taskIds) {
-          try {
-            const held = holdOrClaim(id);
-            if (held) tasks.push(held);
-          } catch (error) {
-            log(`claim of task #${id} failed: ${(error as Error).message}`);
-          }
-        }
-        if (!messages.length) {
-          try {
-            tasks.push(bus.claimTask(me, null));
-          } catch (error) {
-            if (!(error instanceof BusError && (error.code === "not_found" || error.code === "conflict"))) throw error;
-          }
-        }
-      } else if (!messages.length) {
-        tasks.push(...candidates);
-      }
-      if (!messages.length && !tasks.length) continue;
-
-      const turnDir = worktree?.workdir ?? workdir;
-      // CLI sessions are tied to their directory: a worktree turn resumes that task's own session.
-      const taskSession = worktree ? session.taskSessions?.[worktree.branch] ?? null : null;
-      if (worktree) log(`task #${worktree.taskId}: running in worktree ${worktree.workdir} (branch ${worktree.branch})`);
-      let prompt = buildBrief(agent, messages, tasks, managed);
-      if (worktree) {
-        prompt += `\nTask #${worktree.taskId} is claimed for you. Work only in the git worktree ${worktree.workdir} on branch ${worktree.branch}; commit your changes there.`;
-      } else if (worktreeMode) {
-        prompt += "\nThis bus isolates each task in its own git worktree: claim a task before editing files, and edit only in the worktree the claim returns.";
-      }
-
-      const context: AdapterContext = {
-        agent,
-        prompt,
-        sessionId: worktree ? taskSession : session.sessionId,
-        pinnedSessionId,
-        workdir: turnDir,
-        mcpServerPath: qagentBin,
-        fakeHarnessPath: options.fakeHarnessPath ?? DEFAULT_FAKE_HARNESS,
-        busEnvironment: { QAGENT_AGENT_ID: me.agentId, QAGENT_BUS_DB: bus.dbPath, QAGENT_BLOCK_SEC: blockSec, AGENT_BUS_BLOCK_SEC: blockSec, ...isolationEnv },
-        mcpCommand,
-      };
-      await adapter.prepare?.(context);
-      const invocation = adapter.build(context);
-      bus.setStatus(me, "working");
-      let processResult: Awaited<ReturnType<typeof runHarnessProcess>>;
+      unused = [];
       try {
-        processResult = await runHarnessProcess(invocation, agent, turnDir, (pid) => { childPid = pid; });
-      } finally {
-        childPid = null;
-        if (bus.getAgent(me.agentId)?.storedStatus === "working") bus.setStatus(me, "idle");
-      }
-      if (options.signal?.aborted) {
-        log(`stopped during a turn; ${agent.harnessDefinition.id} process group killed`);
-        break;
-      }
-      const normalized = adapter.parse(processResult.output, processResult.code);
-      const sessionMismatch = resumedUnexpectedSession(pinnedSessionId, normalized.sessionId);
-      session.turns += 1;
-      session.inputTokens += normalized.usage.inputTokens;
-      session.outputTokens += normalized.usage.outputTokens;
-      session.totalTokens += normalized.usage.totalTokens;
-      session.costUSD += normalized.usage.costUSD;
-      session.latencyMs += processResult.durationMs;
-      if (dollarBudget !== null && dollarBudget !== undefined && !costNoticed && normalized.usage.costUSD === 0) {
-        costNoticed = true;
-        log(`${agent.harnessDefinition.id} reported no cost for this turn; the $${dollarBudget} budget only counts cost the CLI reports`);
-      }
-      if (pinnedSessionId) session.sessionId = pinnedSessionId;
-      else if (normalized.sessionId && worktree) session.taskSessions = { ...session.taskSessions, [worktree.branch]: normalized.sessionId };
-      else if (normalized.sessionId) session.sessionId = normalized.sessionId;
-      writeFileSync(sessionPath, JSON.stringify(session, null, 2));
-
-      const reportIds = new Set<number>([...taskIds, ...tasks.map((task) => task.id)]);
-      const failed = processResult.code !== 0 || processResult.timedOut || normalized.malformed || sessionMismatch;
-      if (failed) {
-        consecutiveFailures += 1;
-        const error = processResult.timedOut
-          ? `harness timed out after ${processResult.durationMs} ms`
-          : sessionMismatch
-            ? `harness resumed unexpected session ${normalized.sessionId}; expected ${pinnedSessionId}`
-            : normalized.malformed ? "harness returned malformed output" : `harness exited ${processResult.code}`;
-        // Port of /task/failure: each task this turn still holds is failed back (retry or escalate).
-        for (const id of reportIds) {
-          try {
-            const task = bus.getTask(id);
-            if (task.assignee === me.agentId && task.state === "claimed") bus.failTask(me, id, `supervisor: ${error}`);
-          } catch (failError) {
-            log(`failure report on task #${id} rejected: ${(failError as Error).message}`);
-          }
+        const over = budgetReached(config, session);
+        if (over) {
+          if (budgetNoticed !== over) log(`budget reached (${over}); no new turns until the configuration budget is raised`);
+          budgetNoticed = over;
+          await sleep(waitMs, options.signal);
+          continue;
         }
-        const delay = retryDelayMs(consecutiveFailures);
-        log(`${error}; backing off ${delay / 1000}s`);
-        await sleep(delay, options.signal);
-        continue;
-      }
+        // Existing claimable work or unread mail starts a turn at once; only an idle agent waits.
+        const waiting = backlog();
+        if (!waiting.length && !deferred.length && bus.unreadCount(me.agentId) === 0) {
+          const waited = await bus.waitForMail(me, { timeoutMs: waitMs, signal: options.signal });
+          if (options.signal?.aborted) break;
+          sweepStalled();
+          if (waited.status === "timeout") continue;
+        } else {
+          sweepStalled();
+        }
 
-      consecutiveFailures = 0;
-      if (invocation.autoReport) {
-        const structured = normalized.structured ?? {};
-        for (const id of reportIds) {
+        // Consume what is unread, so the next wait does not deliver it again.
+        let messages = [...deferred, ...bus.inbox(me, { limit: 50 }).messages];
+        deferred = [];
+        unused = messages;
+        if (cancellationOnly(messages)) {
+          log("received cancellation control; no model turn started");
+          continue;
+        }
+
+        const role = busAgent.role;
+        const taskIds = new Set<number>();
+        for (const message of messages) {
+          if (message.taskId && (message.type === "task" || message.type === "feedback") && !message.subject.startsWith("[ACCEPTED")) taskIds.add(message.taskId);
+        }
+        const candidates = backlog();
+        for (const task of candidates) markOffered(task);
+        const tasks: Task[] = [];
+        let worktree: TaskWorktree | null = null;
+        if (worktreeMode) {
+          // isolation "worktree": the supervisor claims exactly one task per turn and runs the turn in
+          // that task's checkout. If no checkout can be made, the claim is released and no turn runs:
+          // the work never falls back to the shared directory. Other tasks wait for later turns.
+          const order = [...taskIds, ...candidates.map((task) => task.id)];
+          let focus: Task | null = null;
+          let claimedNow = false;
+          for (const id of new Set(order)) {
+            try {
+              const before = bus.getTask(id);
+              const held = holdOrClaim(id);
+              if (held) { focus = held; claimedNow = before.state !== "claimed"; break; }
+            } catch (error) {
+              log(`claim of task #${id} failed: ${(error as Error).message}`);
+            }
+          }
+          if (focus) {
+            try {
+              worktree = await ensureTaskWorktree(focus, home);
+            } catch (error) {
+              const reason = `worktree isolation unavailable, so no turn ran in the shared checkout: ${(error as Error).message}`;
+              log(`task #${focus.id}: ${reason}`);
+              try {
+                bus.noteTask(me, focus.id, reason);
+                if (claimedNow) bus.releaseTask(me, focus.id, "worktree isolation unavailable");
+              } catch (releaseError) {
+                log(`task #${focus.id}: could not release after the worktree failure: ${(releaseError as Error).message}`);
+              }
+              markOffered(bus.getTask(focus.id));
+              // Mail about the refused task is answered by its note; all other mail waits for a later turn.
+              const refused = focus.id;
+              deferred = messages.filter((message) => message.taskId !== refused);
+              continue;
+            }
+            tasks.push(focus);
+            // Mail about tasks this turn does not hold would invite work outside the checkout.
+            deferred = messages.filter((message) => message.taskId && message.taskId !== focus!.id);
+            messages = messages.filter((message) => !message.taskId || message.taskId === focus!.id);
+            taskIds.clear();
+            taskIds.add(focus.id);
+          }
+        } else if (managed) {
+          // Port of /task/start: claim for a CLI that has no bus tools.
+          for (const id of taskIds) {
+            try {
+              const held = holdOrClaim(id);
+              if (held) tasks.push(held);
+            } catch (error) {
+              log(`claim of task #${id} failed: ${(error as Error).message}`);
+            }
+          }
+          if (!messages.length) {
+            try {
+              tasks.push(bus.claimTask(me, null));
+            } catch (error) {
+              if (!(error instanceof BusError && (error.code === "not_found" || error.code === "conflict"))) throw error;
+            }
+          }
+        } else if (!messages.length) {
+          tasks.push(...candidates);
+        }
+        if (!messages.length && !tasks.length) continue;
+
+        const turnDir = worktree?.workdir ?? workdir;
+        // CLI sessions are tied to their directory: a worktree turn resumes that task's own session.
+        const taskSession = worktree ? session.taskSessions?.[worktree.branch] ?? null : null;
+        if (worktree) log(`task #${worktree.taskId}: running in worktree ${worktree.workdir} (branch ${worktree.branch})`);
+        let prompt = buildBrief(agent, messages, tasks, managed);
+        if (worktree) {
+          prompt += `\nTask #${worktree.taskId} is claimed for you. Work only in the git worktree ${worktree.workdir} on branch ${worktree.branch}; commit your changes there.`;
+        } else if (worktreeMode) {
+          prompt += "\nThis bus isolates each task in its own git worktree: claim a task before editing files, and edit only in the worktree the claim returns.";
+        }
+
+        const context: AdapterContext = {
+          agent,
+          prompt,
+          sessionId: worktree ? taskSession : session.sessionId,
+          pinnedSessionId,
+          workdir: turnDir,
+          mcpServerPath: qagentBin,
+          fakeHarnessPath: options.fakeHarnessPath ?? DEFAULT_FAKE_HARNESS,
+          busEnvironment: { QAGENT_AGENT_ID: me.agentId, QAGENT_BUS_DB: bus.dbPath, QAGENT_BLOCK_SEC: blockSec, AGENT_BUS_BLOCK_SEC: blockSec, ...isolationEnv },
+          mcpCommand,
+        };
+        await adapter.prepare?.(context);
+        const invocation = adapter.build(context);
+        bus.setStatus(me, "working");
+        // From here a paid turn runs: its mail is used, and an error must not hand it to another turn.
+        unused = [];
+        let processResult: Awaited<ReturnType<typeof runHarnessProcess>>;
+        // A turn longer than the claim TTL keeps its tasks: renew the claims once a minute.
+        const keepalive = setInterval(() => { try { bus.renewClaims(me); } catch { /* next beat */ } }, KEEPALIVE_MS);
+        try {
+          processResult = await runHarnessProcess(invocation, agent, turnDir, (pid) => { childPid = pid; });
+        } finally {
+          clearInterval(keepalive);
+          capStdoutFile(join(logDir, `${options.agentId}.out`));
+          childPid = null;
           try {
-            const task = bus.getTask(id);
-            // A CLI that submitted through its own bus tools leaves nothing to report.
-            if (task.assignee !== me.agentId || task.state !== "claimed") continue;
-            bus.submitTask(me, id, {
-              summary: normalized.text.slice(0, 20_000),
-              details: "auto-submitted by the supervisor for a harness without bus tool calls",
-              changedFiles: structuredArray(structured.changedFiles).map(String),
-              artifacts: structuredArray(structured.artifacts),
-              validation: structuredArray(structured.validation),
-            });
+            if (bus.getAgent(me.agentId)?.storedStatus === "working") bus.setStatus(me, "idle");
           } catch (error) {
-            log(`auto-submit failed for task #${id}: ${(error as Error).message}`);
+            log(`could not set status idle: ${(error as Error).message}`);
           }
         }
+        if (options.signal?.aborted) {
+          log(`stopped during a turn; ${agent.harnessDefinition.id} process group killed`);
+          break;
+        }
+        const normalized = adapter.parse(processResult.output, processResult.code);
+        const sessionMismatch = resumedUnexpectedSession(pinnedSessionId, normalized.sessionId);
+        session.turns += 1;
+        session.inputTokens += normalized.usage.inputTokens;
+        session.outputTokens += normalized.usage.outputTokens;
+        session.totalTokens += normalized.usage.totalTokens;
+        session.costUSD += normalized.usage.costUSD;
+        session.latencyMs += processResult.durationMs;
+        if (dollarBudget !== null && dollarBudget !== undefined && !costNoticed && normalized.usage.costUSD === 0) {
+          costNoticed = true;
+          log(`${agent.harnessDefinition.id} reported no cost for this turn; the $${dollarBudget} budget only counts cost the CLI reports`);
+        }
+        if (pinnedSessionId) session.sessionId = pinnedSessionId;
+        else if (normalized.sessionId && worktree) session.taskSessions = { ...session.taskSessions, [worktree.branch]: normalized.sessionId };
+        else if (normalized.sessionId) session.sessionId = normalized.sessionId;
+        try {
+          writeFileSync(sessionPath, JSON.stringify(session, null, 2));
+        } catch (error) {
+          log(`could not save usage to ${sessionPath}: ${(error as Error).message}`);
+        }
+
+        const reportIds = new Set<number>([...taskIds, ...tasks.map((task) => task.id)]);
+        const failed = processResult.code !== 0 || processResult.timedOut || normalized.malformed || sessionMismatch;
+        if (failed) {
+          consecutiveFailures += 1;
+          const error = processResult.timedOut
+            ? `harness timed out after ${processResult.durationMs} ms`
+            : sessionMismatch
+              ? `harness resumed unexpected session ${normalized.sessionId}; expected ${pinnedSessionId}`
+              : normalized.malformed ? "harness returned malformed output" : `harness exited ${processResult.code}`;
+          // Port of /task/failure: each task this turn still holds is failed back (retry or escalate).
+          for (const id of reportIds) {
+            try {
+              const task = bus.getTask(id);
+              if (task.assignee === me.agentId && task.state === "claimed") bus.failTask(me, id, `supervisor: ${error}`);
+            } catch (failError) {
+              log(`failure report on task #${id} rejected: ${(failError as Error).message}`);
+            }
+          }
+          // Mail that names no task is offered to the next turn instead of being lost with this
+          // one. Task mail is not: a failed-back task gets a retry message, and any other task's
+          // state on the bus (claimable or not) already decides whether it comes back.
+          deferred = [...messages.filter((m) => m.taskId === null), ...deferred];
+          if (consecutiveFailures >= MAX_FAILED_TURNS) {
+            const why = `${consecutiveFailures} turns failed in a row; last: ${error}`;
+            try {
+              bus.send(me, {
+                to: OPERATOR_ID,
+                subject: `${me.agentId} stopped: ${consecutiveFailures} turns failed in a row`,
+                body: `${me.agentId}'s supervisor stopped after ${consecutiveFailures} failed turns in a row, so it stops using up tasks and spend. `
+                  + `The last one: ${error}. Its log is logs/${me.agentId}.log under the bus folder. `
+                  + `Fix the cause (often the CLI's login, or the CLI missing from PATH), then start the supervisor again.`,
+                type: "info",
+              });
+            } catch (sendError) {
+              log(`could not tell the operator: ${(sendError as Error).message}`);
+            }
+            log(`stopping: ${why}`);
+            break;
+          }
+          const delay = backoff(consecutiveFailures);
+          log(`${error}; backing off ${delay / 1000}s`);
+          await sleep(delay, options.signal);
+          continue;
+        }
+
+        consecutiveFailures = 0;
+        if (invocation.autoReport) {
+          const structured = normalized.structured ?? {};
+          for (const id of reportIds) {
+            try {
+              const task = bus.getTask(id);
+              // A CLI that submitted through its own bus tools leaves nothing to report.
+              if (task.assignee !== me.agentId || task.state !== "claimed") continue;
+              bus.submitTask(me, id, {
+                summary: normalized.text.slice(0, 20_000),
+                details: "auto-submitted by the supervisor for a harness without bus tool calls",
+                changedFiles: structuredArray(structured.changedFiles).map(String),
+                artifacts: structuredArray(structured.artifacts),
+                validation: structuredArray(structured.validation),
+              });
+            } catch (error) {
+              log(`auto-submit failed for task #${id}: ${(error as Error).message}`);
+            }
+          }
+        }
+        log(`turn complete in ${processResult.durationMs} ms`);
+        errorStreak = 0;
+      } catch (error) {
+        const kept = new Set(deferred.map((m) => m.seq));
+        deferred = [...unused.filter((m) => !kept.has(m.seq)), ...deferred];
+        unused = [];
+        errorStreak += 1;
+        const delay = backoff(errorStreak);
+        log(`round failed: ${(error as Error).message}; retrying in ${delay / 1000}s`);
+        await sleep(delay, options.signal);
       }
-      log(`turn complete in ${processResult.durationMs} ms`);
     }
   } finally {
     options.signal?.removeEventListener("abort", stopChild);

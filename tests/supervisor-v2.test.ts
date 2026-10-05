@@ -8,7 +8,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { resolveAgent } from "../src/config.js";
 import { Bus } from "../src/core/bus.js";
-import { buildBrief, mcpCommandFor, runHarnessProcess, sanitizedEnvironment } from "../src/supervisor.js";
+import { DatabaseSync } from "node:sqlite";
+import { MAX_FAILED_TURNS, buildBrief, mcpCommandFor, runHarnessProcess, sanitizedEnvironment, supervise } from "../src/supervisor.js";
 import { testConfig } from "./helpers.js";
 
 const QAGENT = fileURLToPath(new URL("../src/qagent.js", import.meta.url));
@@ -385,4 +386,70 @@ test("the brief and MCP command carry the agent's own identity and no bus_wait",
   assert.match(native, /bus_task_claim/);
   assert.match(native, /Do NOT call bus_wait/);
   assert.match(buildBrief(agent, [message], [], true), /supervisor has claimed/);
+});
+
+test("after repeated failed turns the supervisor stops itself, tells the operator, and offers the mail to every retry", { timeout: 60_000 }, async (t) => {
+  const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
+  const config = testConfig();
+  config.harnesses.fake.features.mcp = false;
+  config.agents["fake-small"].harnessOptions = { mode: "fail" };
+  f.bus.send(f.bus.identify("operator"), { to: "fake-small", subject: "look at this", body: "please" });
+  await supervise({
+    agentId: "fake-small",
+    workdir: f.project,
+    dbPath: f.dbPath,
+    config,
+    waitMs: 1_000,
+    retryBaseMs: 20,
+    qagentBin: QAGENT,
+    fakeHarnessPath: FAKE_HARNESS,
+    log: () => {},
+  });
+  // One plain message drove every retry: a failed turn hands its mail to the next one.
+  const session = JSON.parse(readFileSync(join(f.home, "sessions", "fake-small.json"), "utf8"));
+  assert.equal(session.turns, MAX_FAILED_TURNS);
+  const toOperator = f.bus.inbox(f.bus.identify("operator"), { peek: true }).messages;
+  assert.ok(toOperator.some((m) => m.subject === `fake-small stopped: ${MAX_FAILED_TURNS} turns failed in a row`));
+  assert.equal(existsSync(join(f.home, "supervisors", "fake-small.pid")), false, "the lock is released");
+});
+
+test("a supervisor keeps going through a bus locked past the busy timeout", { timeout: 60_000 }, async (t) => {
+  const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
+  const config = testConfig();
+  config.harnesses.fake.features.mcp = false;
+  const lines: string[] = [];
+  const holder = new DatabaseSync(f.dbPath);
+  holder.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const running = supervise({
+    agentId: "fake-small",
+    workdir: f.project,
+    dbPath: f.dbPath,
+    config,
+    waitMs: 1_000,
+    retryBaseMs: 50,
+    signal: controller.signal,
+    qagentBin: QAGENT,
+    fakeHarnessPath: FAKE_HARNESS,
+    log: (line) => { lines.push(line); },
+  });
+  let settled = false;
+  void running.then(() => { settled = true; }, () => { settled = true; });
+  // Locked at startup: the configuration limits wait for the bus instead of being skipped.
+  await until("a startup retry", 30_000, () => lines.some((l) => l.includes("configuration limits not applied yet")), () => lines.join("\n"));
+  assert.equal(settled, false, "the supervisor must not exit on a locked bus");
+  holder.exec("COMMIT");
+  const created = f.json("operator", ["task", "add", "after the lock", "--to", "fake-small"]);
+  await until("the task to be submitted", 30_000, () => f.bus.getTask(created.id).state === "submitted", () => lines.join("\n"));
+  // Locked while running: the round fails and is retried.
+  holder.exec("BEGIN IMMEDIATE");
+  await until("a failed round", 30_000, () => lines.some((l) => l.includes("round failed")), () => lines.join("\n"));
+  assert.equal(settled, false, "the supervisor must not exit on a locked bus");
+  holder.exec("COMMIT");
+  holder.close();
+  const second = f.json("operator", ["task", "add", "after the second lock", "--to", "fake-small"]);
+  await until("the second task to be submitted", 30_000, () => f.bus.getTask(second.id).state === "submitted", () => lines.join("\n"));
+  controller.abort();
+  await running;
 });
