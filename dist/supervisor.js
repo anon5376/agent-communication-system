@@ -343,6 +343,7 @@ export async function supervise(options) {
         const mcpCommand = mcpCommandFor(me.agentId, bus.dbPath, qagentBin);
         const blockSec = agent.harnessDefinition.id === "claude" ? "900" : "240";
         const waitMs = options.waitMs ?? DEFAULT_WAIT_SEC * 1000;
+        let retryClaimAtCapacity = false;
         let consecutiveFailures = 0;
         log(`supervising ${agent.id} via ${agent.harnessDefinition.id} in ${workdir} (bus ${bus.dbPath}${managed ? ", supervisor-managed tasks" : ""})`);
         let pausedSince = null;
@@ -369,7 +370,7 @@ export async function supervise(options) {
             const waited = await bus.waitForMail(me, { timeoutMs: waitMs, signal: options.signal });
             if (options.signal?.aborted)
                 break;
-            if (waited.status === "timeout")
+            if (waited.status === "timeout" && !(managed && retryClaimAtCapacity))
                 continue;
             if (holdForPause(bus, me, log))
                 continue;
@@ -403,12 +404,18 @@ export async function supervise(options) {
                 if (!messages.length) {
                     try {
                         tasks.push(bus.claimTask(me, null));
+                        retryClaimAtCapacity = false;
                     }
                     catch (error) {
-                        if (error instanceof BusError && error.code === "not_found")
+                        if (error instanceof BusError && error.code === "not_found") {
+                            retryClaimAtCapacity = false;
                             continue;
+                        }
                         if (isTaskCapacityConflict(error, me.agentId)) {
-                            log("at concurrent task limit; waiting for capacity");
+                            // Our own submit/release frees capacity without waking us; retry on timeout.
+                            if (!retryClaimAtCapacity)
+                                log("at concurrent task limit; waiting for capacity");
+                            retryClaimAtCapacity = true;
                             continue;
                         }
                         throw error;
