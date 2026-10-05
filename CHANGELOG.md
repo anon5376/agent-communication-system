@@ -8,6 +8,11 @@ All notable changes to the Agent Communication System. Format follows
 
 ### Added
 
+- **Devin CLI adapter** — `adapter: "devin"` runs `devin -p <brief>
+  --permission-mode dangerous` (plus `--resume` and `--model` when set). Devin
+  has no per-run MCP flag, so its harness declares `mcp: false`: the
+  supervisor claims the task and submits the printed answer. The provider
+  catalog gains a `cognition` entry. Not run against a real Devin account.
 - **Claude Code wake hook** — `qagent hook claude-code` runs as a background
   `Stop` hook with `asyncRewake`: when mail arrives for the agent it exits 2,
   which wakes an idle interactive Claude Code session and shows Claude the new

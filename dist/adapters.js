@@ -489,6 +489,25 @@ const hermesAdapter = {
         };
     },
 };
+/**
+ * Devin CLI (Cognition): `devin -p <prompt>` runs one turn and prints the answer. It has no per-run
+ * MCP flag (servers come from `devin mcp add` or .devin/mcp_config*.json), so its harness declares
+ * mcp: false and the supervisor claims the task and submits the printed answer.
+ */
+const devinAdapter = {
+    id: "devin",
+    build(context) {
+        const env = commonEnvironment(context);
+        const args = ["-p", context.prompt, "--permission-mode", "dangerous"];
+        if (context.sessionId)
+            args.push("--resume", context.sessionId);
+        if (context.agent.modelDefinition.exactModel)
+            args.push("--model", context.agent.modelDefinition.exactModel);
+        const autoReport = !context.agent.harnessDefinition.features.mcp;
+        return { command: context.agent.harnessDefinition.command, args, environment: env, autoReport, timeoutMs: 60 * 60_000 };
+    },
+    parse: defaultResult,
+};
 const fakeAdapter = {
     id: "fake",
     prepare(context) { mkdirSync(join(context.workdir, ".agent-bus"), { recursive: true }); },
@@ -535,6 +554,7 @@ const ADAPTERS = {
     grok: grokAdapter,
     opencode: opencodeAdapter,
     hermes: hermesAdapter,
+    devin: devinAdapter,
     fake: fakeAdapter,
     command: commandAdapter,
 };

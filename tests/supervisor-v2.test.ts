@@ -244,6 +244,34 @@ test("a harness without bus tools is supervisor-managed: it claims an unassigned
   assert.equal(await stop(supervisor), 0, supervisorLog(f, "fake-small"));
 });
 
+test("a Devin CLI agent runs one unattended print-mode turn and the supervisor submits its answer", { timeout: 60_000 }, async (t) => {
+  const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
+  // A stand-in `devin` binary that answers with the arguments it was given.
+  const devin = join(f.home, "devin");
+  writeFileSync(devin, `#!${process.execPath}\nprocess.stdout.write("devin-stub " + JSON.stringify(process.argv.slice(2)) + "\\n");\n`, { mode: 0o755 });
+  const configPath = writeConfig(f.home, (config) => {
+    config.harnesses.fake.adapter = "devin";
+    config.harnesses.fake.command = devin;
+    config.harnesses.fake.features.mcp = false;
+  });
+  const supervisor = startSupervisor(f, "fake-small", configPath);
+  t.after(() => killAll([supervisor]));
+  await until("the supervisor to hold the wait", 15_000, () => f.bus.getAgent("fake-small")?.storedStatus === "waiting", () => supervisorLog(f, "fake-small"));
+
+  const created = f.json("operator", ["task", "add", "Summarise the log", "--role", "cheap-worker"]);
+  const task = await until("the task to be submitted", 20_000, () => {
+    const current = f.bus.getTask(created.id);
+    return current.state === "submitted" ? current : null;
+  }, () => supervisorLog(f, "fake-small"));
+  const summary = task.result?.summary ?? "";
+  assert.ok(summary.startsWith('devin-stub ["-p","=== qagent:'), summary);
+  // The fixture model's exactModel is "fake-small".
+  assert.ok(summary.endsWith('","--permission-mode","dangerous","--model","fake-small"]'), summary);
+  assert.match(summary, /Summarise the log/);
+  assert.match(task.result?.details ?? "", /auto-submitted by the supervisor/);
+  assert.equal(await stop(supervisor), 0, supervisorLog(f, "fake-small"));
+});
+
 test("isolation \"worktree\" runs a single-task turn inside that task's git worktree", { timeout: 60_000 }, async (t) => {
   const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
   const gitIn = (args: string[]) => {

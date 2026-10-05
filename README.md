@@ -40,7 +40,7 @@ The command is `qagent` (`agent-bus` remains as a compatibility alias). The CLI 
 - Threads, acknowledgements, typed messages, and file or URL references.
 - Tasks with assignment, dependencies, claims, path leases, progress notes, submission, and review by someone other than the assignee.
 - A stdio MCP server with 14 agent tools and one operator-only tool.
-- Harness adapters: `claude`, `codex`, `gemini`, `kimi`, `cursor`, `grok`, `opencode`, `hermes`, plus any other CLI through the `command` adapter.
+- Harness adapters: `claude`, `codex`, `gemini`, `kimi`, `cursor`, `grok`, `opencode`, `hermes`, `devin`, plus any other CLI through the `command` adapter.
 - A localhost-only dashboard and an optional supervisor.
 - A Claude Code hook that wakes an idle interactive session when mail arrives.
 - Import tools for earlier Qagent and Python prototype stores.
