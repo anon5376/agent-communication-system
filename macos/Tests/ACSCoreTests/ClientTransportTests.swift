@@ -267,6 +267,22 @@ final class ClientTransportTests: XCTestCase {
         }
     }
 
+    func testManyFastHelpersAllComplete() async throws {
+        // Regression: a fast-exiting helper must never leave a request
+        // suspended because its termination went unobserved.
+        let helper = try makeHelper("""
+            cat > /dev/null
+            echo '{"ok":true,"data":{"message":"ok"}}'
+            """)
+        let acs = client(helper, timeout: 5)
+        let started = Date()
+        for _ in 0..<200 {
+            let reply: Acknowledgement = try await acs.request("snapshot", as: Acknowledgement.self)
+            XCTAssertEqual(reply.message, "ok")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 120)
+    }
+
     func testHelperSeesAugmentedPathAndHome() async throws {
         let envFile = tempDir.appendingPathComponent("env.txt")
         let helper = try makeHelper("""

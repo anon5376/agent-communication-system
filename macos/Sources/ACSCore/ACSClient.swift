@@ -130,6 +130,13 @@ public actor ACSClient {
         process.standardOutput = stdout
         process.standardError = stderr
 
+        // Observe exit through Foundation's termination callback, installed
+        // before launch so a fast exit cannot be missed. Blocking a GCD thread
+        // in waitUntilExit() can miss termination entirely and hang forever.
+        let exited = Flag()
+        let finished = Completion()
+        process.terminationHandler = { finished.complete(.exited($0.terminationStatus)) }
+
         do {
             try process.run()
         } catch {
@@ -151,7 +158,6 @@ public actor ACSClient {
         Self.makeNonblocking(outFD)
         Self.makeNonblocking(errFD)
 
-        let exited = Flag()
         let out = BoundedBuffer(limit: Self.outputLimit)
         let err = BoundedBuffer(limit: Self.outputLimit)
         let drained = DispatchGroup()
@@ -177,29 +183,42 @@ public actor ACSClient {
             }
         }
 
+        // Backstop for a missed termination callback: an exited process is
+        // observed within one poll interval rather than never.
+        let poll = DispatchSource.makeTimerSource(queue: .global())
+        poll.schedule(deadline: .now() + 0.1, repeating: 0.1)
+        poll.setEventHandler {
+            if !process.isRunning { finished.complete(.exited(process.terminationStatus)) }
+        }
+        poll.resume()
+        defer { poll.cancel() }
+
+        // Timeout and cancellation stop the helper, then stop waiting for it
+        // shortly after SIGKILL even if its exit is never observed.
+        let abandonLater = {
+            DispatchQueue.global().asyncAfter(deadline: .now() + Self.killGrace + 1) {
+                finished.complete(.abandoned)
+            }
+        }
         let timedOut = Flag()
         let watchdog = DispatchWorkItem {
-            if process.isRunning {
-                timedOut.set()
-                escalate()
-            }
+            guard !finished.isDone else { return }
+            timedOut.set()
+            escalate()
+            abandonLater()
         }
         if timeout > 0 {
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
         }
         defer { watchdog.cancel() }
 
-        let status: Int32 = await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                DispatchQueue.global().async {
-                    process.waitUntilExit()
-                    exited.set()
-                    continuation.resume(returning: process.terminationStatus)
-                }
-            }
+        let outcome = await withTaskCancellationHandler {
+            await finished.wait()
         } onCancel: {
             escalate()
+            abandonLater()
         }
+        exited.set()
 
         // Drainers finish a bounded final sweep once `exited` is set.
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -208,6 +227,7 @@ public actor ACSClient {
 
         if Task.isCancelled { throw CancellationError() }
         if timedOut.isSet { throw ACSError.timedOut(timeout) }
+        guard case .exited(let status) = outcome else { throw ACSError.timedOut(timeout) }
         return Reply(
             status: status, stdout: out.data, stderr: err.data,
             stdoutTruncated: out.didOverflow)
@@ -365,5 +385,49 @@ private final class Flag: @unchecked Sendable {
         lock.lock()
         value = true
         lock.unlock()
+    }
+}
+
+/// One-shot helper outcome: the first completion wins and resumes the waiter.
+private final class Completion: @unchecked Sendable {
+    enum Outcome: Sendable {
+        case exited(Int32)
+        case abandoned
+    }
+
+    private let lock = NSLock()
+    private var outcome: Outcome?
+    private var waiter: CheckedContinuation<Outcome, Never>?
+
+    var isDone: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return outcome != nil
+    }
+
+    func complete(_ value: Outcome) {
+        lock.lock()
+        guard outcome == nil else {
+            lock.unlock()
+            return
+        }
+        outcome = value
+        let pending = waiter
+        waiter = nil
+        lock.unlock()
+        pending?.resume(returning: value)
+    }
+
+    func wait() async -> Outcome {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if let outcome {
+                lock.unlock()
+                continuation.resume(returning: outcome)
+                return
+            }
+            waiter = continuation
+            lock.unlock()
+        }
     }
 }
