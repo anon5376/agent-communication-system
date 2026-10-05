@@ -132,13 +132,13 @@ fn token_rotation_invalidates_the_old_token() {
     let raw = fs::read_to_string(identity::agent_token_path(&f.home, "alice").unwrap()).unwrap();
     assert_ne!(stored.0, raw.trim());
     assert_eq!(stored.0, identity::hash_token(raw.trim()));
-    // Token files are 0600.
-    let mode = fs::metadata(identity::agent_token_path(&f.home, "alice").unwrap())
-        .unwrap()
-        .permissions();
+    // Token files are 0600 (Unix modes only — Windows relies on profile ACLs).
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(identity::agent_token_path(&f.home, "alice").unwrap())
+            .unwrap()
+            .permissions();
         assert_eq!(mode.mode() & 0o777, 0o600);
     }
 }

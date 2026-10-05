@@ -10,7 +10,7 @@ use rand::RngCore;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -199,8 +199,8 @@ pub fn token_path_for(home: &Path, agent_id: &str) -> Result<PathBuf> {
 pub fn ensure_private_directories(home: &Path) -> Result<()> {
     fs::create_dir_all(home)?;
     fs::create_dir_all(token_dir(home))?;
-    let _ = fs::set_permissions(home, fs::Permissions::from_mode(0o700));
-    let _ = fs::set_permissions(token_dir(home), fs::Permissions::from_mode(0o700));
+    crate::platform::chmod_private(home, 0o700);
+    crate::platform::chmod_private(&token_dir(home), 0o700);
     Ok(())
 }
 
@@ -209,7 +209,7 @@ pub fn write_private_token(home: &Path, path: &Path, token: &str) -> Result<()> 
     ensure_private_directories(home)?;
     let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
     fs::write(&temporary, format!("{token}\n"))?;
-    let _ = fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600));
+    crate::platform::chmod_private(&temporary, 0o600);
     fs::rename(&temporary, path)?;
     Ok(())
 }
