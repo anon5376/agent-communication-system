@@ -14,6 +14,34 @@ are in [macos/README.md](macos/README.md).
 Requires macOS 14+. Default builds are ad-hoc signed, **not notarized**;
 Gatekeeper may block downloaded copies. No public signed release is implied.
 
+## ACS for Windows (preview)
+
+`windows/` adds **ACS for Windows**, the same app on Windows: a Tauri v2
+shell (WebView2) over the same `acs-desktop` JSON bridge as the macOS app —
+welcome, task board, review decisions, agents, and messages, against the same
+bus. The terminal tools remain the primary interface; the app sits alongside
+them, never instead of them.
+
+Build the installer from the repository root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File windows\scripts\build-installer.ps1
+```
+
+This produces `ACS-<version>-x64-setup.exe` (NSIS, per-user install, Start
+menu shortcut) plus a `.sha256` under
+`windows/src-tauri/target/release/bundle/nsis/`. When `rust/` compiles on
+Windows the script builds `acs-desktop.exe`, `qagent.exe`, and `aos.exe` from
+source and bundles them; until the Windows core port lands it stages
+`fake-acs-desktop` — a protocol-identical double that keeps a JSON bus instead
+of SQLite — and the installer still works end to end (agent starts then
+report "no bundled qagent", matching the real helper's own error path).
+
+The installer is **unsigned**: SmartScreen will warn on downloaded copies.
+Details, layout, and protocol notes are in
+[windows/README.md](windows/README.md). Requires Windows 10+ and the
+WebView2 runtime (present on Windows 11 and most Windows 10 installs).
+
 ## Rust terminal implementation
 
 > Based on **`rust-port`** — a from-scratch Rust implementation of ACS plus

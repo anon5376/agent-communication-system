@@ -1,0 +1,33 @@
+[package]
+name = "acs-windows"
+version = "0.1.0"
+description = "ACS desktop app for Windows — Tauri shell over the acs-desktop bridge"
+edition = "2021"
+license = "MIT"
+default-run = "acs-windows"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+dirs = "5"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+[[bin]]
+name = "fake-acs-desktop"
+path = "src/bin/fake-acs-desktop.rs"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true

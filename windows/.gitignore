@@ -1,0 +1,7 @@
+node_modules/
+dist/
+src-tauri/target/
+# Staged sidecar binaries (built by scripts/build-installer.ps1)
+src-tauri/binaries/
+# Tauri codegen
+src-tauri/gen/

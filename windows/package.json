@@ -1,0 +1,33 @@
+{
+  "name": "acs-windows",
+  "private": true,
+  "version": "0.1.0",
+  "description": "ACS desktop app for Windows (Tauri shell over acs-desktop)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@preact/signals": "^2.0.0",
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "lossless-json": "^4.0.0",
+    "preact": "^10.24.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@preact/preset-vite": "^2.8.0",
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/node": "^20.0.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.0.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0"
+  }
+}
