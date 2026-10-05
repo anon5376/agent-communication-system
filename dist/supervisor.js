@@ -24,6 +24,21 @@ function envValue(...names) {
     }
     return undefined;
 }
+export function policyFromConfig(config, agent) {
+    const policy = {
+        canDelegate: agent.permissions.canDelegate,
+        maxDelegationDepth: Math.min(agent.permissions.maxDelegationDepth, config.constraints.maxDelegationDepth),
+        maxConcurrentTasks: config.constraints.maxConcurrentTasks,
+    };
+    if (agent.permissions.allowedChildAgentIds?.length)
+        policy.allowedChildAgentIds = [...agent.permissions.allowedChildAgentIds];
+    return policy;
+}
+function isTaskCapacityConflict(error, agentId) {
+    return error instanceof BusError && error.code === "conflict" &&
+        error.message.startsWith(`${agentId} already holds `) &&
+        error.message.endsWith("claimed task(s), its limit; submit or release one first");
+}
 export function sanitizedEnvironment(agent, additions) {
     const env = { ...process.env, ...additions, MCP_TOOL_TIMEOUT: "3600000" };
     if (envValue("QAGENT_ALLOW_API_KEY", "AGENT_BUS_ALLOW_API_KEY") === "1" || !agent.providerDefinition.subscriptionBacked)
@@ -309,6 +324,12 @@ export async function supervise(options) {
         if (!agent.enabled)
             throw new Error(`agent ${agent.id} is disabled in the harness configuration`);
         release = acquireLock(join(home, "supervisors"), agent.id);
+        let operator = null;
+        try {
+            operator = bus.identify(OPERATOR_ID);
+        }
+        catch { /* no operator token on this bus */ }
+        bus.setAgentPolicy(operator ?? me, me.agentId, policyFromConfig(config, agent));
         const adapter = getHarnessAdapter(agent.harnessDefinition.adapter);
         const managed = supervisorManaged(agent);
         const sessionPath = join(sessionDir, `${agent.id}.json`);
@@ -322,6 +343,7 @@ export async function supervise(options) {
         const mcpCommand = mcpCommandFor(me.agentId, bus.dbPath, qagentBin);
         const blockSec = agent.harnessDefinition.id === "claude" ? "900" : "240";
         const waitMs = options.waitMs ?? DEFAULT_WAIT_SEC * 1000;
+        let retryClaimAtCapacity = false;
         let consecutiveFailures = 0;
         log(`supervising ${agent.id} via ${agent.harnessDefinition.id} in ${workdir} (bus ${bus.dbPath}${managed ? ", supervisor-managed tasks" : ""})`);
         let pausedSince = null;
@@ -348,7 +370,7 @@ export async function supervise(options) {
             const waited = await bus.waitForMail(me, { timeoutMs: waitMs, signal: options.signal });
             if (options.signal?.aborted)
                 break;
-            if (waited.status === "timeout")
+            if (waited.status === "timeout" && !(managed && retryClaimAtCapacity))
                 continue;
             if (holdForPause(bus, me, log))
                 continue;
@@ -382,10 +404,21 @@ export async function supervise(options) {
                 if (!messages.length) {
                     try {
                         tasks.push(bus.claimTask(me, null));
+                        retryClaimAtCapacity = false;
                     }
                     catch (error) {
-                        if (!(error instanceof BusError && error.code === "not_found"))
-                            throw error;
+                        if (error instanceof BusError && error.code === "not_found") {
+                            retryClaimAtCapacity = false;
+                            continue;
+                        }
+                        if (isTaskCapacityConflict(error, me.agentId)) {
+                            // Our own submit/release frees capacity without waking us; retry on timeout.
+                            if (!retryClaimAtCapacity)
+                                log("at concurrent task limit; waiting for capacity");
+                            retryClaimAtCapacity = true;
+                            continue;
+                        }
+                        throw error;
                     }
                 }
             }

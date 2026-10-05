@@ -33,16 +33,58 @@ struct MessagesView: View {
 }
 
 struct MessageRow: View {
+    @EnvironmentObject private var store: WorkspaceStore
     let message: MessageRecord
+    @State private var expanded = false
+
+    private var tag: SubjectTag? { parseSubjectTag(message.subject) }
+    private var isLong: Bool {
+        message.body.count > 360 || message.body.components(separatedBy: .newlines).count > 5
+    }
+    private var tagTask: TaskRecord? {
+        tag.flatMap { tag in store.tasks.first { $0.id == tag.taskID } }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack {
-                Text("\(message.sender) → \(message.recipient ?? "Everyone")").font(.caption.weight(.medium))
+                (Text(message.sender).fontWeight(.semibold)
+                    + Text(" → ").foregroundColor(.secondary)
+                    + Text(message.recipient ?? "Everyone"))
+                    .font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Text(timestamp(message.tsMs)).font(.caption).foregroundStyle(.secondary)
+                Text(relativeTime(message.tsMs)).font(.caption).foregroundStyle(.secondary)
+                    .help(timestamp(message.tsMs))
             }
-            Text(message.subject).font(.headline).textSelection(.enabled)
-            Text(message.body).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                if let tag {
+                    Text(tag.round.map { $0 > 1 ? "\(tag.label), round \($0)" : tag.label } ?? tag.label)
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 8).padding(.vertical, 2)
+                        .background(toneColor(tag.tone).opacity(0.13), in: Capsule())
+                        .foregroundStyle(toneColor(tag.tone))
+                }
+                Text(tag?.rest ?? message.subject).font(.headline).textSelection(.enabled)
+                Spacer()
+                if let tag {
+                    if tagTask != nil {
+                        Button("Open task #\(tag.taskID)") {
+                            store.destination = .tasks
+                            store.selectedTask = tag.taskID
+                        }
+                        .buttonStyle(.link).font(.callout)
+                    } else {
+                        Text("#\(tag.taskID)").font(.caption).foregroundStyle(.tertiary).monospacedDigit()
+                    }
+                }
+            }
+            Text(message.body).textSelection(.enabled)
+                .lineLimit(isLong && !expanded ? 4 : nil)
+                .fixedSize(horizontal: false, vertical: true)
+            if isLong {
+                Button(expanded ? "Show less" : "Show more") { expanded.toggle() }
+                    .buttonStyle(.link).font(.callout)
+            }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }

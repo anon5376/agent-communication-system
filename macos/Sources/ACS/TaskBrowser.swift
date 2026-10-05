@@ -23,8 +23,13 @@ struct TaskBrowser: View {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Text(reviewOnly ? "Needs review" : "Tasks").font(.title2.weight(.semibold))
-                        Spacer()
                         Text("\(filtered.count)").foregroundStyle(.secondary).monospacedDigit()
+                        Spacer()
+                        Button { store.showNewTask = true } label: {
+                            Label("New task", systemImage: "plus")
+                        }
+                        .buttonStyle(.borderedProminent).controlSize(.small)
+                        .disabled(!store.canWrite).help("New task (⌘N)")
                     }
                     TextField("Search tasks", text: $query).textFieldStyle(.roundedBorder)
                     if !reviewOnly { Toggle("Show completed tasks", isOn: $includeClosed).font(.caption) }
@@ -33,20 +38,27 @@ struct TaskBrowser: View {
                 if filtered.isEmpty {
                     EmptyState(symbol: reviewOnly ? "tray" : "checklist", title: query.isEmpty ? (reviewOnly ? "All caught up" : "No tasks yet") : "No matches", message: reviewOnly ? "Submitted work will appear here, ready for a decision." : "Create a task with a clear goal and acceptance criteria.")
                 } else {
-                    List(filtered, selection: $store.selectedTask) { task in
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: task.stateSymbol).foregroundStyle(task.stateColor).frame(width: 17).padding(.top, 3)
-                            VStack(alignment: .leading, spacing: 7) {
-                                Text(task.title).font(.headline).lineLimit(3)
-                                HStack {
-                                    Text(task.stateTitle)
-                                    Spacer()
-                                    Text("#\(task.id)").monospacedDigit()
-                                }.font(.caption).foregroundStyle(.secondary)
-                                Text(task.assignee ?? "Unassigned").font(.caption).foregroundStyle(.secondary)
+                    List(selection: $store.selectedTask) {
+                        if reviewOnly {
+                            ForEach(filtered) { taskRow($0) }
+                        } else {
+                            ForEach(groupTasks(filtered), id: \.group) { section in
+                                Section {
+                                    ForEach(section.tasks) { taskRow($0) }
+                                } header: {
+                                    HStack(spacing: 5) {
+                                        Text(section.group.title).font(.callout.weight(.semibold))
+                                        Text("\(section.tasks.count)").monospacedDigit().foregroundStyle(.tertiary)
+                                    }
+                                    .foregroundStyle(groupColor(section.group))
+                                    .help(section.group.hint)
+                                    .textCase(nil)
+                                }
                             }
-                        }.padding(.vertical, 8).tag(task.id)
-                    }.listStyle(.inset)
+                        }
+                    }
+                    .listStyle(.inset)
+                    .listRowSeparator(.hidden)
                 }
                 if store.snapshot?.truncated == true {
                     Text("Showing the newest 1,000 tasks. Full history remains in the bus.")
@@ -67,6 +79,45 @@ struct TaskBrowser: View {
         }
         .task(id: store.selectedTask) { await store.loadDetail() }
     }
+
+    private func groupColor(_ group: TaskListGroup) -> Color {
+        switch group {
+        case .review: return .orange
+        case .stuck: return .red
+        default: return .secondary
+        }
+    }
+
+    private func taskRow(_ task: TaskRecord) -> some View {
+        let selected = store.selectedTask == task.id
+        return HStack(alignment: .top, spacing: 10) {
+            StateDot(color: task.stateColor).padding(.top, 6)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(task.title).font(.headline).lineLimit(2)
+                HStack(spacing: 8) {
+                    if let label = rowStateLabel(task.state) {
+                        Text(label).font(.caption.weight(.semibold)).foregroundStyle(task.stateColor)
+                    }
+                    Text(task.assignee ?? "Unassigned")
+                    Text("·").foregroundStyle(.tertiary)
+                    Text(relativeTime(task.updatedMs))
+                    Spacer()
+                    Text("#\(task.id)").monospacedDigit().foregroundStyle(.tertiary)
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 7)
+        .tag(task.id)
+        .listRowBackground(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(selected ? Color.indigo.opacity(0.4) : Color.clear, lineWidth: 1)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(selected ? Color.indigo.opacity(0.09) : Color.clear)
+                )
+        )
+    }
 }
 
 struct TaskInspector: View {
@@ -79,24 +130,25 @@ struct TaskInspector: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text("TASK #\(task.id)").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                        Spacer()
-                        if task.priority != "normal" { Text(task.priority.capitalized + " priority").font(.caption) }
-                    }
                     Text(task.title).font(.system(size: 25, weight: .semibold)).textSelection(.enabled)
-                    Label(task.stateTitle, systemImage: task.stateSymbol).foregroundStyle(task.stateColor).font(.headline)
+                    HStack(spacing: 10) {
+                        Label(task.stateTitle, systemImage: task.stateSymbol)
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 9).padding(.vertical, 4)
+                            .background(task.stateColor.opacity(0.13), in: Capsule())
+                            .foregroundStyle(task.stateColor)
+                        Text("Task #\(task.id)").font(.callout).foregroundStyle(.secondary).monospacedDigit()
+                        if task.priority != "normal" {
+                            Text("\(task.priority.capitalized) priority").font(.callout).foregroundStyle(.secondary)
+                        }
+                    }
                     Text(task.explanation).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
+                StageStrip(task: task)
                 HStack(alignment: .top, spacing: 34) {
                     Fact(label: "Worker", value: task.assignee ?? "Not assigned")
-                    Fact(label: "Reviewer", value: task.reviewer == "operator" ? "You (operator)" : task.reviewer ?? "Task creator / operator")
-                }
-                if task.state == "submitted" {
-                    HStack {
-                        Button("Accept Work") { decision = .accept }.buttonStyle(.borderedProminent)
-                        Button("Request Changes…") { decision = .changes }
-                    }.disabled(!store.canWrite)
+                    Fact(label: "Reviewer", value: task.reviewer == "operator" ? "You" : task.reviewer ?? "Task creator or you")
+                    Fact(label: "Last update", value: relativeTime(task.updatedMs))
                 }
                 Divider()
                 ProseSection(title: "Task brief", text: task.brief.isEmpty ? "No brief provided." : task.brief)
@@ -176,7 +228,89 @@ struct TaskInspector: View {
                 }
             }.padding(28).frame(maxWidth: 760, alignment: .leading).frame(maxWidth: .infinity, alignment: .leading)
         }
+        .safeAreaInset(edge: .bottom) {
+            if task.state == "submitted" {
+                VStack(spacing: 0) {
+                    Divider()
+                    HStack(spacing: 12) {
+                        Text(task.reviewer == "operator" || task.reviewer == nil
+                             ? "Does this meet the acceptance criteria?"
+                             : "Assigned reviewer: \(task.reviewer ?? ""). You can still decide as operator.")
+                            .font(.callout).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Request changes…") { decision = .changes }.disabled(!store.canWrite)
+                        Button("Accept work") { decision = .accept }
+                            .buttonStyle(.borderedProminent).disabled(!store.canWrite)
+                    }
+                    .padding(.horizontal, 28).padding(.vertical, 12)
+                }
+                .background(.bar)
+            }
+        }
         .sheet(item: $decision) { DecisionSheet(task: task, decision: $0).environmentObject(store) }
+    }
+}
+
+/// Four-step progress strip: Created → Claimed → Submitted → Reviewed. Reached
+/// steps are accent; the current step is bold with a halo and, off the happy
+/// path, tinted/relabeled to the actual state.
+private struct StageStrip: View {
+    let task: TaskRecord
+
+    private var progress: StageProgress { taskStage(task) }
+
+    private func label(for index: Int) -> String {
+        let progress = progress
+        if index == progress.reached, progress.outcome != nil, task.state != "accepted" {
+            return task.stateTitle
+        }
+        return taskStages[index]
+    }
+
+    private func color(for index: Int) -> Color {
+        let progress = progress
+        if index == progress.reached, let outcome = progress.outcome {
+            switch outcome {
+            case .ok: return .green
+            case .warn: return .orange
+            case .bad: return .red
+            }
+        }
+        return index <= progress.reached ? .indigo : .secondary.opacity(0.5)
+    }
+
+    var body: some View {
+        let progress = progress
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(taskStages.indices, id: \.self) { index in
+                let reached = index <= progress.reached
+                let current = index == progress.reached
+                VStack(spacing: 7) {
+                    Circle()
+                        .fill(reached ? color(for: index) : Color.clear)
+                        .overlay(Circle().strokeBorder(reached ? Color.clear : Color.secondary.opacity(0.6), lineWidth: 1.6))
+                        .overlay(
+                            Circle()
+                                .stroke(color(for: index).opacity(0.28), lineWidth: 4)
+                                .opacity(current ? 1 : 0)
+                                .padding(-4)
+                        )
+                        .frame(width: 12, height: 12)
+                        .padding(.top, 4)
+                    Text(label(for: index))
+                        .font(current ? .caption.weight(.semibold) : .caption)
+                        .foregroundStyle(current && progress.outcome != nil ? color(for: index) : (reached ? Color.secondary : Color.secondary.opacity(0.6)))
+                }
+                if index < taskStages.count - 1 {
+                    Rectangle()
+                        .fill(index < progress.reached ? Color.indigo : Color.secondary.opacity(0.3))
+                        .frame(height: 1.5)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 10)
+                        .padding(.horizontal, 4)
+                }
+            }
+        }
     }
 }
 

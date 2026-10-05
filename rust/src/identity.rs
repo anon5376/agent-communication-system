@@ -31,10 +31,8 @@ pub struct Permissions {
 
 /// Limits applied on top of the authority's permissions, usually copied from the
 /// project configuration by the supervisor. Stored as `policy` inside
-/// identities.permissions_json, so the TypeScript qagent from main (#29) reads it too
-/// without a schema change (mirror: AgentPolicy in src/core/identity.ts there). The
-/// TypeScript copy on rust-port ignores it, and its register/rotate resets
-/// permissions_json, dropping a stored policy. A policy only ever narrows:
+/// identities.permissions_json, shared with AgentPolicy in src/core/identity.ts.
+/// Both implementations preserve it on token rotation. A policy only ever narrows:
 /// the effective permission is the authority's AND the policy's.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AgentPolicy {
