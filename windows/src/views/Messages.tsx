@@ -60,7 +60,7 @@ export function MessageRow(props: { message: MessageRecord }) {
         <span class="m-who">
           <span class="m-from">{m.sender}</span>
           <span class="m-arrow" aria-hidden="true">→</span>
-          <span>{m.recipient ?? "Everyone"}</span>
+          <span class={m.recipient ? "m-to" : undefined}>{m.recipient ?? "Everyone"}</span>
         </span>
         <span class="m-time" title={timestamp(m.tsMs)}>{relativeTime(m.tsMs)}</span>
       </div>

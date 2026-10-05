@@ -180,3 +180,17 @@ export function Icon(props: {
     </svg>
   );
 }
+
+// Pixel "A" mark: a 5x5 grid of square cells, drawn crisp at any size.
+const PIXEL_MARK = ["01110", "10001", "11111", "10001", "10001"];
+
+export function PixelMark(props: { size?: number }) {
+  const size = props.size ?? 20;
+  return (
+    <svg class="pixel-mark" width={size} height={size} viewBox="0 0 5 5" aria-hidden="true" shape-rendering="crispEdges">
+      {PIXEL_MARK.flatMap((row, y) =>
+        [...row].map((bit, x) => (bit === "1" ? <rect key={`${x}-${y}`} x={x} y={y} width="0.86" height="0.86" /> : null)),
+      )}
+    </svg>
+  );
+}
