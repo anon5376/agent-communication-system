@@ -53,6 +53,10 @@ path = "src/bin/acs.rs"
 name = "aos"
 path = "src/bin/aos.rs"
 
+[[bin]]
+name = "acs-desktop"
+path = "src/bin/desktop.rs"
+
 [profile.release]
 opt-level = 2
 lto = "thin"
