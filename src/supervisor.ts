@@ -196,6 +196,8 @@ export interface SessionRecord {
   latencyMs: number;
   /** Session ids of worktree turns, by task branch: each task checkout has its own directory. */
   taskSessions?: Record<string, string>;
+  /** Mail read from the inbox that no turn used when the supervisor last stopped; offered first on start. */
+  pendingMail?: Message[];
 }
 
 function emptySession(): SessionRecord {
@@ -520,11 +522,18 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
     const markOffered = (task: Task): void => { offered.set(task.id, { updatedMs: task.updatedMs, at: Date.now() }); };
     // Worktree mode shows only mail about the turn's task; the rest is kept here for later turns,
     // since reading the inbox has already moved the cursor past it.
-    let deferred: Message[] = [];
+    let deferred: Message[] = session.pendingMail ?? [];
+    delete session.pendingMail;
+    // Tasks claimed in this round before its turn ran: released again if the round fails.
+    let claimedThisRound: number[] = [];
     const holdOrClaim = (id: number): Task | null => {
       const current = bus.getTask(id);
       if (current.state === "claimed" && current.assignee === me.agentId) return current;
-      if (claimableBy(current, me.agentId, busAgent.role)) return bus.claimTask(me, id);
+      if (claimableBy(current, me.agentId, busAgent.role)) {
+        const claimed = bus.claimTask(me, id);
+        claimedThisRound.push(claimed.id);
+        return claimed;
+      }
       return null;
     };
     let budgetNoticed: string | null = null;
@@ -540,6 +549,7 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
 
     while (!options.signal?.aborted) {
       unused = [];
+      claimedThisRound = [];
       try {
         const over = budgetReached(config, session);
         if (over) {
@@ -630,7 +640,9 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
           }
           if (!messages.length) {
             try {
-              tasks.push(bus.claimTask(me, null));
+              const claimed = bus.claimTask(me, null);
+              claimedThisRound.push(claimed.id);
+              tasks.push(claimed);
             } catch (error) {
               if (!(error instanceof BusError && (error.code === "not_found" || error.code === "conflict"))) throw error;
             }
@@ -666,7 +678,9 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
         const invocation = adapter.build(context);
         bus.setStatus(me, "working");
         // From here a paid turn runs: its mail is used, and an error must not hand it to another turn.
+        // Its claims are the turn's too, and a failed turn fails them back.
         unused = [];
+        claimedThisRound = [];
         let processResult: Awaited<ReturnType<typeof runHarnessProcess>>;
         // A turn longer than the claim TTL keeps its tasks: renew the claims once a minute.
         const keepalive = setInterval(() => { try { bus.renewClaims(me); } catch { /* next beat */ } }, KEEPALIVE_MS);
@@ -686,7 +700,13 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
           log(`stopped during a turn; ${agent.harnessDefinition.id} process group killed`);
           break;
         }
-        const normalized = adapter.parse(processResult.output, processResult.code);
+        let normalized: ReturnType<typeof adapter.parse>;
+        try {
+          normalized = adapter.parse(processResult.output, processResult.code);
+        } catch (error) {
+          log(`could not read the turn's output: ${(error as Error).message}`);
+          normalized = { text: "", sessionId: null, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUSD: 0 }, structured: null, malformed: true };
+        }
         const sessionMismatch = resumedUnexpectedSession(pinnedSessionId, normalized.sessionId);
         session.turns += 1;
         session.inputTokens += normalized.usage.inputTokens;
@@ -727,7 +747,8 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
           }
           // Mail that names no task is offered to the next turn instead of being lost with this
           // one. Task mail is not: a failed-back task gets a retry message, and any other task's
-          // state on the bus (claimable or not) already decides whether it comes back.
+          // state on the bus (claimable or not) already decides whether it comes back. Keeping it
+          // would rerun turns for tasks this agent can no longer claim.
           deferred = [...messages.filter((m) => m.taskId === null), ...deferred];
           if (consecutiveFailures >= MAX_FAILED_TURNS) {
             const why = `${consecutiveFailures} turns failed in a row; last: ${error}`;
@@ -778,11 +799,30 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
         const kept = new Set(deferred.map((m) => m.seq));
         deferred = [...unused.filter((m) => !kept.has(m.seq)), ...deferred];
         unused = [];
+        // A round that failed before its turn ran gives back what it claimed, so a round that keeps
+        // failing does not take a new task each time without working on it.
+        for (const id of claimedThisRound) {
+          try {
+            const task = bus.getTask(id);
+            if (task.assignee === me.agentId && task.state === "claimed") bus.releaseTask(me, id, "supervisor round failed before the turn ran");
+          } catch (releaseError) {
+            log(`task #${id}: could not release after the failed round: ${(releaseError as Error).message}`);
+          }
+        }
+        claimedThisRound = [];
         errorStreak += 1;
         const delay = backoff(errorStreak);
         log(`round failed: ${(error as Error).message}; retrying in ${delay / 1000}s`);
         await sleep(delay, options.signal);
       }
+    }
+    // Mail already read from the inbox that no turn used waits in the session file for the next start.
+    const pending = [...unused, ...deferred.filter((m) => !unused.some((u) => u.seq === m.seq))];
+    if (pending.length) session.pendingMail = pending;
+    try {
+      writeFileSync(sessionPath, JSON.stringify(session, null, 2));
+    } catch (error) {
+      log(`could not save unread mail to ${sessionPath}: ${(error as Error).message}`);
     }
   } finally {
     options.signal?.removeEventListener("abort", stopChild);
