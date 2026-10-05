@@ -8,6 +8,10 @@ All notable changes to the Agent Communication System. Format follows
 
 ### Fixed
 
+- README leads with ownership, recovery and independent review, installs the
+  released `aos` binary, and states what is and is not tested. Provider support
+  no longer labels unit-tested adapters "invocation tested"; they are "live
+  unverified". Older marketing docs carry a superseded note.
 - **Delegation and claim limits are enforced by the core.** `createTask`
   refuses an agent without `canDelegate` (workers by default) that assigns work
   to someone else or files unassigned work; it may still file tasks for
@@ -109,6 +113,12 @@ All notable changes to the Agent Communication System. Format follows
 - **Demo + docs** — `acs` TUI demo GIF in the README, competitive analysis,
   promotion playbook, standout-features list, launch copy, and a full
   marketing strategy with a 30-day calendar.
+- **Recovery example** — `examples/worker-death-recovery.sh` kills a worker
+  mid-task with SIGKILL and walks the task through stalled detection, requeue,
+  a second worker's submission, its refused review and an independent
+  review, on a throwaway bus with no agent CLI. Runs with `qagent` or `aos`.
+- **Launch docs** — `docs/launch-copy.md` rewritten around a claims-and-evidence
+  table; `docs/launch-checklist.md` lists the owner-only steps.
 
 ### Changed
 

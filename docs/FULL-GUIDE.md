@@ -469,7 +469,7 @@ Automated checks reduce risk; they do not prove that prose, screenshots, fixture
 
 ACS exists twice on one SQLite schema: TypeScript on `main` (the npm package) and Rust on the `rust-port` branch. They share `bus.db`, tokens, and signal files. They do not have the same commands. Where one side lacks a feature, that is a gap, not a design choice.
 
-Written against `main` at `4d4cf5a` and `rust-port` at `c6df26b`, read from the source on 2026-10-01 (nothing was executed to produce this table). `rust-port` is behind `main`, so some rows may already be out of date there.
+Written against `main` at `4d4cf5a` and `rust-port` at `c6df26b`, read from the source on 2026-10-01 (nothing was executed to produce this table). The `aos` and pause/budget rows were added on 2026-10-04 against `rust-port` at `8543d6b`. `rust-port` is behind `main`, so some rows may already be out of date there.
 
 | Feature | TypeScript (`main`) | Rust (`rust-port`) |
 |---|---|---|
@@ -479,4 +479,6 @@ Written against `main` at `4d4cf5a` and `rust-port` at `c6df26b`, read from the 
 | Per-task git worktrees (`claim --worktree`, `"isolation": "worktree"`) | yes | no |
 | Web dashboard | yes | yes (`rust/src/dashboard.rs`) |
 | `acs` terminal UI | no | yes (`rust/src/app.rs`) |
+| `aos` terminal console, crew setup, `install.sh`, release binaries | no | yes (`rust/src/aos/`, release `aos-v0.1.0`) |
+| `agent pause`, `agent resume`, `agent budget` | no | yes |
 | Family-aware router (`src/router.ts`) | present but not on the coordination path | no |
