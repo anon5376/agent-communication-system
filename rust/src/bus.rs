@@ -1535,6 +1535,15 @@ impl Bus {
         Ok((tasks, truncated))
     }
 
+    /// Submitted tasks older than `below_id`, newest first — review work a
+    /// newest-first page would otherwise hide.
+    pub fn submitted_before(&self, below_id: i64) -> Result<Vec<Task>> {
+        self.to_tasks(
+            "SELECT * FROM tasks WHERE state = 'submitted' AND id < ? ORDER BY id DESC",
+            &[&below_id as &dyn rusqlite::ToSql],
+        )
+    }
+
     /// Claimed tasks with no claim/note activity for `stall_ms` — a probably-dead claim.
     /// `updated_ms` moves on claim and on every note, so it is the last-activity clock.
     /// Whether open work is waiting that `agent_id` may claim: assigned to it, or

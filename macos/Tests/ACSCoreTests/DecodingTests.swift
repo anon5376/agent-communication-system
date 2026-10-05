@@ -21,7 +21,8 @@ final class DecodingTests: XCTestCase {
              "reviewer": "operator", "project": "demo", "pathScopes": ["src/"],
              "dependencies": [3, 4], "updatedMs": 1720000001000, "createdMs": 1720000000000,
              "result": {"summary": "Done", "details": "All of it",
-                        "changedFiles": ["a.swift"], "artifacts": [],
+                        "changedFiles": ["a.swift"],
+                        "artifacts": [{"type": "url", "value": "https://example.test/pr/1", "description": "PR"}],
                         "validation": [{"passed": true, "summary": "tests pass"}],
                         "completedMs": 1720000000900},
              "review": {"reviewer": "operator", "accepted": true, "feedback": "lgtm",
@@ -56,6 +57,7 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(task.dependencies, [3, 4])
         XCTAssertEqual(task.result?.summary, "Done")
         XCTAssertEqual(task.result?.changedFiles, ["a.swift"])
+        XCTAssertEqual(task.result?.artifacts, [ContextReference(type: "url", value: "https://example.test/pr/1", description: "PR")])
         XCTAssertEqual(task.result?.validation.first?.passed, true)
         XCTAssertEqual(task.review?.reviewer, "operator")
         XCTAssertEqual(task.review?.accepted, true)

@@ -116,6 +116,19 @@ struct TaskInspector: View {
                             ForEach(result.changedFiles, id: \.self) { Text($0).font(.caption.monospaced()).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
                         }
                     }
+                    if !result.artifacts.isEmpty {
+                        DisclosureGroup("Attached references (\(result.artifacts.count))") {
+                            ForEach(result.artifacts, id: \.self) { item in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(item.type): \(item.value)").font(.caption.monospaced()).textSelection(.enabled)
+                                    if let note = item.description, !note.isEmpty {
+                                        Text(note).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
                     if !result.validation.isEmpty {
                         VStack(alignment: .leading, spacing: 10) {
                             Text("Worker-reported checks").font(.headline)
