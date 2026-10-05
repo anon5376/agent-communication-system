@@ -618,7 +618,44 @@ fn start_then_stop_with_a_fake_qagent() {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    assert_eq!(builder["running"], true, "{builder}");
+    // Diagnose a fake that never reports running: the supervisor's stdout and
+    // stderr go to builder.out, and `running` needs <home>/supervisors/*.pid.
+    let pid_file = paths.pid_file("builder");
+    let out_file = paths.out_file("builder");
+    let supervisors = paths.home.join("supervisors");
+    let mut why = format!(
+        "{builder}\nout_file({}) exists={} contents:\n{}\npid_file({}) exists={} contents={:?}\nsupervisors dir: {:?}",
+        out_file.display(),
+        out_file.exists(),
+        std::fs::read_to_string(&out_file).unwrap_or_else(|e| format!("<{e}>")),
+        pid_file.display(),
+        pid_file.exists(),
+        std::fs::read_to_string(&pid_file),
+        std::fs::read_dir(&supervisors).map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        })
+    );
+    #[cfg(windows)]
+    {
+        // If the fake resolved its bus home wrong it may have written a stray
+        // pid file at a drive root (\supervisors resolves root-relative).
+        for root in [r"C:\", r"D:\"] {
+            let stray = Path::new(root).join(r"supervisors\builder.pid");
+            why.push_str(&format!(
+                "\nstray {root}supervisors\\builder.pid exists={} contents={:?}",
+                stray.exists(),
+                std::fs::read_to_string(&stray)
+            ));
+        }
+        why.push_str(&format!(
+            "\nTEMP={:?} home={}",
+            std::env::var_os("TEMP"),
+            paths.home.display()
+        ));
+    }
+    assert_eq!(builder["running"], true, "{why}");
 
     let (reply, code) = call(&db, "stop", json!({"ids": ["builder"]}));
     let data = ok(&reply, code);
