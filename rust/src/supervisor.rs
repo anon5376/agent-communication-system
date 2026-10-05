@@ -670,7 +670,8 @@ pub fn process_running(pid: i32, words: &[&str]) -> bool {
 
 /// The project configuration's limits for this agent, as the policy the bus core
 /// enforces: delegation, the agents it may assign, delegation depth, and how many
-/// tasks it may hold claimed at once. Mirror: policyFromConfig in src/supervisor.ts.
+/// tasks it may hold claimed at once. Mirror: policyFromConfig in src/supervisor.ts on
+/// main (#29); the TypeScript copy on rust-port does not have it yet.
 pub fn policy_from_config(
     config: &crate::config::BusConfig,
     agent: &crate::config::AgentDef,
@@ -697,8 +698,8 @@ pub fn policy_from_config(
 /// Why the configuration's usage budget (`optionalTokenBudget`,
 /// `optionalApiCostBudgetUSD`) stops new turns, or None. It counts what the CLI
 /// itself reported and is checked between turns, so one turn can overshoot it, and a
-/// CLI that reports no cost never moves the dollar count. Mirror: budgetReached in
-/// src/supervisor.ts.
+/// CLI that reports no cost never moves the dollar count. Counted per agent from its
+/// session file. Mirror: budgetReached in src/supervisor.ts on main (#29).
 pub fn config_budget_reached(
     config: &crate::config::BusConfig,
     total_tokens: f64,
@@ -753,9 +754,10 @@ fn link_pid_file(path: &Path, suffix: &str) -> std::io::Result<()> {
 /// Taking it is atomic: the pid is hard-linked into place, which fails if any
 /// supervisor holds it, so two starters cannot both win. A stale file (its pid is
 /// gone) is removed only while holding `<agent>.pid.reap`, so a supervisor that just
-/// took the lock is never removed by a slower starter. The same protocol as
-/// acquireSupervisorLock in src/supervisor.ts, so a Rust and a TypeScript starter
-/// contend on one file.
+/// took the lock is never removed by a slower starter. acquireSupervisorLock in
+/// src/supervisor.ts on main (#29) uses the same protocol, so those two contend safely
+/// on one file; the TypeScript copy on rust-port still checks then writes, and can
+/// overwrite a lock held here.
 fn acquire_lock(dir: &Path, agent_id: &str) -> Result<impl FnOnce()> {
     fs::create_dir_all(dir)?;
     let path = dir.join(format!("{agent_id}.pid"));
@@ -1040,8 +1042,9 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                 agent.harness.id, agent.agent.id
             ));
         }
-        // The configuration's limits go into the bus, where every call path (MCP, CLI,
-        // this supervisor, either implementation) enforces them.
+        // The configuration's limits go into the bus, where every Rust call path (MCP,
+        // CLI, this supervisor) and the TypeScript qagent from main (#29) enforce them.
+        // The TypeScript copy on rust-port does not enforce them yet.
         let operator = bus.identify(Some(crate::types::OPERATOR_ID)).ok();
         if let Err(error) = bus.set_agent_policy(
             operator.as_ref().unwrap_or(&me),
@@ -1218,7 +1221,8 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                             }
                         }
                     }
-                } else if messages.is_empty() {
+                } else if messages.is_empty() && bus.has_claimable(&me.agent_id, &bus_agent.role)? {
+                    // has_claimable is false at the claim limit, so a full agent gets no turn.
                     tasks.extend(
                         bus.list_tasks(ListTasksInput {
                             states: Some(vec!["open".to_string(), "changes_requested".to_string()]),

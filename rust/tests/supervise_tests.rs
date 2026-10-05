@@ -1103,3 +1103,59 @@ fn supervise_refuses_a_dollar_budget_on_a_cli_that_reports_no_usage() {
         error.message
     );
 }
+
+#[test]
+fn supervise_offers_no_turn_to_an_agent_already_at_its_claim_limit() {
+    let e = e2e("w1", "");
+    set_constraint(&e, "maxConcurrentTasks", serde_json::json!(1));
+    // A CLI with bus tools: the supervisor offers it open work instead of claiming for it.
+    let path = e.workdir.join("agent-bus.config.json");
+    let mut config: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    config["harnesses"]["fake-harness"]["features"]["mcp"] = serde_json::json!(true);
+    fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+    let held = e
+        .bus
+        .create_task(
+            &e.operator,
+            CreateTaskInput {
+                title: "already held".to_string(),
+                to: Some("w1".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id;
+    let w1 = e.bus.identify(Some("w1")).unwrap();
+    e.bus.claim_task(&w1, Some(held)).unwrap();
+    e.bus.inbox(&w1, false, None).unwrap();
+    let other = unassigned_task(&e, "open but over the limit");
+    let logs: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = {
+        let (stop, logs) = (Arc::clone(&stop), Arc::clone(&logs));
+        let db_path = e.home.join("bus.db");
+        let workdir = e.workdir.display().to_string();
+        let config_path = e.workdir.join("agent-bus.config.json");
+        std::thread::spawn(move || {
+            supervise(SuperviseOptions {
+                agent_id: "w1".into(),
+                workdir,
+                db_path,
+                config_path: Some(config_path),
+                stop,
+                wait_ms: Some(300),
+                retry_base_ms: None,
+                fake_harness_path: Some("fake-harness".to_string()),
+                qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
+                log: Some(Box::new(move |line| logs.lock().unwrap().push(line.to_string()))),
+            })
+        })
+    };
+    // Several wait periods end with no mail; none may start a turn for the open task.
+    std::thread::sleep(Duration::from_millis(2_500));
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap().unwrap();
+    let turns = logs.lock().unwrap().iter().filter(|l| l.contains("turn complete")).count();
+    assert_eq!(turns, 0, "turns started while at the claim limit: {:?}", logs.lock().unwrap());
+    assert_eq!(e.bus.get_task(other).unwrap().task.state, "open");
+}

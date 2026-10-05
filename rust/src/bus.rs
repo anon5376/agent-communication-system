@@ -426,7 +426,8 @@ impl Bus {
     /// operator may set any policy; an agent may set its own only when the new one
     /// allows nothing the stored one forbids, so a supervisor can apply its project
     /// configuration without the operator token but can never widen what the operator
-    /// or an earlier policy allowed. Mirror: setAgentPolicy in src/core/bus.ts.
+    /// or an earlier policy allowed. Mirror: setAgentPolicy in src/core/bus.ts on main
+    /// (#29); the TypeScript copy on rust-port does not have it yet.
     pub fn set_agent_policy(
         &self,
         actor: &Identity,
@@ -1824,7 +1825,8 @@ impl Bus {
     /// stored now (not those resolved when the caller identified itself). Creating work for
     /// someone else, or for anyone to claim, needs canDelegate; a policy can also name the
     /// only agents this one may assign and how deep under existing tasks it may create work.
-    /// Mirror: assertMayDelegate in src/core/bus.ts.
+    /// Mirror: assertMayDelegate in src/core/bus.ts on main (#29); the TypeScript copy on
+    /// rust-port does not check delegation yet.
     fn assert_may_delegate(&self, actor: &Identity, to: Option<&str>, parent_id: Option<i64>) -> Result<()> {
         if actor.authority == "operator" {
             return Ok(());
