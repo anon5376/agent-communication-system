@@ -154,7 +154,7 @@ struct TaskInspector: View {
                     Spacer()
                     if !task.isClosed {
                         Menu("Task actions") {
-                            if ["claimed", "submitted", "changes_requested"].contains(task.state) {
+                            if ["claimed", "open"].contains(task.state) {
                                 Button("Return to Queue…") { decision = .requeue }
                             }
                             Button("Cancel Task…", role: .destructive) { decision = .cancel }

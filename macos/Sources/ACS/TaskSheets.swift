@@ -112,7 +112,7 @@ struct DecisionSheet: View {
             Text(decision.title).font(.title2.weight(.semibold))
             Text("#\(task.id) · \(task.title)").font(.headline)
             Text(decision.explanation).foregroundStyle(.secondary)
-            Text(decision == .accept ? "Review note (optional)" : "Feedback / reason").font(.headline)
+            Text(decision == .accept ? "Review note" : "Feedback / reason").font(.headline)
             TextEditor(text: $feedback).frame(height: 130).border(.quaternary).accessibilityLabel("Feedback or reason")
             if let failure { Text(failure).foregroundStyle(.red).textSelection(.enabled) }
             HStack {
@@ -120,7 +120,7 @@ struct DecisionSheet: View {
                 Button("Go Back") { dismiss() }.keyboardShortcut(.cancelAction).disabled(store.busy)
                 Button(decision.button, role: decision == .cancel ? .destructive : nil) { Task { await submit() } }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!store.canWrite || (decision != .accept && feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+                    .disabled(!store.canWrite || feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }.padding(24).frame(width: 540).interactiveDismissDisabled(store.busy)
     }
