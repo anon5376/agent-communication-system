@@ -617,37 +617,12 @@ fn task_command(ctx: &mut Context, sub: Option<&String>) -> Result<i32> {
     }
 }
 
-/// PATH lookup with the exec bit — doctor never runs the harness, only finds it.
+/// PATH lookup with the exec bit (or PATHEXT match on Windows) — doctor never
+/// runs the harness, only finds it.
 fn on_path(command: &str) -> bool {
-    let candidates: Vec<PathBuf> = if Path::new(command).is_absolute() || command.contains('/') {
-        vec![PathBuf::from(command)]
-    } else {
-        std::env::var_os("PATH")
-            .map(|paths| {
-                std::env::split_paths(&paths)
-                    .map(|dir| dir.join(command))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    candidates.iter().any(|path| {
-        let meta = match fs::metadata(path) {
-            Ok(meta) => meta,
-            Err(_) => return false,
-        };
-        if !meta.is_file() {
-            return false;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            meta.permissions().mode() & 0o111 != 0
-        }
-        #[cfg(not(unix))]
-        {
-            true
-        }
-    })
+    crate::platform::path_candidates(command)
+        .iter()
+        .any(|path| crate::platform::is_executable(path))
 }
 
 /// `qagent fake-harness --mode <m> --agent <a> --prompt <p> [--session <s>]` —

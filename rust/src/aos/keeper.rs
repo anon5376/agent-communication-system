@@ -252,7 +252,6 @@ pub fn ensure_watcher(db_path: &Path) -> Option<i32> {
 }
 
 pub fn spawn_watcher(exe: &Path, db_path: &Path) -> Option<i32> {
-    use std::os::unix::process::CommandExt;
     let paths = Paths::for_db(db_path);
     let _ = fs::create_dir_all(paths.home.join("logs"));
     let out = fs::OpenOptions::new()
@@ -268,12 +267,8 @@ pub fn spawn_watcher(exe: &Path, db_path: &Path) -> Option<i32> {
         .stdin(Stdio::null())
         .stdout(out)
         .stderr(err);
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    // Its own session/group: survives the app or terminal that started it.
+    crate::platform::detach(&mut cmd);
     let mut child = cmd.spawn().ok()?;
     let pid = child.id() as i32;
     std::thread::spawn(move || {
@@ -356,6 +351,19 @@ pub fn launchd_plist(exe: &Path, db_path: &Path, path_env: &str, log: &Path) -> 
     )
 }
 
+/// The launchd user target, gui/<uid>. Windows never reaches it (autostart
+/// bails first); getuid does not exist there.
+fn launchd_target() -> String {
+    #[cfg(unix)]
+    {
+        format!("gui/{}", unsafe { libc::getuid() })
+    }
+    #[cfg(windows)]
+    {
+        unreachable!("launchd does not exist on Windows")
+    }
+}
+
 fn run_quiet(cmd: &str, args: &[&str]) -> std::result::Result<(), String> {
     match Command::new(cmd).args(args).stdin(Stdio::null()).output() {
         Ok(o) if o.status.success() => Ok(()),
@@ -381,6 +389,14 @@ pub fn autostart(db_path: &Path, action: &str) -> i32 {
 }
 
 fn autostart_inner(db_path: &Path, action: &str) -> Result<Vec<String>> {
+    if cfg!(windows) {
+        // No launchd/systemd here — refuse clearly rather than fake a unit
+        // that nothing would ever load.
+        return Err(BusError::invalid(
+            "aos autostart is not supported on Windows (there is no launchd/systemd). \
+             To have the crew come back after login, add `aos watch` to Task Scheduler yourself.",
+        ));
+    }
     let exe = std::env::current_exe()?;
     let path_env = std::env::var("PATH").unwrap_or_default();
     let paths = Paths::for_db(db_path);
@@ -400,7 +416,7 @@ fn autostart_inner(db_path: &Path, action: &str) -> Result<Vec<String>> {
             if macos {
                 let log = paths.home.join("logs").join("aos-watch.out");
                 fs::write(&file, launchd_plist(&exe, db_path, &path_env, &log))?;
-                let target = format!("gui/{}", unsafe { libc::getuid() });
+                let target = launchd_target();
                 let _ = run_quiet("launchctl", &["bootout", &target, &file.display().to_string()]);
                 run_quiet("launchctl", &["bootstrap", &target, &file.display().to_string()])
                     .or_else(|_| run_quiet("launchctl", &["load", "-w", &file.display().to_string()]))
@@ -431,7 +447,7 @@ fn autostart_inner(db_path: &Path, action: &str) -> Result<Vec<String>> {
         }
         "off" => {
             if macos {
-                let target = format!("gui/{}", unsafe { libc::getuid() });
+                let target = launchd_target();
                 let _ = run_quiet("launchctl", &["bootout", &target, &file.display().to_string()]);
             } else {
                 let _ = run_quiet("systemctl", &["--user", "disable", "--now", UNIT_NAME]);

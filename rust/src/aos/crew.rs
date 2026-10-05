@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 /// One agent CLI aos knows how to find.
@@ -473,30 +473,44 @@ fn search_dirs() -> Vec<PathBuf> {
             dirs.push(home.join(d));
         }
     }
+    #[cfg(unix)]
     for d in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
         dirs.push(PathBuf::from(d));
+    }
+    #[cfg(windows)]
+    {
+        // Common homes for npm/Scoop-installed CLIs that a PATH seen from a
+        // desktop app may not include: npm's global folder and Scoop shims.
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            dirs.push(PathBuf::from(appdata).join("npm"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            dirs.push(PathBuf::from(local).join("Programs"));
+        }
+        if let Some(home) = dirs::home_dir() {
+            dirs.push(home.join("scoop").join("shims"));
+        }
     }
     dirs
 }
 
 fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    crate::platform::is_executable(path)
 }
 
 pub fn find_binary(name: &str) -> Option<PathBuf> {
     search_dirs()
         .into_iter()
-        .map(|d| d.join(name))
+        .flat_map(|d| crate::platform::dir_candidates(&d, name))
         .find(|p| is_executable(p))
 }
 
 /// `<cli> --version`, first line, or None if it does not answer within 3s.
 pub fn probe_version(path: &Path) -> Option<String> {
-    let mut child = Command::new(path)
-        .arg("--version")
+    // A .cmd/.bat shim goes through cmd.exe with quoting-checked args (and
+    // refuses rather than risk interpolation); everything else runs directly.
+    let mut child = crate::platform::program_command(path, &["--version".to_string()])
+        .ok()?
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1077,8 +1091,10 @@ pub fn connect(bus: &Bus, paths: &Paths, found: &[Found], req: &Connect) -> Resu
         )
     } else {
         let bin = &req.command[0];
-        let path = if bin.contains('/') {
-            Some(PathBuf::from(bin)).filter(|p| is_executable(p))
+        let path = if crate::platform::looks_like_path(bin) {
+            crate::platform::path_candidates(bin)
+                .into_iter()
+                .find(|p| is_executable(p))
         } else {
             find_binary(bin)
         };
@@ -1495,9 +1511,7 @@ pub fn role_prompt(config_path: &Path, agent_id: &str) -> Option<String> {
 // ------------------------------------------------------------------ processes
 
 fn alive(pid: i32) -> bool {
-    pid > 0
-        && (unsafe { libc::kill(pid, 0) } == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+    pid > 0 && crate::platform::pid_alive(pid)
 }
 
 /// The pid of this agent's supervisor, if one is running.
@@ -1536,8 +1550,12 @@ pub fn trust(paths: &Paths, dir: &Path) -> Result<()> {
 
 /// Why agents must not work in this folder, if they must not.
 pub fn unsafe_workdir(dir: &Path) -> Option<String> {
-    if dir == Path::new("/") {
-        return Some("aos is in / . cd into a project folder first".into());
+    if dir.parent().is_none() {
+        // A filesystem root ("/", "C:\\", "\\\\host\\share\\"): never the whole disk.
+        return Some(format!(
+            "aos is in {} . cd into a project folder first",
+            dir.display()
+        ));
     }
     if dirs::home_dir().is_some_and(|h| h == dir) {
         return Some(
@@ -1592,26 +1610,24 @@ pub fn start_with(
             .open(paths.out_file(id));
         let r = out.map_err(BusError::from).and_then(|out| {
             let err = out.try_clone()?;
-            use std::os::unix::process::CommandExt;
-            let mut cmd = Command::new(exe);
-            cmd.arg("--db")
-                .arg(db_path)
-                .arg("supervise")
-                .arg(id)
-                .arg(workdir)
-                .arg("--config")
-                .arg(paths.crew())
-                .current_dir(workdir)
+            // Every argument goes into program_command: a .cmd shim is sealed
+            // into one quoted command line there — later .arg()s would escape it.
+            let supervise_args: Vec<std::ffi::OsString> = vec![
+                "--db".into(),
+                db_path.as_os_str().into(),
+                "supervise".into(),
+                id.as_str().into(),
+                workdir.as_os_str().into(),
+                "--config".into(),
+                paths.crew().as_os_str().into(),
+            ];
+            let mut cmd = crate::platform::program_command(exe, &supervise_args)?;
+            cmd.current_dir(workdir)
                 .stdin(Stdio::null())
                 .stdout(out)
                 .stderr(err);
             // Its own session: closing the terminal or quitting aos leaves it running.
-            unsafe {
-                cmd.pre_exec(|| {
-                    libc::setsid();
-                    Ok(())
-                });
-            }
+            crate::platform::detach(&mut cmd);
             let mut child = cmd.spawn()?;
             let pid = child.id() as i32;
             // Reap it if it exits while aos is still open.
@@ -1675,8 +1691,19 @@ pub fn stop(paths: &Paths, ids: &[String]) -> Vec<(String, Result<bool>)> {
     for id in ids {
         match running_pid(paths, id) {
             Some(pid) => {
+                #[cfg(unix)]
                 unsafe {
                     libc::kill(pid, libc::SIGINT);
+                }
+                #[cfg(windows)]
+                {
+                    // A detached (windowless) supervisor cannot take a console
+                    // Ctrl event, so the stop request is a file it polls:
+                    // <agent>.stop next to <agent>.pid.
+                    let _ = fs::write(
+                        crate::platform::stop_file_for(&paths.pid_file(id)),
+                        "stop\n",
+                    );
                 }
                 asked.push((id.clone(), Some(pid)));
             }

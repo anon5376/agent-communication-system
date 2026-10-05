@@ -18,7 +18,7 @@ type ClaimCandidate = (i64, String, Option<String>, Option<String>, Vec<String>)
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+
 use std::path::{Path, PathBuf};
 
 fn now_ms() -> i64 {
@@ -905,7 +905,7 @@ impl Bus {
         let dir = self.home.join("inbox");
         let _ = (|| -> Result<()> {
             fs::create_dir_all(&dir)?;
-            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+            crate::platform::chmod_private(&dir, 0o700);
             for (agent_id, seq) in &pending {
                 let path = dir.join(format!("{agent_id}.seq"));
                 let temporary = path.with_extension(format!("{}.tmp", std::process::id()));

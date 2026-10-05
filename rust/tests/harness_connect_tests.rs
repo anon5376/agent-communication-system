@@ -12,6 +12,7 @@ use acs::types::OPERATOR_ID;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -52,10 +53,19 @@ fn only(ids: &[&str]) -> Vec<Found> {
         .collect()
 }
 
+#[cfg(unix)]
 fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// Windows: a .cmd shim (runnable through cmd.exe, found via PATHEXT).
+#[cfg(windows)]
+fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let path = dir.join(format!("{name}.cmd"));
+    fs::write(&path, format!("@echo off\r\n{body}\r\n")).unwrap();
     path
 }
 
@@ -416,6 +426,7 @@ fn wait_for<F: Fn() -> bool>(what: &str, check: F) {
     panic!("timed out waiting for {what}");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_cli_without_bus_tools_works_a_task_and_talks_from_its_shell() {
     let dir = fresh_dir("e2e-managed");
@@ -478,6 +489,7 @@ printf '%s' "$1" | grep -q 'do the thing' && echo "echoer finished the task it w
     assert!(inbox.contains("started as echoer"), "{inbox}");
 }
 
+#[cfg(unix)]
 #[test]
 fn mcp_config_file_starts_a_bus_server_for_that_agent() {
     let dir = fresh_dir("e2e-mcp");
@@ -708,7 +720,8 @@ fn provider_clis_run_one_shot_with_the_bus_and_ask_before_skipping_approvals() {
         inv.args[at + 1],
         format!(
             "qagent:QAGENT_AGENT_ID=s1 QAGENT_BUS_DB={} /opt/aos mcp",
-            db.display()
+            // mcp_command_for canonicalizes the db path (\\?\ verbatim on Windows).
+            db.canonicalize().unwrap_or_else(|_| db.clone()).display()
         )
     );
     assert_eq!(inv.environment["GOOSE_MODE"], "auto");
@@ -748,4 +761,212 @@ fn provider_clis_run_one_shot_with_the_bus_and_ask_before_skipping_approvals() {
     assert!(inv.args.contains(&"--ask".to_string()));
     let (inv, _) = invocation(&paths, &db, "s1", &workdir);
     assert!(!inv.environment.contains_key("GOOSE_MODE"));
+}
+
+// --------------------------------------------- end to end (windows builds)
+
+/// Windows counterpart of `a_cli_without_bus_tools_works_a_task_and_talks_from_its_shell`.
+/// The connected CLI is the qagent exe itself sending the operator mail: a
+/// real .exe, so the multi-line {prompt} rides argv (a .cmd shim correctly
+/// refuses arguments cmd.exe cannot represent).
+#[cfg(windows)]
+#[test]
+fn a_connected_exe_cli_works_a_task_and_talks_on_the_bus() {
+    let dir = fresh_dir("e2e-managed-win");
+    let (bus, paths) = bus_in(&dir);
+    let workdir = fresh_dir("e2e-managed-win-work");
+    let found = only(&["claude"]);
+    crew::setup(&bus, &paths, &found, false).unwrap();
+    let qagent = env!("CARGO_BIN_EXE_qagent");
+    crew::connect(
+        &bus,
+        &paths,
+        &found,
+        &req(
+            "echoer",
+            None,
+            &[qagent, "send", "operator", "started as {agentId}", "{prompt}"],
+            false,
+        ),
+    )
+    .unwrap();
+
+    let run = supervise_in_thread(&bus.db_path, &paths, "echoer", &workdir);
+    let op = bus.identify(Some(OPERATOR_ID)).unwrap();
+    bus.create_task(
+        &op,
+        CreateTaskInput {
+            title: "do the thing".to_string(),
+            to: Some("echoer".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    wait_for("task submitted", || {
+        bus.get_task(1)
+            .map(|t| t.task.state == "submitted")
+            .unwrap_or(false)
+    });
+    run.stop.store(true, Ordering::SeqCst);
+    run.handle.join().unwrap().unwrap();
+
+    let inbox = Command::new(qagent)
+        .args([
+            "--db",
+            bus.db_path.to_str().unwrap(),
+            "--as",
+            OPERATOR_ID,
+            "inbox",
+            "--peek",
+        ])
+        .output()
+        .unwrap();
+    let inbox = String::from_utf8_lossy(&inbox.stdout);
+    assert!(inbox.contains("started as echoer"), "{inbox}");
+}
+
+/// Windows counterpart of `mcp_config_file_starts_a_bus_server_for_that_agent`:
+/// {mcpConfig} is written and handed to a real exe, then the server the file
+/// names is launched and answers whoami.
+#[cfg(windows)]
+#[test]
+fn mcp_config_file_starts_a_bus_server_on_windows() {
+    let dir = fresh_dir("e2e-mcp-win");
+    let (bus, paths) = bus_in(&dir);
+    let workdir = fresh_dir("e2e-mcp-win-work");
+    let found = only(&["claude"]);
+    crew::setup(&bus, &paths, &found, false).unwrap();
+    let qagent = env!("CARGO_BIN_EXE_qagent");
+    crew::connect(
+        &bus,
+        &paths,
+        &found,
+        &req(
+            "mcpcli",
+            None,
+            &[
+                qagent,
+                "fake-harness",
+                "--mode",
+                "success",
+                "--mcp-config",
+                "{mcpConfig}",
+                "{prompt}",
+            ],
+            false,
+        ),
+    )
+    .unwrap();
+
+    let run = supervise_in_thread(&bus.db_path, &paths, "mcpcli", &workdir);
+    let op = bus.identify(Some(OPERATOR_ID)).unwrap();
+    bus.send(
+        &op,
+        acs::bus::SendInput {
+            to: "mcpcli".to_string(),
+            subject: Some("hello".to_string()),
+            body: "hi".to_string(),
+            msg_type: None,
+            thread: None,
+            task_id: None,
+            refs: None,
+            requires_ack: false,
+        },
+    )
+    .unwrap();
+    // command_prepare writes <home>/mcp/mcpcli.mcp.json when a turn starts.
+    let mcp_file = paths.home.join("mcp").join("mcpcli.mcp.json");
+    wait_for("the mcp config", || mcp_file.exists());
+    run.stop.store(true, Ordering::SeqCst);
+    run.handle.join().unwrap().unwrap();
+
+    // Launch the server exactly as the file says and ask who it is.
+    let cfg: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&mcp_file).unwrap()).unwrap();
+    let server = &cfg["mcpServers"]["qagent"];
+    let mut cmd = Command::new(server["command"].as_str().unwrap());
+    for a in server["args"].as_array().unwrap() {
+        cmd.arg(a.as_str().unwrap());
+    }
+    for (k, v) in server["env"].as_object().unwrap() {
+        cmd.env(k, v.as_str().unwrap());
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    for (id, method, params) in [
+        (
+            1,
+            "initialize",
+            serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}),
+        ),
+        (
+            2,
+            "tools/call",
+            serde_json::json!({"name": "bus_whoami", "arguments": {}}),
+        ),
+    ] {
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+        )
+        .unwrap();
+    }
+    let mut whoami = String::new();
+    for line in lines.by_ref() {
+        let line = line.unwrap();
+        if line.contains("\"id\":2") {
+            whoami = line;
+            break;
+        }
+    }
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(whoami.contains("mcpcli"), "{whoami}");
+}
+
+/// The .cmd provider path: PATHEXT finds the shim, cmd.exe runs it through
+/// /d /s /c with quoted args, and an argument cmd.exe cannot represent
+/// (%, a quote, a newline) is refused rather than interpolated.
+#[cfg(windows)]
+#[test]
+fn cmd_shims_run_through_cmd_and_unsafe_args_are_refused() {
+    let dir = fresh_dir("cmd-shim");
+    // PATHEXT resolution: `mytool` (no extension) finds `mytool.cmd`.
+    let tool = script(&dir, "mytool", "echo shim-ran > \"%CD%\\shim-ran.txt\"");
+    let found = acs::platform::path_candidates(tool.to_str().unwrap())
+        .into_iter()
+        .find(|p| acs::platform::is_executable(p));
+    assert_eq!(found.as_deref(), Some(tool.as_path()));
+
+    // It runs: output file lands in the child's working dir.
+    let workdir = fresh_dir("cmd-shim-work");
+    let mut child = acs::platform::program_command(&tool, &["arg one".to_string()])
+        .unwrap()
+        .current_dir(&workdir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let status = child.wait().unwrap();
+    assert!(status.success());
+    assert_eq!(
+        fs::read_to_string(workdir.join("shim-ran.txt")).unwrap(),
+        "shim-ran \r\n"
+    );
+
+    // Arguments cmd.exe cannot safely represent are refused.
+    for bad in ["a%PATH%b", "say \"hi\"", "two\nlines"] {
+        let err =
+            acs::platform::program_command(&tool, &[bad.to_string()]).unwrap_err();
+        assert!(err.message.contains("cannot be quoted"), "{bad}: {err}");
+    }
 }

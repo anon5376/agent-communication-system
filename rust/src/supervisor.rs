@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -195,13 +195,7 @@ pub struct ProcessResult {
     pub timed_out: bool,
 }
 
-fn kill_group(pid: u32, signal: libc::c_int) {
-    unsafe {
-        if libc::kill(-(pid as i32), signal) != 0 {
-            libc::kill(pid as i32, signal);
-        }
-    }
-}
+use crate::platform::{kill_group, SIGKILL, SIGTERM};
 
 struct OutputCapture {
     head: Vec<u8>,
@@ -243,18 +237,38 @@ pub fn run_harness_process(
     child_pid: &Arc<Mutex<Option<u32>>>,
 ) -> ProcessResult {
     let started = Instant::now();
-    use std::os::unix::process::CommandExt;
-    let spawn_result = Command::new(command)
-        .args(args)
-        .current_dir(workdir)
+    let mut cmd = match crate::platform::program_command(Path::new(command), args) {
+        Ok(cmd) => cmd,
+        Err(error) => {
+            return ProcessResult {
+                code: -1,
+                output: format!("\nspawn error: {error}"),
+                duration_ms: started.elapsed().as_millis() as u64,
+                timed_out: false,
+            };
+        }
+    };
+    cmd.current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_clear()
-        .envs(environment)
+        .envs(environment);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
         // Own process group so timeout/stop can kill the whole tree.
-        .process_group(0)
-        .spawn();
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Detached (own process group, no console) so it survives the app
+        // closing — the Windows counterpart of process_group(0)/setsid. The
+        // Job Object assigned below is what lets stop kill the whole tree.
+        cmd.creation_flags(crate::platform::DETACHED_SPAWN_FLAGS);
+    }
+    let spawn_result = cmd.spawn();
 
     let mut child: Child = match spawn_result {
         Ok(c) => c,
@@ -268,6 +282,8 @@ pub fn run_harness_process(
         }
     };
     let pid = child.id();
+    #[cfg(windows)]
+    crate::platform::jobs::watch_tree(pid);
     *child_pid.lock().unwrap() = Some(pid);
 
     let capture = Arc::new(Mutex::new(OutputCapture {
@@ -319,16 +335,18 @@ pub fn run_harness_process(
                 return;
             }
             timed_out.store(true, Ordering::SeqCst);
-            kill_group(pid, libc::SIGTERM);
+            kill_group(pid, SIGTERM);
             std::thread::sleep(Duration::from_millis(3_000));
             if !settled.load(Ordering::SeqCst) {
-                kill_group(pid, libc::SIGKILL);
+                kill_group(pid, SIGKILL);
             }
         });
     }
 
     let status = child.wait();
     settled.store(true, Ordering::SeqCst);
+    #[cfg(windows)]
+    crate::platform::jobs::forget(pid);
     *child_pid.lock().unwrap() = None;
     let _ = out_thread.join();
     let _ = err_thread.join();
@@ -556,25 +574,18 @@ fn rotate_log(path: &Path) {
 /// has grown past the cap, copy it to `.out.1` and truncate it in place (the file
 /// is open in append mode, so writing carries on at the new end).
 fn cap_stdout_file(path: &Path) {
-    use std::os::unix::fs::MetadataExt;
     let Ok(meta) = fs::metadata(path) else {
         return;
     };
     if meta.len() <= MAX_LOG_BYTES {
         return;
     }
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(1, &mut st) } != 0
-        || st.st_dev as u64 != meta.dev()
-        || st.st_ino as u64 != meta.ino()
-    {
+    if !crate::platform::stdout_is_file(path, &meta) {
         return;
     }
     let _ = std::io::stdout().flush();
     if fs::copy(path, rotated(path)).is_ok() {
-        unsafe {
-            libc::ftruncate(1, 0);
-        }
+        crate::platform::truncate_stdout(path);
     }
 }
 
@@ -680,47 +691,13 @@ pub fn process_running(pid: i32, words: &[&str]) -> bool {
     if pid <= 0 {
         return false;
     }
-    let alive = unsafe { libc::kill(pid, 0) } == 0
-        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-    if !alive {
+    if !crate::platform::pid_alive(pid) {
         return false;
     }
     if pid as u32 == std::process::id() {
         return true;
     }
-    let args: Option<Vec<String>> = if cfg!(target_os = "linux") {
-        fs::read(format!("/proc/{pid}/cmdline")).ok().map(|raw| {
-            raw.split(|b| *b == 0)
-                .map(|a| String::from_utf8_lossy(a).to_string())
-                .collect()
-        })
-    } else {
-        // No /proc: ask ps once per live pid (aos checks on every screen refresh).
-        static SEEN: Mutex<Option<HashMap<i32, Vec<String>>>> = Mutex::new(None);
-        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-        let seen = seen.get_or_insert_with(HashMap::new);
-        if let Some(args) = seen.get(&pid) {
-            Some(args.clone())
-        } else {
-            let args = Command::new("ps")
-                .args(["-o", "command=", "-p", &pid.to_string()])
-                .stderr(Stdio::null())
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .split_whitespace()
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                });
-            if let Some(args) = &args {
-                seen.insert(pid, args.clone());
-            }
-            args
-        }
-    };
-    match args {
+    match crate::platform::process_args(pid) {
         Some(args) if !args.is_empty() => words.iter().all(|w| args.iter().any(|a| a == w)),
         _ => true,
     }
@@ -801,7 +778,7 @@ fn link_pid_file(path: &Path, suffix: &str) -> std::io::Result<()> {
         std::process::id()
     ));
     fs::write(&mine, format!("{}\n", std::process::id()))?;
-    let _ = fs::set_permissions(&mine, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    crate::platform::chmod_private(&mine, 0o600);
     let linked = fs::hard_link(&mine, path);
     let _ = fs::remove_file(&mine);
     linked
@@ -868,7 +845,16 @@ fn reap_stale_lock(path: &Path, stale_pid: i32) -> Result<()> {
                 .ok()
                 .and_then(|t| t.elapsed().ok())
                 .unwrap_or_default();
-            let reaper_alive = reaper > 0 && unsafe { libc::kill(reaper, 0) } == 0;
+            let reaper_alive = reaper > 0 && {
+                #[cfg(unix)]
+                {
+                    (unsafe { libc::kill(reaper, 0) }) == 0
+                }
+                #[cfg(windows)]
+                {
+                    crate::platform::pid_alive(reaper)
+                }
+            };
             if reaper != 0 && !reaper_alive && age > Duration::from_secs(2) {
                 let _ = fs::remove_file(&reap);
             }
@@ -1017,6 +1003,30 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
     let child_pid: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
     let mut release: Option<Box<dyn FnOnce()>> = None;
 
+    // Windows has no signal a windowless child can take: `aos stop` and the
+    // desktop `stop` action write <agent>.stop next to the pid file instead,
+    // and this watcher turns it into the same flag Ctrl-C sets. A file left
+    // over from a previous run is cleared first so only a live request stops us.
+    #[cfg(windows)]
+    let stop_file = crate::platform::stop_file_for(
+        &home
+            .join("supervisors")
+            .join(format!("{}.pid", options.agent_id)),
+    );
+    #[cfg(windows)]
+    {
+        let _ = fs::remove_file(&stop_file);
+        let stop = options.stop.clone();
+        let stop_file = stop_file.clone();
+        std::thread::spawn(move || loop {
+            if stop.load(Ordering::SeqCst) || stop_file.exists() {
+                stop.store(true, Ordering::SeqCst);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        });
+    }
+
     // Abort listener: stop -> SIGTERM the running CLI's process group (SIGKILL after 3s).
     {
         let stop = options.stop.clone();
@@ -1027,10 +1037,10 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
             }
             let pid = *child_pid.lock().unwrap();
             if let Some(pid) = pid {
-                kill_group(pid, libc::SIGTERM);
+                kill_group(pid, SIGTERM);
                 std::thread::sleep(Duration::from_millis(3_000));
                 if child_pid.lock().unwrap().map(|p| p == pid).unwrap_or(false) {
-                    kill_group(pid, libc::SIGKILL);
+                    kill_group(pid, SIGKILL);
                 }
             }
         });
@@ -1573,18 +1583,20 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
 
     // finally: kill the running CLI's process group, release the lock, close.
     if let Some(pid) = child_pid.lock().unwrap().take() {
-        kill_group(pid, libc::SIGTERM);
+        kill_group(pid, SIGTERM);
         let pid_arc = Arc::clone(&child_pid);
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(3_000));
             if pid_arc.lock().unwrap().is_none() {
-                kill_group(pid, libc::SIGKILL);
+                kill_group(pid, SIGKILL);
             }
         });
     }
     if let Some(release) = release.take() {
         release();
     }
+    #[cfg(windows)]
+    let _ = fs::remove_file(&stop_file);
     log("supervisor stopped");
     result
 }

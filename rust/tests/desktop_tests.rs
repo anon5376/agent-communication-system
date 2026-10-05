@@ -464,6 +464,7 @@ fn detect_lists_providers_without_a_bus() {
 
 /// A fake `qagent` that does what a supervisor's first breath does: writes its
 /// pid file under <home>/supervisors/, then stays alive so `running` is true.
+#[cfg(unix)]
 fn fake_qagent(dir: &Path) -> PathBuf {
     let script = dir.join("qagent");
     std::fs::write(
@@ -485,11 +486,50 @@ fn fake_qagent(dir: &Path) -> PathBuf {
          wait\n",
     )
     .unwrap();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+    script
+}
+
+/// Windows: the same fake as a .cmd shim wrapping a PowerShell body (cmd.exe
+/// cannot report its own pid). Besides staying alive it honours the stop
+/// convention a detached supervisor watches for: <id>.stop next to <id>.pid.
+#[cfg(windows)]
+fn fake_qagent(dir: &Path) -> PathBuf {
+    let ps1 = dir.join("qagent.ps1");
+    std::fs::write(
+        &ps1,
+        "$db=\"\"; $id=\"\"\r\n\
+         for ($i=0; $i -lt $args.Count; $i++) {\r\n\
+         \x20 if ($args[$i] -eq \"--db\") { $db=$args[$i+1]; $i++ }\r\n\
+         \x20 elseif ($args[$i] -eq \"supervise\") { $id=$args[$i+1]; $i++ }\r\n\
+         }\r\n\
+         $busHome = Split-Path $db -Parent\r\n\
+         New-Item -ItemType Directory -Force \"$busHome\\supervisors\" | Out-Null\r\n\
+         $pidFile = \"$busHome\\supervisors\\$id.pid\"\r\n\
+         Set-Content $pidFile \"$PID`n\"\r\n\
+         $stopFile = \"$busHome\\supervisors\\$id.stop\"\r\n\
+         $deadline = (Get-Date).AddSeconds(120)\r\n\
+         while ((Get-Date) -lt $deadline) {\r\n\
+         \x20 if (Test-Path $stopFile) {\r\n\
+         \x20   Remove-Item $stopFile,$pidFile -Force -ErrorAction SilentlyContinue\r\n\
+         \x20   exit 0\r\n\
+         \x20 }\r\n\
+         \x20 Start-Sleep -Milliseconds 200\r\n\
+         }\r\n",
+    )
+    .unwrap();
+    let script = dir.join("qagent.cmd");
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"{}\" %*\r\n",
+            ps1.display()
+        ),
+    )
+    .unwrap();
     script
 }
 
@@ -559,14 +599,25 @@ fn start_then_stop_with_a_fake_qagent() {
     // The workdir was trusted by the confirmed start.
     assert!(crew::is_trusted(&paths, &workdir_canonical(&workdir)));
 
-    let (reply, code) = call(&db, "snapshot", json!({}));
-    let data = ok(&reply, code);
-    let builder = data["agents"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["id"] == "builder")
-        .unwrap();
+    // The fake writes its pid file on its own clock (a cold PowerShell start
+    // on Windows can outlive start's 1.2s wait): poll the snapshot.
+    let mut builder = json!(null);
+    for _ in 0..100 {
+        let (reply, code) = call(&db, "snapshot", json!({}));
+        let data = ok(&reply, code);
+        let found = data["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == "builder")
+            .cloned()
+            .unwrap();
+        builder = found;
+        if builder["running"] == true {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     assert_eq!(builder["running"], true, "{builder}");
 
     let (reply, code) = call(&db, "stop", json!({"ids": ["builder"]}));

@@ -4,7 +4,6 @@
 use crate::error::{BusError, Result};
 use rusqlite::Connection;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 pub const BUSY_TIMEOUT_MS: u32 = 5000;
@@ -59,22 +58,20 @@ pub fn absolutize(path: &Path) -> PathBuf {
             .unwrap_or_else(|_| PathBuf::from("/"))
             .join(path)
     };
-    let mut out: Vec<std::ffi::OsString> = Vec::new();
+    // Lexical normalization (Node's path.resolve — no filesystem lookups).
+    // Components keep the platform's prefix/root (C:\, \\server\share, /)
+    // instead of being re-rooted on "/", and ".." cannot cross the root:
+    // PathBuf::pop on a bare root does nothing.
+    let mut result = PathBuf::new();
     for component in joined.components() {
         use std::path::Component::*;
         match component {
             CurDir => {}
             ParentDir => {
-                if out.len() > 1 {
-                    out.pop();
-                }
+                result.pop();
             }
-            other => out.push(other.as_os_str().to_os_string()),
+            other => result.push(other.as_os_str()),
         }
-    }
-    let mut result = PathBuf::from("/");
-    for part in out {
-        result.push(part);
     }
     result
 }
@@ -177,12 +174,12 @@ pub fn open_database(path: &Path) -> Result<Connection> {
     let dir = path.parent().unwrap_or(Path::new("."));
     if !dir.exists() {
         fs::create_dir_all(dir)?;
-        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        crate::platform::chmod_private(dir, 0o700);
     }
     let created = !path.exists();
     let conn = Connection::open(path)?;
     if created {
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        crate::platform::chmod_private(path, 0o600);
     }
     conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS as u64))?;
     let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;

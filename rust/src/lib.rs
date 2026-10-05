@@ -20,6 +20,7 @@ pub mod import;
 pub mod mcp;
 pub mod mcp_config;
 pub mod openai_harness;
+pub mod platform;
 pub mod render;
 pub mod supervisor;
 pub mod types;

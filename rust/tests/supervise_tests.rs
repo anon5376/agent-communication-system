@@ -451,9 +451,10 @@ fn supervise_stop_kills_hung_process_group() {
     stop.store(true, Ordering::SeqCst);
     handle.join().unwrap().unwrap();
 
-    // Both the harness and its grandchild must be dead — process-group kill.
+    // Both the harness and its grandchild must be dead — process-group kill
+    // (Job Object terminate on Windows).
     wait_for(Duration::from_secs(8), "process group dead", || {
-        let dead = |p: i32| unsafe { libc::kill(p, 0) } != 0;
+        let dead = |p: i32| !acs::platform::pid_alive(p);
         dead(pid) && dead(grandchild)
     });
     std::env::remove_var("FAKE_HARNESS_STATE");
@@ -576,12 +577,15 @@ fn supervise_pauses_on_budget_and_resumes() {
         paused().is_some()
     });
     assert_eq!(paused().unwrap().reason, "budget reached: 1 of 1 turns");
-    let mail = e.bus.inbox(&e.operator, true, None).unwrap().messages;
-    assert!(
-        mail.iter()
-            .any(|m| m.subject == "w1 paused: budget reached (1 of 1 turns)"),
-        "{mail:?}"
-    );
+    // The pause meta is written before the operator mail; wait for both.
+    wait_for(Duration::from_secs(10), "budget pause mail", || {
+        e.bus
+            .inbox(&e.operator, true, None)
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| m.subject == "w1 paused: budget reached (1 of 1 turns)")
+    });
 
     // Paused: new work waits.
     let second = add("second");
@@ -741,7 +745,12 @@ fn supervise_does_not_replay_a_turn_whose_usage_cannot_be_saved() {
     assert!(logs.lock().unwrap().iter().any(|l| l.contains("could not save usage")));
     let paused = e.bus.get_agent("w5").unwrap().and_then(|a| acs::control::paused(&a.meta));
     let reason = paused.expect("paused after unsaved turns").reason;
-    assert!(reason.contains("budget cannot be enforced"), "{reason}");
+    // The reason is cut to 200 chars; a long Windows temp path can push the
+    // "budget cannot be enforced" tail off the end.
+    assert!(
+        reason.contains("usage could not be saved") || reason.contains("budget cannot be enforced"),
+        "{reason}"
+    );
 
     stop.store(true, Ordering::SeqCst);
     handle.join().unwrap().unwrap();
@@ -874,12 +883,29 @@ fn supervisor_alive_checks_the_command_line() {
     assert!(supervisor_alive(std::process::id() as i32, "anyone"));
     assert!(!supervisor_alive(0, "w1"));
     // A live process that is not a supervisor (a reused pid after a reboot).
-    let mut other = std::process::Command::new("sleep").arg("30").spawn().unwrap();
-    let pid = other.id() as i32;
-    assert!(!supervisor_alive(pid, "w1"));
-    other.kill().unwrap();
-    other.wait().unwrap();
-    assert!(!supervisor_alive(pid, "w1"));
+    #[cfg(unix)]
+    {
+        let mut other = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = other.id() as i32;
+        assert!(!supervisor_alive(pid, "w1"));
+        other.kill().unwrap();
+        other.wait().unwrap();
+        assert!(!supervisor_alive(pid, "w1"));
+    }
+    // Windows cannot read a foreign command line, so a live pid counts and
+    // only death clears it — see platform::process_args.
+    #[cfg(windows)]
+    {
+        let mut other = std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .spawn()
+            .unwrap();
+        let pid = other.id() as i32;
+        assert!(supervisor_alive(pid, "w1"));
+        other.kill().unwrap();
+        other.wait().unwrap();
+        assert!(!supervisor_alive(pid, "w1"));
+    }
 }
 
 #[test]
@@ -1141,7 +1167,18 @@ fn simultaneous_supervisors_for_one_agent_leave_exactly_one_running() {
         let mut refusals = 0;
         for child in &mut children {
             if child.try_wait().unwrap().is_none() {
-                unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(child.id() as i32, libc::SIGINT)
+                };
+                #[cfg(windows)]
+                {
+                    // The supervisor watches <agent>.stop next to its pid file.
+                    let _ = std::fs::write(
+                        acs::platform::stop_file_for(&e.home.join("supervisors/w1.pid")),
+                        "stop\n",
+                    );
+                }
             }
             if child.wait_with_output_ref().contains("is already running") {
                 refusals += 1;

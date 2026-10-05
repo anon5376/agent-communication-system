@@ -323,9 +323,11 @@ fn bundled_sibling(name: &str, env: &str) -> Option<PathBuf> {
         }
     }
     let exe = std::env::current_exe().ok()?;
+    // dir_candidates adds PATHEXT variants on Windows (qagent -> qagent.exe).
     exe.parent()
-        .map(|dir| dir.join(name))
-        .filter(|path| path.is_file())
+        .map(|dir| crate::platform::dir_candidates(dir, name))?
+        .into_iter()
+        .find(|path| path.is_file())
 }
 
 // --------------------------------------------------------------- records
