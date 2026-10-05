@@ -499,7 +499,9 @@ Written against `main` at `4d4cf5a` and `rust-port` at `c6df26b`, read from the 
 | Bus, tasks, leases, review gate, MCP server, harness adapter table (`ADAPTERS`) | yes | yes (`rust/README.md` lists the same adapters) |
 | `task stalled`, `task requeue`, `trace` | yes | yes (`rust/src/cli.rs`) |
 | `supervise --roster`, `supervise --auto-requeue-min` | yes | no |
-| Per-task git worktrees (`claim --worktree`, `"isolation": "worktree"`) | yes | no |
+| Per-task git worktrees (`claim --worktree`, `"isolation": "worktree"`) | yes | no; the supervisor refuses to start under `"isolation": "worktree"` (fails closed) |
+| Delegation and `maxConcurrentTasks` enforced in the core | yes | yes (on `rust-port` since #32) |
+| `aos watch` restarts crashed agents, claim renewal, guard, default budget | no | yes (on `rust-port` since #28) |
 | `hook claude-code` (wake an idle Claude Code session on new mail) | yes | no |
 | Web dashboard | yes | yes (`rust/src/dashboard.rs`) |
 | `acs` terminal UI | no | yes (`rust/src/app.rs`) |

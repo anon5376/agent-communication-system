@@ -89,6 +89,8 @@ Topics: `mcp` `mcp-server` `model-context-protocol` `ai-agents` `multi-agent` `a
 | TS and Rust share one bus | `scripts/v2-interop-smoke.mjs` in `rust-port` CI | 2026-10-04 |
 | CLI call ~2 ms (Rust) vs ~77 ms (Node) | `inbox --peek`, mean of 20 calls, Linux container | 2026-10-04 |
 | Doctor, trace and dashboard list what needs the operator with reason, evidence, next command | `src/attention.ts`, merged in #31; `qagent doctor` output checked on a sample bus | 2026-10-04 |
+| `aos watch` restarts crashed agents; claims renewed during long turns | `rust/AOS.md` "Long unattended runs", #28 merged into `rust-port`; not in `aos-v0.1.0` | 2026-10-05 |
+| Delegation and claim limits enforced in the core, both builds | TS `tests/reliability.test.ts` (#29, on `main`); Rust `rust/tests/reliability_tests.rs` (#32, on `rust-port`) | 2026-10-05 |
 | Release binary size | `aos` x86_64 Linux: 5,242,048 bytes (earlier drafts said 3 or 4 MB, which was the older `acs` binary) | 2026-10-04 |
 
-Do not claim, until evidence exists: "works with every agent", Windows support, macOS tested by hand, a dollar cap (dollar budgets are checked between turns and only when a CLI reports cost), automatic crash recovery in `aos` before PR #28 merges, star counts or user numbers, or "first"/"only" anything.
+Do not claim, until evidence exists: "works with every agent", Windows support, macOS tested by hand, a dollar cap (dollar budgets are checked between turns and only when a CLI reports cost), automatic restart of crashed agents in `aos` before a release after 2026-10-05 includes #28, star counts or user numbers, or "first"/"only" anything.
