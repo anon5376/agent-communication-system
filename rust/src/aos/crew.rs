@@ -839,6 +839,48 @@ pub fn load_crew(paths: &Paths) -> Result<Option<BusConfig>> {
     load_config(&paths.crew()).map(Some)
 }
 
+/// The budget aos gives a crew member the first time it starts one, so a crew left
+/// alone for days stops and asks rather than running up a bill: 200 turns, 12 hours
+/// of CLI time, or $20 (dollars as the CLI reports them), whichever comes first.
+/// The agent then pauses itself and writes to the operator; `resume` gives a fresh
+/// allowance and `budget <agent> off` removes it for good.
+pub const DEFAULT_BUDGET: crate::control::Limits = crate::control::Limits {
+    turns: Some(200.0),
+    minutes: Some(720.0),
+    usd: Some(20.0),
+};
+
+/// Give each agent in `ids` the default budget, once: an agent that already has a
+/// budget, or that got the default before (and may have had it turned off), is left
+/// alone. Returns the agents that got it.
+pub fn apply_default_budget(bus: &Bus, paths: &Paths, ids: &[String]) -> Result<Vec<String>> {
+    let file = paths.dir.join("default-budget-given");
+    let mut given: Vec<String> = fs::read_to_string(&file)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let op = bus.identify(Some(OPERATOR_ID))?;
+    let mut applied = Vec::new();
+    for id in ids {
+        if given.contains(id) {
+            continue;
+        }
+        let Some(agent) = bus.get_agent(id)? else {
+            continue;
+        };
+        if agent.meta.get("budget").is_none() {
+            bus.set_budget(&op, id, Some(DEFAULT_BUDGET))?;
+            applied.push(id.clone());
+        }
+        given.push(id.clone());
+    }
+    fs::create_dir_all(&paths.dir)?;
+    fs::write(&file, given.join("\n") + "\n")?;
+    Ok(applied)
+}
+
 /// Agent ids in the crew file, lead first.
 pub fn member_ids(config: &BusConfig) -> Vec<String> {
     let mut ids: Vec<String> = config
@@ -1465,7 +1507,7 @@ pub fn running_pid(paths: &Paths, agent: &str) -> Option<i32> {
         .trim()
         .parse()
         .ok()?;
-    alive(pid).then_some(pid)
+    crate::supervisor::supervisor_alive(pid, agent).then_some(pid)
 }
 
 pub fn crew_workdir(paths: &Paths) -> Option<PathBuf> {
@@ -1517,13 +1559,25 @@ pub fn start(
     ids: &[String],
     workdir: &Path,
 ) -> Vec<(String, Result<i32>)> {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aos"));
+    start_with(&exe, db_path, paths, ids, workdir)
+}
+
+/// `start` with the binary that runs each supervisor named (the watcher and tests).
+/// A simulated demo bus never gets real agents, from here or from the watcher.
+pub fn start_with(
+    exe: &Path,
+    db_path: &Path,
+    paths: &Paths,
+    ids: &[String],
+    workdir: &Path,
+) -> Vec<(String, Result<i32>)> {
     if super::demo::is_simulated(&paths.home) {
         return ids
             .iter()
             .map(|id| (id.clone(), Err(BusError::invalid(SIMULATED_NOTE))))
             .collect();
     }
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aos"));
     let _ = fs::create_dir_all(paths.home.join("logs"));
     let _ = fs::write(paths.workdir_file(), format!("{}\n", workdir.display()));
     let mut spawned: Vec<(String, Result<i32>)> = Vec::new();
@@ -1539,7 +1593,7 @@ pub fn start(
         let r = out.map_err(BusError::from).and_then(|out| {
             let err = out.try_clone()?;
             use std::os::unix::process::CommandExt;
-            let mut cmd = Command::new(&exe);
+            let mut cmd = Command::new(exe);
             cmd.arg("--db")
                 .arg(db_path)
                 .arg("supervise")

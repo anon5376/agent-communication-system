@@ -8,6 +8,7 @@
 pub mod crew;
 pub mod demo;
 pub mod frame;
+pub mod keeper;
 pub mod view;
 
 use crate::bus::{Bus, CreateTaskInput, ListTasksInput, SendInput};
@@ -1399,11 +1400,27 @@ impl App {
             return Ok(false);
         }
         crew::sync_bus(&self.bus, &config)?;
+        let budgeted = crew::apply_default_budget(&self.bus, &self.paths, &ids)?;
+        if !budgeted.is_empty() {
+            self.say(dim_line(format!(
+                "{} budget: {} each, then it pauses and writes to you / budget <agent> off removes it",
+                budgeted.join(", "),
+                crew::DEFAULT_BUDGET.describe()
+            )));
+        }
+        let mut any = false;
         for (id, r) in crew::start(&self.bus.db_path, &self.paths, &ids, &dir) {
             match r {
-                Ok(pid) => self.say(ok_line(format!("{id} running / pid {pid}"))),
+                Ok(pid) => {
+                    any = true;
+                    self.say(ok_line(format!("{id} running / pid {pid}")))
+                }
                 Err(e) => self.say(fail_line(format!("{id} did not start: {}", e.message))),
             }
+        }
+        // A watcher restarts any agent that goes down without being stopped.
+        if any {
+            keeper::ensure_watcher(&self.bus.db_path);
         }
         self.say(dim_line(format!(
             "agents work in {}",
@@ -1870,6 +1887,8 @@ const USAGE: &str = "aos - mission control for a team of AI coding agents
   aos budget all 20 turns 60 min   limits per agent; budget lists them, off clears
   aos setup [--force]       find agent CLIs on this computer and write your crew
   aos doctor                check everything and say what to fix
+  aos autostart on|off      bring the crew back by itself after a reboot
+  aos watch                 restart agents that went down (aos start runs it for you)
   aos connect               list agent CLIs and how each reaches the bus
   aos connect <cli> [as <agent>] [--auto-approve]
                             put a CLI aos knows in the crew (all but claude, codex
@@ -2187,6 +2206,19 @@ pub fn main() -> i32 {
     }
     let demo = words.first().is_some_and(|a| a == "demo");
     let db_flag = flag(&argv, "--db");
+    if matches!(words.first().map(String::as_str), Some("watch") | Some("autostart")) {
+        let db_path =
+            crate::db::resolve_db_path_with(db_flag.as_deref(), |name| std::env::var(name).ok());
+        if words[0] == "autostart" {
+            return keeper::autostart(&db_path, words.get(1).map(String::as_str).unwrap_or(""));
+        }
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let stop = std::sync::Arc::clone(&stop);
+            let _ = ctrlc::set_handler(move || stop.store(true, std::sync::atomic::Ordering::SeqCst));
+        }
+        return keeper::watch(&db_path, stop);
+    }
     // The demo gets a fresh sample bus in its own temporary folder each time,
     // removed when aos leaves, so it never touches a real bus and never goes stale.
     let demo_dir = (demo && db_flag.is_none()).then(|| {

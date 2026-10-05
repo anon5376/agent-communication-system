@@ -394,6 +394,7 @@ fn supervise_in_thread(db: &Path, paths: &Paths, agent: &str, workdir: &Path) ->
         config_path: Some(paths.crew()),
         stop: Arc::clone(&stop),
         wait_ms: Some(2_000),
+        retry_base_ms: None,
         fake_harness_path: None,
         qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
         log: Some(Box::new(|_| {})),

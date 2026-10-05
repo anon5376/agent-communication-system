@@ -552,6 +552,39 @@ impl Bus {
         self.write(|bus| bus.touch(&actor.agent_id, None))
     }
 
+    /// Keep a long turn's claims alive: push the expiry of every task the caller
+    /// holds out by one claim TTL and mark it seen. Returns how many claims moved.
+    pub fn renew_claims(&self, actor: &Identity) -> Result<usize> {
+        self.write(|bus| {
+            let now = bus.now();
+            let renewed = bus
+                .conn
+                .prepare_cached(
+                    "UPDATE tasks SET claim_expires_ms = ? WHERE state = 'claimed' AND assignee = ? AND claim_expires_ms IS NOT NULL AND claim_expires_ms >= ?",
+                )?
+                .execute(params![now + bus.claim_ttl_ms, actor.agent_id, now])?;
+            bus.touch(&actor.agent_id, None)?;
+            Ok(renewed)
+        })
+    }
+
+    /// Mark the caller's inbox read through `seq` (never moves the cursor back).
+    /// The supervisor reads with peek and calls this only once a turn has used the mail.
+    pub fn mark_read_through(&self, actor: &Identity, seq: i64, count: usize) -> Result<()> {
+        let me = &actor.agent_id;
+        self.write(|bus| {
+            if bus.cursor(me)? >= seq {
+                return Ok(());
+            }
+            bus.conn.prepare_cached(
+                "INSERT INTO cursors(agent_id, last_seq) VALUES(?, ?)
+                 ON CONFLICT(agent_id) DO UPDATE SET last_seq = MAX(cursors.last_seq, excluded.last_seq)",
+            )?.execute(params![me, seq])?;
+            bus.event(me, "inbox_read", "agent", me, json!({ "cursor": seq, "count": count }))?;
+            bus.touch(me, None)
+        })
+    }
+
     // --------------------------------------------------------------- agents
 
     fn agent_exists(&self, id: &str) -> Result<bool> {

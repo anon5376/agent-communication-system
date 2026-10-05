@@ -140,6 +140,7 @@ aos budget all 20 turns 60 min   # each agent pauses itself when it reaches its 
 aos setup [--force]              # detect CLIs, write the crew
 aos connect                      # list agent CLIs; connect <cli> or connect <name> -- <command> adds one
 aos doctor                       # check everything; exits 1 if something needs fixing
+aos autostart on|off|status      # bring the crew back by itself after a reboot
 aos missions
 aos task list                    # every qagent command works through aos too
 ```
@@ -218,6 +219,31 @@ Press `c` for command home. It lists the operator's latest mail with message num
 | `reply <msg#> <text>` | an answer to that message's sender, in its thread and on its task; acknowledges it if it asked for an ack |
 | `ack <msg#>`, `read` | acknowledges one message; marks all your mail read |
 | `status`, `help`, a screen name | nothing |
+
+## Long unattended runs
+
+Each agent's supervisor is built to keep going for days without you:
+
+- A bus error (a locked database, a full disk) or a crash inside one round is logged and retried with backoff; it does not end the supervisor.
+- Mail is marked read only after a turn has used it, so a turn that fails or is stopped leaves its mail for the next turn.
+- After 5 failed turns in a row (a CLI that lost its login, a CLI missing from PATH) the agent pauses itself and writes to you, instead of using up every task. Fix the cause, then `resume <agent>`.
+- During a turn the supervisor renews the agent's task claims every minute, so a turn longer than the 2-hour claim window keeps its task.
+- `logs/<agent>.log` and `logs/<agent>.out` are capped at 10 MB each; the previous 10 MB is kept as `<file>.1`.
+- A pid file left from before a reboot that now names an unrelated process is ignored, so `aos stop` never signals that process.
+- `aos start` also starts `aos watch` in the background. It looks every 10 seconds and restarts any agent whose supervisor went down without `aos stop` (a crash, a kill, an out-of-memory kill). An agent that goes down 5 times within an hour is left down and you get a message. The watcher only restarts into the crew's folder when that folder is still trusted; until then it keeps waiting and says why in its log. It exits once no agent is running. Its log is `logs/aos-watch.log`.
+- `aos autostart on` has your system run `aos watch` when you log in (a systemd user service on Linux, a LaunchAgent on macOS), so a crew that was running before a reboot comes back by itself. A crew you stopped stays stopped. The service gets your PATH but not the rest of your shell, so a model key you only export in `~/.bashrc` or `~/.zshrc` is missing after a reboot; sign the CLI in with its own login, or put the key in the service's environment. On Linux, `loginctl enable-linger` makes it run at boot before you log in. `aos autostart off` removes it, and `aos autostart status` says whether it is on.
+
+The first time aos starts an agent, it gets a default budget of 200 turns, 720 min of CLI time or $20, whichever comes first. Dollars count only for a CLI that reports its cost (Claude Code does, Codex never does, others only sometimes), so for the rest, including a Codex builder, the turn and time limits are what stop it. When it reaches that, the agent pauses itself and writes to you, and `resume <agent>` gives it a fresh allowance. Change the budget with `budget <agent|all> ...`. `budget <agent> off` removes it, and aos does not put it back.
+
+### The guard
+
+Unattended agents run behind a guard unless you turn it off for an agent with `"guard": false` in its `harnessOptions` in `crew.json`:
+
+- Code-hosting, registry and cloud credentials (`GITHUB_TOKEN`, `GH_TOKEN`, `NPM_TOKEN`, `AWS_*` keys, `SSH_AUTH_SOCK` and the rest of `GUARDED_SECRETS` in `src/supervisor.rs`) are removed from the agent's environment. The agent's own model login stays: Copilot keeps the GitHub token it signs in with, Amazon Q and Claude Code on Bedrock (`CLAUDE_CODE_USE_BEDROCK`) keep the AWS keys, and Claude or Gemini on Vertex (`CLAUDE_CODE_USE_VERTEX`, `GOOGLE_GENAI_USE_VERTEXAI`) keep `GOOGLE_APPLICATION_CREDENTIALS`.
+- `git push` fails inside the agent, through an environment-level git setting, while fetch and pull still work. That includes remotes with their own push URL (`remote.<name>.pushurl`) in the crew folder's repository; a remote whose push URL is the same as its fetch URL can then not be fetched either. git never waits on a password prompt.
+- Claude Code agents also have `git push` and `sudo` on their disallowed tools.
+
+This is a guardrail against mistakes and injected instructions, not a sandbox. An agent with a shell can still read any file you can, and it can undo the git setting if it sets out to. So keep agents in a project folder, as aos already requires, and review what they did before you push it.
 
 ## What aos cannot do yet
 
