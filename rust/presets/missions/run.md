@@ -3,7 +3,7 @@
      what you typed. Any .md file in this folder becomes a command: a file
      named audit.md makes `audit <what>` start a mission from it. -->
 # run
-Hand any goal to the lead.
+Hand any goal to the crew.
 
 ## brief
 The operator's goal: {goal}

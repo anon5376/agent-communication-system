@@ -1,6 +1,6 @@
 # aos: the AOS terminal
 
-`aos` is mission control for a team of AI coding agents. You type a goal; a lead agent plans it, a builder does it, a reviewer checks it, and the result comes back to you to accept. It is a terminal console for the ACS bus, drawn to the AOS Acceleration Chamber design: a cobalt rail, one causal spine of agents, readouts that answer goal, progress, cost, evidence and what is stuck, and a gate strip for the one thing that needs you. It opens the same `bus.db` as `qagent` and `acs`, and every write it makes goes through the same bus call the CLI uses, so it appends the same events.
+`aos` is mission control for a team of AI coding agents. You type a task; a builder agent does it, a reviewer on a different model checks it independently and accepts it or sends it back, and with only one model family installed the result comes to you to review instead. It is a terminal console for the ACS bus, drawn to the AOS Acceleration Chamber design: a cobalt rail, one causal spine of agents, readouts that answer goal, progress, cost, evidence and what needs you, and a gate strip that takes what needs you one item at a time, most urgent first. It opens the same `bus.db` as `qagent` and `acs`, and every write it makes goes through the same bus call the CLI uses, so it appends the same events.
 
 ![aos at 80x24](../docs/assets/aos-80x24-swarm.png)
 
@@ -14,7 +14,15 @@ The script downloads a prebuilt `aos` for Linux (x86_64, arm64) or macOS (Apple 
 
 From a checkout: `git checkout rust-port && ./rust/install-aos.sh`.
 
-You also need at least one agent CLI that can join a crew, installed and signed in: [Claude Code](https://code.claude.com/docs/en/setup), [Codex CLI](https://github.com/openai/codex) or Cursor CLI.
+You also need at least one agent CLI that can join a crew, installed and signed in: [Claude Code](https://code.claude.com/docs/en/setup), [Codex CLI](https://github.com/openai/codex) or Cursor CLI. Two from different vendors (say Claude Code and Codex CLI) give you an independent reviewer.
+
+## Try it first: the simulated demo
+
+```sh
+aos demo
+```
+
+opens a made-up team on a temporary bus: no agent runs, no account or key is used, and the bus is deleted when you leave. Every screen says `SIMULATED demo` in the top rail, and aos refuses to set up or start a crew on it.
 
 ## First run
 
@@ -23,17 +31,23 @@ cd ~/my-project
 aos
 ```
 
-The first time, aos shows what it found on this computer and the crew it proposes:
+The first time, aos shows what it found on this computer and the crew it proposes. Each agent CLI reads as one of:
+
+- `+ ready`: installed, and aos found evidence of a sign-in (a credentials file such as `~/.claude/.credentials.json` or `~/.codex/auth.json`, or an API key variable). aos only looks at files and environment variables; it never runs a turn to check.
+- `? installed, sign-in not checked`: the CLI keeps its sign-in where aos can't read it (the macOS Keychain, a system keyring, Cursor CLI). It joins the crew; if its turns fail, sign in.
+- `x installed, not signed in`: there is no sign-in where this CLI keeps one. It is left out of the crew until you sign in and press `r`.
+- `- not installed`, with the install command.
 
 ![aos first run at 80x24](../docs/assets/aos-welcome-80x24.png)
 
-- **lead**: plans the goal, hands out tasks, checks results and hands the goal back to you;
-- **builder**: makes the changes and runs the checks;
-- **reviewer**: checks every change before you see it. With two CLIs installed the reviewer uses a different model family from the builder, so every change gets an independent second opinion.
+- **builder**: does the task in this folder and hands in the result with every check it ran;
+- **reviewer**: an agent on a different model family from the builder, which checks the result itself and accepts it or sends it back with findings. With only one family installed there is no reviewer agent, because a reviewer on the same model is not independent: you review instead.
+
+The default crew has no lead. To have goals planned and split across several agents, add an agent with `"authority": "manager"` and `"instructions": "roles/lead.md"` to `crew.json`; goals then go to the lead, which hands the finished goal back to you.
 
 Press Enter to set it up. Then type what you want done, in plain words, and press Enter. The first time in a folder aos asks whether agents may work there: they can run commands and edit files in it. aos refuses to start agents in your home folder or `/`.
 
-The crew starts in the background, the lead takes the goal, and you watch it on the swarm (`s`) and goal tree (`g`). When the lead hands the goal back, it lands on your gate: `1` accept, `2` send back with feedback. Agents keep running after you leave aos; `stop agents` (or `aos stop`) stops them.
+The crew starts in the background, the builder takes the task, and you watch it on the swarm (`s`) and goal tree (`g`). When the builder hands it in, the reviewer checks it; if you are the reviewer, it lands on your gate: `1` accept, `2` send back with feedback. Agents keep running after you leave aos; `stop agents` (or `aos stop`) stops them.
 
 ![a goal back on the operator's gate](../docs/assets/aos-goal-gate-80x24.png)
 
@@ -60,7 +74,7 @@ Everything aos knows about your crew is a plain file in `~/.agent-bus/aos/` (nex
 | File | What it is |
 |---|---|
 | `crew.json` | who is on the crew and which CLI each runs, in the same format as `qagent supervise --config` |
-| `roles/lead.md`, `builder.md`, `reviewer.md`, `researcher.md` | each agent's role prompt, sent before its brief on every turn; edits apply from the next turn |
+| `roles/builder.md`, `reviewer.md`, `lead.md`, `researcher.md` | each agent's role prompt, sent before its brief on every turn; edits apply from the next turn (`lead` and `researcher` are not in the default crew) |
 | `missions/*.md` | mission templates |
 | `trusted` | folders you allowed agents to work in |
 | `workdir` | the folder the crew last worked in |
@@ -91,7 +105,7 @@ Agent logs are in `~/.agent-bus/logs/` (`<agent>.log` for the supervisor, `<agen
 | Hermes Agent, Grok CLI, Devin CLI, Crush, Mistral Vibe, Cline CLI, Continue CLI (`cn`), Aider, Amazon Q Developer CLI (`q`) | supervisor-managed | `connect aider --auto-approve` |
 | anything else | either; see below | `connect <name> -- <command line>` |
 
-Every CLI in that table except Claude Code, Codex and Cursor runs commands and edits files without asking you when it works unattended, so aos adds them only after you type `--auto-approve` once (kept in `aos/auto-approve`; delete the line to take it back). To keep their approval prompts instead, set `"autoApprove": false` under the harness's `options` in `crew.json`; a headless CLI then usually can't edit anything. A CLI without bus tools can't be the lead, because the lead hands out tasks through them.
+Every CLI in that table except Claude Code, Codex and Cursor runs commands and edits files without asking you when it works unattended, so aos adds them only after you type `--auto-approve` once (kept in `aos/auto-approve`; delete the line to take it back). To keep their approval prompts instead, set `"autoApprove": false` under the harness's `options` in `crew.json`; a headless CLI then usually can't edit anything. A CLI without bus tools can't be the lead or the reviewer, because the lead hands out tasks and the reviewer decides reviews through them.
 
 `connect <cli> as <agent>` moves an existing seat (`lead`, `builder`, `reviewer`) onto that CLI; without `as`, a new teammate named after the CLI joins as a builder. For any other CLI give its command line after `--`, with placeholders the supervisor fills in on every turn:
 
@@ -152,12 +166,16 @@ aos task list                    # every qagent command works through aos too
 | `q` then `y`, or `ctrl-c` twice | leave; agents keep running |
 | `n` `b` `m` | under 80 columns: next, back, more |
 
-## Gates
+## What needs you
 
-The gate strip shows tasks that need the operator, review first:
+The `needs you` readout counts what is waiting on you, then the work in progress and the queue. The gate strip takes those items one at a time in this order, and every item other than a review says why it needs you, the evidence for that, and the next command:
 
-- **Review**: a submitted task whose reviewer is the operator. `[1] ACCEPT` needs a reason and closes the task (this cannot be undone in ACS). `[2] REVISE` needs feedback and sends the task back to its assignee. `[3] HOLD` writes nothing and moves to the next gate.
-- **Stalled**: a claimed task with no claim or note activity for the stall window, and no open task under it that moved in that window (a lead waiting on its team is not stuck). `[1] REQUEUE` returns it to the pool (reason optional). `[3] CANCEL` asks you to type `CANCEL`. `[2] HOLD` writes nothing.
+1. **Review**: a submitted task whose reviewer is you. `[1] ACCEPT` needs a reason and closes the task (this cannot be undone in ACS). `[2] REVISE` needs feedback and sends the task back to its assignee. `[3] HOLD` writes nothing and moves to the next item.
+2. **Failed**: a task that used up its retries or review rounds while its goal is still open (or a goal of yours that failed in the last day). The evidence is the last review's feedback or the attempts used; the next command re-creates it with the same title and agent under the same goal (add the brief or a reviewer before you press enter if it needs them). The gate clears once a newer task with that title sits under the same goal, or the goal closes.
+3. **Blocked**: open work that cannot move until you act: its agent is paused (`resume <agent>`), its agent's supervisor is stopped (`start <agent>`, with the last line of its log as evidence), or it waits on a task that failed or was cancelled (`cancel <#>`).
+4. **Stalled**: a claimed task with no claim or note activity for the stall window, and no open task under it that moved in that window (a lead waiting on its team is not stuck). The reason says whether the agent stopped checking in or is online but not touching it, with its last note. `[1] REQUEUE` returns it to the pool (reason optional). `[3] CANCEL` asks you to type `CANCEL`. `[2] HOLD` writes nothing.
+
+On a failed or blocked item, `[1] TYPE THE FIX` opens command home with the next command typed; nothing runs until you press Enter. `[3] HOLD` moves on.
 
 Each write prints an `[ ok ]` receipt on the status line with the event number it created.
 
@@ -180,7 +198,7 @@ Press `c` for command home. It lists the operator's latest mail with message num
 
 | Command | What it writes |
 |---|---|
-| any sentence | after one Enter: a goal for the lead, from the `run` mission (starts the crew if it is stopped) |
+| any sentence | after one Enter: a goal for the crew (the lead if it has one, else the builder, reviewed as above), from the `run` mission (starts the crew if it is stopped) |
 | `<mission> <what>` | a goal from that mission's template (`missions` lists them) |
 | `run <goal> [--to agent]` | a top-level task: the new goal |
 | `start [agent]`, `stop agents`, `stop <agent>` | nothing on the bus: starts or stops crew supervisors |
@@ -188,7 +206,7 @@ Press `c` for command home. It lists the operator's latest mail with message num
 | `history` | nothing: your last 12 goals, each as open, at your gate, done, failed or stopped |
 | `pause <agent\|all> [why]` | pauses the agent: it finishes any turn it is in, then starts no new one |
 | `resume <agent\|all>` | lifts the pause; a budget starts a fresh allowance |
-| `budget <agent\|all> 20 turns 60 min $2`, `budget <agent\|all> off`, `budget` | sets, clears or lists budgets. Turns and minutes are always counted; dollars only as each CLI reports them, so a CLI that reports none counts as $0. An agent that reaches its budget pauses itself and writes to you |
+| `budget <agent\|all> 20 turns 60 min $2`, `budget <agent\|all> off`, `budget` | sets, clears or lists budgets. Turns and minutes are always counted. Dollars are counted only when a CLI reports a cost for the turn: Claude Code always does, Codex CLI never does, and others (Cursor, Grok) only when their output happens to carry one. A `$` limit does not stop an agent whose CLI reports nothing; only Claude Code's crew entry says `"usageReporting": true`. Dollars are checked between turns, so one long turn can pass a `$` limit. An agent that reaches its budget pauses itself and writes to you |
 | `setup [--force]`, `doctor`, `missions`, `crew`, `connect` | nothing |
 | `connect <cli> [as <agent>] [--auto-approve]`, `connect <name> [as <agent>] -- <command>`, `disconnect <name>` | nothing on the bus except a new teammate: edits `crew.json` |
 | `task add <title> [--to agent] [--under #] [--review]` | a task; `--review` makes you its reviewer, so its result comes to your gate |
@@ -213,7 +231,7 @@ These are in the design but have no ACS verb, so aos does not fake them: handing
 | run | agents with a live claim, open task count, reviews addressed to the operator |
 | cost | cost and tokens the CLIs reported to the supervisor, summed over the crew's session files in `~/.agent-bus/sessions/`, all time; Claude Code reports a price, Codex reports tokens only. `? UNKNOWN` without an aos crew |
 | evidence | task results and their validation checks |
-| stuck | claimed tasks idle past the stall window (`stalled_tasks`) |
+| needs you | reviews addressed to you, failed tasks under open goals (`task_failed` events), blocked work (paused agents from agent meta, stopped crew supervisors from their pid files, dependencies that failed or were cancelled), claims idle past the stall window (`stalled_tasks`); then claimed and open task counts |
 | spine | agents by `parent_id`, each with its claimed task; offline is derived by the bus |
 | retro | the `events` table, pivotal kinds by default, `a` for all |
 | memory | `- UNAVAILABLE`: ACS has no memory store (AOS proposal P11) |
