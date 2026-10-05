@@ -493,44 +493,27 @@ fn fake_qagent(dir: &Path) -> PathBuf {
     script
 }
 
-/// Windows: the same fake as a .cmd shim wrapping a PowerShell body (cmd.exe
-/// cannot report its own pid). Besides staying alive it honours the stop
-/// convention a detached supervisor watches for: <id>.stop next to <id>.pid.
+/// Windows: the compiled `fake-qagent` example. An .exe is both the faithful
+/// shape (production always spawns qagent.exe — the .cmd shim path is covered
+/// by harness_connect_tests) and reliable on CI, where a .cmd -> powershell
+/// fake needs a cold powershell.exe start that can outlive the poll window.
+/// Plain `cargo test` builds every example; a filtered run may not, so fail
+/// loudly with the build command instead of a missing-file error.
 #[cfg(windows)]
-fn fake_qagent(dir: &Path) -> PathBuf {
-    let ps1 = dir.join("qagent.ps1");
-    std::fs::write(
-        &ps1,
-        "$db=\"\"; $id=\"\"\r\n\
-         for ($i=0; $i -lt $args.Count; $i++) {\r\n\
-         \x20 if ($args[$i] -eq \"--db\") { $db=$args[$i+1]; $i++ }\r\n\
-         \x20 elseif ($args[$i] -eq \"supervise\") { $id=$args[$i+1]; $i++ }\r\n\
-         }\r\n\
-         $busHome = Split-Path $db -Parent\r\n\
-         New-Item -ItemType Directory -Force \"$busHome\\supervisors\" | Out-Null\r\n\
-         $pidFile = \"$busHome\\supervisors\\${id}.pid\"\r\n\
-         Set-Content $pidFile \"$PID`n\"\r\n\
-         $stopFile = \"$busHome\\supervisors\\${id}.stop\"\r\n\
-         $deadline = (Get-Date).AddSeconds(120)\r\n\
-         while ((Get-Date) -lt $deadline) {\r\n\
-         \x20 if (Test-Path $stopFile) {\r\n\
-         \x20   Remove-Item $stopFile,$pidFile -Force -ErrorAction SilentlyContinue\r\n\
-         \x20   exit 0\r\n\
-         \x20 }\r\n\
-         \x20 Start-Sleep -Milliseconds 200\r\n\
-         }\r\n",
-    )
-    .unwrap();
-    let script = dir.join("qagent.cmd");
-    std::fs::write(
-        &script,
-        format!(
-            "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"{}\" %*\r\n",
-            ps1.display()
-        ),
-    )
-    .unwrap();
-    script
+fn fake_qagent(_dir: &Path) -> PathBuf {
+    let exe = std::env::current_exe()
+        .unwrap()
+        .parent() // .../target/<profile>/deps
+        .and_then(Path::parent) // .../target/<profile>
+        .unwrap()
+        .join("examples")
+        .join("fake-qagent.exe");
+    assert!(
+        exe.is_file(),
+        "missing {}; build it with `cargo build --example fake-qagent`",
+        exe.display()
+    );
+    exe
 }
 
 fn crew_with(paths: &crew::Paths, bus: &Bus, cli_ids: &[&str]) {
@@ -599,10 +582,12 @@ fn start_then_stop_with_a_fake_qagent() {
     // The workdir was trusted by the confirmed start.
     assert!(crew::is_trusted(&paths, &workdir_canonical(&workdir)));
 
-    // The fake writes its pid file on its own clock (a cold PowerShell start
-    // on Windows can outlive start's 1.2s wait): poll the snapshot.
+    // The fake writes its pid file on its own clock (past start's 1.2s wait):
+    // poll the snapshot rather than assuming one cold start is fast enough.
     let mut builder = json!(null);
-    for _ in 0..100 {
+    let poll_start = std::time::Instant::now();
+    let mut flipped_ms = None;
+    for _ in 0..150 {
         let (reply, code) = call(&db, "snapshot", json!({}));
         let data = ok(&reply, code);
         let found = data["agents"]
@@ -614,6 +599,7 @@ fn start_then_stop_with_a_fake_qagent() {
             .unwrap();
         builder = found;
         if builder["running"] == true {
+            flipped_ms = Some(poll_start.elapsed().as_millis());
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -623,8 +609,9 @@ fn start_then_stop_with_a_fake_qagent() {
     let pid_file = paths.pid_file("builder");
     let out_file = paths.out_file("builder");
     let supervisors = paths.home.join("supervisors");
-    let mut why = format!(
-        "{builder}\nout_file({}) exists={} contents:\n{}\npid_file({}) exists={} contents={:?}\nsupervisors dir: {:?}",
+    let why = format!(
+        "{builder}\nrunning flipped after {:?}\nout_file({}) exists={} contents:\n{}\npid_file({}) exists={} contents={:?}\nsupervisors dir: {:?}",
+        flipped_ms,
         out_file.display(),
         out_file.exists(),
         std::fs::read_to_string(&out_file).unwrap_or_else(|e| format!("<{e}>")),
@@ -637,24 +624,6 @@ fn start_then_stop_with_a_fake_qagent() {
                 .collect::<Vec<_>>()
         })
     );
-    #[cfg(windows)]
-    {
-        // If the fake resolved its bus home wrong it may have written a stray
-        // pid file at a drive root (\supervisors resolves root-relative).
-        for root in [r"C:\", r"D:\"] {
-            let stray = Path::new(root).join(r"supervisors\builder.pid");
-            why.push_str(&format!(
-                "\nstray {root}supervisors\\builder.pid exists={} contents={:?}",
-                stray.exists(),
-                std::fs::read_to_string(&stray)
-            ));
-        }
-        why.push_str(&format!(
-            "\nTEMP={:?} home={}",
-            std::env::var_os("TEMP"),
-            paths.home.display()
-        ));
-    }
     assert_eq!(builder["running"], true, "{why}");
 
     let (reply, code) = call(&db, "stop", json!({"ids": ["builder"]}));
