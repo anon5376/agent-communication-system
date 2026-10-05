@@ -234,6 +234,25 @@ export const PROVIDER_CATALOG = [
                 capabilities: heuristic({ contextTokens: 128000, costClass: "medium" }),
             }],
     },
+    {
+        id: "cognition",
+        displayName: "Cognition",
+        authKind: "subscription",
+        authSource: "Devin CLI login",
+        subscriptionBacked: true,
+        loginCommand: "devin auth login",
+        installHint: "Install the Devin CLI (cli.devin.ai), then run devin auth login.",
+        harnessId: "devin",
+        adapter: "devin",
+        binaries: [{ command: "devin", knownPaths: unixBin("devin"), probeArgs: ["--version"] }],
+        // No per-run MCP flag: the supervisor claims tasks and submits the printed answer.
+        features: { ...BASIC_FEATURES, resume: true, mcp: false },
+        models: [{
+                id: "devin-default",
+                family: "devin",
+                capabilities: heuristic({ contextTokens: 200000, costClass: "subscription" }),
+            }],
+    },
 ];
 export function catalogEntry(id) {
     return PROVIDER_CATALOG.find((entry) => entry.id === id);

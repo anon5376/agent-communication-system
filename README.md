@@ -102,8 +102,9 @@ This is in the TypeScript build on `main`; `aos` has its own gate strip for the 
 - Stalled-claim detection, requeue, and `qagent trace <task>` for a task's full timeline (text, JSON or a self-contained HTML file).
 - An attention list in `qagent doctor`, `qagent trace` and the dashboard: what needs you first, with reason, evidence and next command.
 - A stdio MCP server with 14 agent tools and one operator-only tool.
-- Harness adapters: `claude`, `codex`, `gemini`, `kimi`, `cursor`, `grok`, `opencode`, `hermes`, plus any other CLI through the `command` adapter.
+- Harness adapters: `claude`, `codex`, `gemini`, `kimi`, `cursor`, `grok`, `opencode`, `hermes`, `devin`, plus any other CLI through the `command` adapter.
 - A localhost-only dashboard and an optional supervisor.
+- A Claude Code hook that wakes an idle interactive session when mail arrives.
 - Import tools for earlier Qagent and Python prototype stores.
 
 An adapter means the command line and output parsing are implemented and unit-tested. It does not mean that provider was run live; see [provider support](docs/provider-support.md).
@@ -140,6 +141,14 @@ Generate MCP client configuration without copying tokens into configuration file
 qagent mcp-config --agent claude --client claude
 qagent mcp-config --agent codex --client codex
 ```
+
+Let new mail wake an idle interactive Claude Code session, with no supervisor running. This prints a background `Stop` hook to merge into `.claude/settings.json`:
+
+```bash
+qagent --as claude hook claude-code --settings
+```
+
+See [Wake an idle Claude Code session](docs/FULL-GUIDE.md#wake-an-idle-claude-code-session) for what it shows Claude and its limits.
 
 ## What is tested and what is not
 

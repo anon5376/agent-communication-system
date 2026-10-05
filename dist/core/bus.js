@@ -399,11 +399,76 @@ export class Bus {
     `).all(cursor, agentId, agentId, cursor, agentId, agentId, limit);
         return { rows, total: rows.length ? Number(rows[0].total) : 0 };
     }
+    unreadAfterSnapshot(agentId, afterSeq, limit) {
+        const from = Math.max(this.cursor(agentId), afterSeq);
+        const { rows, total } = this.unreadRows(agentId, from, Math.max(1, Math.min(LIMITS.inboxLimit, Math.floor(limit))));
+        const messages = rows.map((row) => this.toMessage(row));
+        let lastSeq = messages.length ? messages[messages.length - 1].seq : from;
+        if (total > messages.length) {
+            const row = prepared(this.db, `
+        SELECT MAX(seq) AS seq FROM messages WHERE seq > ? AND (recipient = ? OR (recipient IS NULL AND sender <> ?))
+      `).get(from, agentId, agentId);
+            lastSeq = Number(row.seq);
+        }
+        return { messages, total, lastSeq };
+    }
     unreadCount(agentId) {
         const row = prepared(this.db, `
       SELECT COUNT(*) AS n FROM messages WHERE seq > ? AND (recipient = ? OR (recipient IS NULL AND sender <> ?))
     `).get(this.cursor(agentId), agentId, agentId);
         return Number(row.n);
+    }
+    /**
+     * Unread mail with a seq after `afterSeq` (never before the read cursor), oldest first, without
+     * moving the cursor. `total` and `lastSeq` cover all of it, not just the returned page.
+     */
+    unreadAfter(agentId, afterSeq, limit = 50) {
+        return this.write(() => this.unreadAfterSnapshot(agentId, afterSeq, limit));
+    }
+    ensureClaudeCodeHookState() {
+        this.db.exec(`
+      CREATE TABLE IF NOT EXISTS claude_code_hook_state (
+        agent_id TEXT PRIMARY KEY,
+        owner TEXT NOT NULL,
+        announced_seq INTEGER NOT NULL DEFAULT 0
+      )
+    `);
+    }
+    registerClaudeCodeHookOwner(agentId, owner) {
+        const id = agentId === OPERATOR_ID ? agentId : assertSafeAgentId(agentId);
+        const value = boundedString(owner, "hook owner", 256, true);
+        if (!value)
+            throw new BusError("invalid", "hook owner is required");
+        this.write(() => {
+            this.ensureClaudeCodeHookState();
+            prepared(this.db, `
+        INSERT INTO claude_code_hook_state(agent_id, owner, announced_seq) VALUES(?, ?, 0)
+        ON CONFLICT(agent_id) DO UPDATE SET owner = excluded.owner
+      `).run(id, value);
+        });
+    }
+    isClaudeCodeHookOwner(agentId, owner) {
+        const id = agentId === OPERATOR_ID ? agentId : assertSafeAgentId(agentId);
+        const table = prepared(this.db, "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'claude_code_hook_state'").get();
+        if (!table)
+            return false;
+        const row = prepared(this.db, "SELECT 1 AS owner FROM claude_code_hook_state WHERE agent_id = ? AND owner = ?").get(id, owner);
+        return Boolean(row);
+    }
+    claimClaudeCodeHookMail(agentId, owner, limit = 50) {
+        const id = agentId === OPERATOR_ID ? agentId : assertSafeAgentId(agentId);
+        return this.write(() => {
+            this.ensureClaudeCodeHookState();
+            const state = prepared(this.db, "SELECT owner, announced_seq FROM claude_code_hook_state WHERE agent_id = ?").get(id);
+            if (!state || state.owner !== owner)
+                return { status: "superseded", messages: [], total: 0 };
+            const fresh = this.unreadAfterSnapshot(id, Number(state.announced_seq), limit);
+            if (!fresh.messages.length)
+                return { status: "empty", messages: [], total: 0 };
+            prepared(this.db, "UPDATE claude_code_hook_state SET announced_seq = ? WHERE agent_id = ? AND owner = ?")
+                .run(fresh.lastSeq, id, owner);
+            return { status: "mail", messages: fresh.messages, total: fresh.total };
+        });
     }
     /** New mail since the cursor. Advances the cursor unless peek is set. */
     inbox(actor, options = {}) {

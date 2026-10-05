@@ -162,6 +162,35 @@ test("the supervisor applies the configuration's limits to the bus at start", { 
   await supervisor.stop();
 });
 
+test("a rejected mixed policy update stops before a turn and releases supervisor ownership", { timeout: 10_000 }, async (t) => {
+  const f = fixture(t);
+  f.add("fake-small", "cheap-worker", "manager");
+  f.bus.setAgentPolicy(f.op, "fake-small", { maxConcurrentTasks: 1 });
+  const queued = f.bus.createTask(f.op, { title: "must stay queued", to: "fake-small" });
+  rmSync(join(f.home, "operator.token"));
+  const config = probeConfig((config) => {
+    config.constraints.maxConcurrentTasks = 3;
+    config.agents["fake-small"].authority = "manager";
+    config.agents["fake-small"].permissions.canDelegate = false;
+  });
+  const supervisor = run(f, config);
+  t.after(supervisor.stop);
+  const timer = setTimeout(() => { void supervisor.stop(); }, 1000);
+  t.after(() => clearTimeout(timer));
+  await assert.rejects(supervisor.done, /may only narrow its own policy/);
+  assert.equal(f.bus.getTask(queued.id).state, "open");
+  assert.equal(f.bus.identify("fake-small").permissions.maxConcurrentTasks, 1);
+  assert.ok(!f.lines.some((line) => /turn complete|limits.*stay in force/.test(line)));
+  assert.ok(!existsSync(join(f.home, "supervisors", "fake-small.pid")));
+
+  config.constraints.maxConcurrentTasks = 1;
+  const restarted = run(f, config);
+  t.after(restarted.stop);
+  await until("a corrected configuration to submit the queued task", 5000, () => f.bus.getTask(queued.id).state === "submitted");
+  assert.equal(f.bus.identify("fake-small").permissions.canDelegate, false);
+  await restarted.stop();
+});
+
 // --------------------------------------------------------------- backlog
 
 test("a supervisor started after work was queued picks it up without fresh mail", { timeout: 20_000 }, async (t) => {

@@ -4,15 +4,16 @@
  * each module exports
  *   main(argv: string[], context: { dbPath: string; command: string }): Promise<number>.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { Bus } from "../core/bus.js";
 import { ChangeWatcher } from "../core/changes.js";
 import { homeFor, resolveDbPath } from "../core/db.js";
 import type { Identity } from "../core/identity.js";
-import { agentIdFromEnv } from "../core/identity.js";
+import { agentIdFromEnv, tokenPathFor } from "../core/identity.js";
 import { defaultImportSources, runImport } from "../core/import.js";
 import { waitForMail, waitSeconds } from "../notify/wait.js";
-import { BusError, MessageType, OPERATOR_ID, Priority, STALE_AGENT_MS, TaskState } from "../core/types.js";
+import { BusError, MAX_WAIT_SEC, MessageType, OPERATOR_ID, Priority, STALE_AGENT_MS, TaskState } from "../core/types.js";
+import { claudeCodeSettings, renderWake, waitForWake } from "../hook/claude-code.js";
 import { taskAttention } from "../attention.js";
 import { ensureTaskWorktree, pruneTaskWorktrees, removeTaskWorktree, repoRootFor, type TaskWorktree } from "../worktree.js";
 import { renderAgents, renderEvent, renderImport, renderMessages, renderStatus, renderTask, renderTasks, renderTrace, renderTraceHtml } from "./format.js";
@@ -31,7 +32,7 @@ const defaultIo: CliIo = {
   env: process.env,
 };
 
-const BOOLEAN_FLAGS = new Set(["json", "peek", "all", "mine", "ack", "accept", "revise", "dry-run", "force", "follow", "operator", "open", "help", "worktree", "remove"]);
+const BOOLEAN_FLAGS = new Set(["json", "peek", "all", "mine", "ack", "accept", "revise", "dry-run", "force", "follow", "operator", "open", "help", "worktree", "remove", "settings"]);
 const REPEATED_FLAGS = new Set(["dep", "scope", "state", "file"]);
 
 interface Parsed {
@@ -81,6 +82,7 @@ Global: --db PATH (or QAGENT_BUS_DB; default ~/.agent-bus/bus.db)  --as ID|opera
   qagent inbox [--peek] [--limit N]
   qagent ack <seq>
   qagent wait [--timeout SEC]                     exit 0 = mail or task event, 2 = timeout
+  qagent hook claude-code [--timeout SEC] [--settings]   Claude Code Stop hook: exit 2 wakes the session on new mail
   qagent task add <title> [--brief B|-] [--to ID] [--reviewer ID] [--role R] [--priority P]
                   [--acceptance A] [--parent N] [--dep N]... [--scope PATH]... [--project DIR]
   qagent task list [--mine] [--state S]... [--all] [--limit N] | task show <N>
@@ -229,6 +231,37 @@ async function waitCommand(ctx: Context): Promise<number> {
   }
 }
 
+/** `qagent hook claude-code` (see src/hook/claude-code.ts): exit 2 with headers on stderr wakes the session; 0 otherwise. */
+async function hookCommand(ctx: Context): Promise<number> {
+  const name = ctx.position(1, "hook name (claude-code)");
+  if (name !== "claude-code") throw new BusError("invalid", `unknown hook: ${name} (expected claude-code)`);
+  const seconds = waitSeconds(ctx.int("timeout") ?? MAX_WAIT_SEC, ctx.io.env);
+  if (ctx.flag("settings") === true) {
+    const agentId = ctx.str("as") ?? agentIdFromEnv(ctx.io.env);
+    if (!agentId) throw new BusError("invalid", "pass --as <id> (or set QAGENT_AGENT_ID)");
+    const settings = claudeCodeSettings(agentId, ctx.dbPath, seconds);
+    const tokenPath = tokenPathFor(homeFor(ctx.dbPath), agentId);
+    if (!existsSync(tokenPath)) ctx.io.stderr(`qagent: warning: no token file at ${tokenPath}; run \`qagent agent add ${agentId} --role ...\` first.\n`);
+    ctx.io.stderr("# merge into .claude/settings.json (this project) or ~/.claude/settings.json (every project)\n");
+    ctx.io.stdout(`${JSON.stringify(settings, null, 2)}\n`);
+    return 0;
+  }
+  const me = ctx.identity();
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  try {
+    const result = await waitForWake(ctx.bus, me, { timeoutMs: seconds * 1000, signal: controller.signal });
+    if (result.status !== "mail") return 0;
+    ctx.io.stderr(renderWake(me.agentId, result));
+    return 2;
+  } finally {
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
+  }
+}
+
 async function logCommand(ctx: Context): Promise<number> {
   const bus = ctx.bus;
   let since = ctx.int("since") ?? (ctx.flag("follow") ? bus.latestSeq() : 0);
@@ -330,6 +363,8 @@ async function dispatch(ctx: Context): Promise<number> {
       ctx.out(result, `acknowledged #${result.seq}`);
       return 0;
     }
+    case "hook":
+      return hookCommand(ctx);
     case "wait":
       return waitCommand(ctx);
     case "log":

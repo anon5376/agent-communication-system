@@ -439,11 +439,7 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
     let operator: Identity | null = null;
     try { operator = bus.identify(OPERATOR_ID); } catch { /* no operator token on this bus */ }
     // The configuration's limits go into the bus, where every call path enforces them.
-    try {
-      bus.setAgentPolicy(operator ?? me, me.agentId, policyFromConfig(config, agent));
-    } catch (error) {
-      log(`configuration limits not applied (${(error as Error).message}); the stricter stored limits stay in force`);
-    }
+    bus.setAgentPolicy(operator ?? me, me.agentId, policyFromConfig(config, agent));
     const qagentBin = options.qagentBin ?? DEFAULT_QAGENT_BIN;
     const isolationEnv: Record<string, string> = worktreeMode ? { QAGENT_REQUIRE_WORKTREE: "1" } : {};
     const mcpCommand = mcpCommandFor(me.agentId, bus.dbPath, qagentBin, isolationEnv);

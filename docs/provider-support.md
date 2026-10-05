@@ -26,6 +26,7 @@ This document separates implemented code from live account verification. A confi
 | Hermes | Hermes-compatible CLI | Local/provider profile | Implemented, live unverified | Profile selection, noninteractive chat query, exact `--resume`, quiet output and automatic approvals are normalized. |
 | Cursor | Cursor CLI (`cursor-agent` / `agent`) | Cursor account / `agent login` / `CURSOR_API_KEY` | Implemented, live unverified | Print mode, exact `--resume`, model selection and MCP injection are normalized. Models available through Cursor are selected with `--model`. |
 | xAI / Grok | Grok CLI | `grok login` | Implemented, live unverified | Headless `-p`, JSON output, exact `--resume`, automatic approvals and model selection are normalized. |
+| Cognition / Devin | Devin CLI (`devin`) | `devin auth login` | Implemented, live unverified | Print mode `-p`, `--permission-mode dangerous`, exact `--resume` and `--model` are normalized. Devin has no per-run MCP flag, so the harness declares `mcp: false`: the supervisor claims the task and submits Devin's printed answer. The adapter reads no session id from print output, so a turn resumes only a pinned `resumeSessionId`. |
 | Deterministic fake | Fake harness | None | Implemented and tested | Used for routing, task graph, retry, failure, cancellation and supervisor simulations without external calls. |
 | Other providers | Generic command adapter | Subscription, API or local | Implemented, live unverified | Configure `args` plus `resumeArgs` with the `{session}` placeholder. Adding a model provider behind an existing harness does not require a new resume implementation. |
 
@@ -43,7 +44,7 @@ The prototype supports discovery only where a CLI safely exposes it:
 - Other official CLIs: registry configuration unless a stable enumeration command is available.
 - Ollama/LM Studio: documented external discovery paths, not silently scraped by the broker.
 
-`agent-bus doctor` scans the known provider catalog (PATH plus well-known install locations) and reports login commands for missing CLIs. It also probes enabled harnesses. It does not infer login state, subscription entitlement, remaining quota or model access from the presence of a binary.
+`qagent doctor` checks the bus and the operator token. `qagent doctor <agent> [project]` also checks that agent's identity, its entry in the supervisor configuration, and that the configured harness command is on PATH. It does not run the CLI, scan for other providers, or report login commands, and it does not infer login state, subscription entitlement, remaining quota or model access.
 
 ## Primary references inspected
 

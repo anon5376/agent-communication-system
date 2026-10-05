@@ -8,6 +8,15 @@ All notable changes to the Agent Communication System. Format follows
 
 ### Fixed
 
+- Supervisors stop before running work when configuration limits cannot be
+  applied, instead of continuing after rejecting an entire mixed policy update.
+- `qagent` no longer prints Node's `node:sqlite` ExperimentalWarning on every
+  command; other warnings still print.
+- `docs/free-ai-setup.md` now builds a config that validates: it says the
+  supervisor reads `<project>/.qagent/config.json` (started from a copy of the
+  shipped `agent-bus.config.json`) and adds the provider and harness entries its
+  models refer to. It and `docs/provider-support.md` no longer say that
+  `qagent doctor` scans for providers, prints login commands or checks logins.
 - README leads with ownership, recovery and independent review, installs the
   released `aos` binary, and states what is and is not tested. Provider support
   no longer labels unit-tested adapters "invocation tested"; they are "live
@@ -74,6 +83,18 @@ All notable changes to the Agent Communication System. Format follows
 
 ### Added
 
+- **Devin CLI adapter** — `adapter: "devin"` runs `devin -p <brief>
+  --permission-mode dangerous` (plus `--resume` and `--model` when set). Devin
+  has no per-run MCP flag, so its harness declares `mcp: false`: the
+  supervisor claims the task and submits the printed answer. The provider
+  catalog gains a `cognition` entry. Not run against a real Devin account.
+- **Claude Code wake hook** — `qagent hook claude-code` runs as a background
+  `Stop` hook with `asyncRewake`: when mail arrives for the agent it exits 2,
+  which wakes an idle interactive Claude Code session and shows Claude the new
+  messages' headers. It only peeks, announces each message once, and a newer
+  copy for the same agent replaces the older one. `--settings` prints the
+  `.claude/settings.json` snippet. New read-only `Bus.unreadAfter`. TypeScript
+  build only.
 - **Benchmark runner** (`bench/`) — runs a fixed task set (14 implementation
   tasks with frozen validators, 6 research tasks with frozen truth) against a
   roster on a fresh bus and clone, and reports acceptance, first-round

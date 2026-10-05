@@ -5,7 +5,7 @@ import test from "node:test";
 import { AdapterContext, getHarnessAdapter } from "../src/adapters.js";
 import { ResolvedAgent, resolveAgent } from "../src/config.js";
 import { mergeCatalogProvider } from "../src/discover.js";
-import { resumedUnexpectedSession, retryDelayMs, runHarnessProcess } from "../src/supervisor.js";
+import { resumedUnexpectedSession, retryDelayMs, runHarnessProcess, supervisorManaged } from "../src/supervisor.js";
 import { temporaryDirectory, testConfig } from "./helpers.js";
 
 function contextFor(agentId: string): AdapterContext {
@@ -200,6 +200,7 @@ test("native adapters use each installed harness's exact resume syntax", () => {
     { provider: "opencode", adapter: "opencode", flag: "-s" },
     { provider: "novita", adapter: "hermes", flag: "--resume" },
     { provider: "zai", adapter: "opencode", flag: "-s" },
+    { provider: "cognition", adapter: "devin", flag: "--resume" },
   ];
   for (const row of cases) {
     const agent = providerAgent(row.provider, `${row.provider}-worker`);
@@ -215,6 +216,31 @@ test("native adapters use each installed harness's exact resume syntax", () => {
     });
     assert.equal(invocation.args[invocation.args.indexOf(row.flag) + 1], "exact-native-session", `${row.adapter} resume flag`);
   }
+});
+
+test("Devin adapter runs one print-mode turn without prompts, supervisor-managed", () => {
+  const agent = providerAgent("cognition", "devin-worker");
+  assert.equal(supervisorManaged(agent), true, "no per-run MCP flag, so the supervisor claims and submits");
+  const context: AdapterContext = {
+    agent,
+    prompt: "do the work",
+    sessionId: null,
+    pinnedSessionId: null,
+    workdir: temporaryDirectory(),
+    mcpServerPath: "/tmp/mcp.js",
+    fakeHarnessPath: "/tmp/fake.js",
+    busEnvironment: { AGENT_TOKEN: "token" },
+  };
+  const adapter = getHarnessAdapter("devin");
+  const invocation = adapter.build(context);
+  assert.equal(invocation.command, "devin");
+  assert.deepEqual(invocation.args, ["-p", "do the work", "--permission-mode", "dangerous"]);
+  assert.equal(invocation.autoReport, true);
+  assert.equal(invocation.environment.AGENT_HARNESS, "devin");
+  agent.modelDefinition.exactModel = "example-model";
+  assert.deepEqual(adapter.build(context).args.slice(-2), ["--model", "example-model"]);
+  assert.equal(adapter.parse("\x1b[32mFixed the parser.\x1b[0m\n", 0).text, "Fixed the parser.");
+  assert.equal(adapter.parse("", 0).malformed, true);
 });
 
 test("generic command adapter supports a separate resume command", () => {
