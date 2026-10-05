@@ -810,9 +810,6 @@ fn guard_keeps_the_agents_own_login_and_blocks_explicit_push_urls() {
 fn supervise_survives_a_locked_bus() {
     let e = e2e("w5", "");
     let config_path = e.workdir.join("agent-bus.config.json");
-    // Another process holds the write lock past the busy timeout.
-    let blocker = rusqlite::Connection::open(e.home.join("bus.db")).unwrap();
-    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     let logs: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(vec![]));
     let stop = Arc::new(AtomicBool::new(false));
     let handle = {
@@ -835,6 +832,20 @@ fn supervise_survives_a_locked_bus() {
             })
         })
     };
+    wait_for(
+        Duration::from_secs(10),
+        "startup policy to be applied",
+        || {
+            e.bus
+                .get_agent("w5")
+                .unwrap()
+                .is_some_and(|a| a.stored_status == "waiting")
+        },
+    );
+    // Runtime locks are retried; startup must first persist its policy.
+    let blocker = rusqlite::Connection::open(e.home.join("bus.db")).unwrap();
+    blocker.busy_timeout(Duration::from_secs(5)).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     wait_for(Duration::from_secs(20), "a failed round", || {
         logs.lock().unwrap().iter().any(|l| l.contains("round failed"))
     });
@@ -1178,6 +1189,124 @@ fn supervise_applies_the_configuration_limits_to_the_bus_at_start() {
     assert!(!me.permissions.can_delegate);
     assert_eq!(me.permissions.max_concurrent_tasks, Some(3));
     assert_eq!(me.permissions.max_delegation_depth, Some(0));
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap().unwrap();
+}
+
+#[test]
+fn supervise_stops_if_the_bus_is_locked_before_policy_is_saved() {
+    let e = e2e("w1", "");
+    let queued = unassigned_task(&e, "must stay queued");
+    let blocker = rusqlite::Connection::open(e.home.join("bus.db")).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let (stop, handle) = spawn_supervisor(&e, "w1", 100);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !handle.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    stop.store(true, Ordering::SeqCst);
+    let error = handle.join().unwrap().unwrap_err();
+    assert_eq!(error.code, acs::error::Code::Conflict);
+    assert_eq!(error.message, "database is busy");
+    blocker.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(e.bus.get_task(queued).unwrap().task.state, "open");
+    assert!(!e.home.join("supervisors/w1.pid").exists());
+    assert_eq!(
+        e.bus
+            .identify(Some("w1"))
+            .unwrap()
+            .permissions
+            .max_concurrent_tasks,
+        None
+    );
+}
+
+#[test]
+fn supervise_stops_if_a_mixed_policy_update_cannot_be_enforced() {
+    let e = e2e("w1", "");
+    e.bus
+        .add_agent(
+            &e.operator,
+            "manager",
+            Some("worker"),
+            None,
+            None,
+            None,
+            Some("manager"),
+        )
+        .unwrap();
+    e.bus
+        .set_agent_policy(
+            &e.operator,
+            "manager",
+            Some(&identity::AgentPolicy {
+                max_concurrent_tasks: Some(1),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+    let path = e.workdir.join("agent-bus.config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    config["agents"]["manager"] = config["agents"]["w1"].clone();
+    config["agents"]["manager"]["id"] = serde_json::json!("manager");
+    config["agents"]["manager"]["authority"] = serde_json::json!("manager");
+    config["agents"]["manager"]["permissions"]["canDelegate"] = serde_json::json!(false);
+    config["constraints"]["maxConcurrentTasks"] = serde_json::json!(3);
+    fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+    let queued = e
+        .bus
+        .create_task(
+            &e.operator,
+            CreateTaskInput {
+                title: "must stay queued".into(),
+                to: Some("manager".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    fs::remove_file(e.home.join("operator.token")).unwrap();
+    let (stop, handle) = spawn_supervisor(&e, "manager", 100);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !handle.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    stop.store(true, Ordering::SeqCst);
+    let error = handle.join().unwrap().unwrap_err();
+    assert!(
+        error.message.contains("may only narrow its own policy"),
+        "{error}"
+    );
+    assert_eq!(e.bus.get_task(queued.id).unwrap().task.state, "open");
+    assert_eq!(
+        e.bus
+            .identify(Some("manager"))
+            .unwrap()
+            .permissions
+            .max_concurrent_tasks,
+        Some(1)
+    );
+    assert!(!e.home.join("supervisors/manager.pid").exists());
+
+    config["constraints"]["maxConcurrentTasks"] = serde_json::json!(1);
+    fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+    let (stop, handle) = spawn_supervisor(&e, "manager", 100);
+    wait_for(
+        Duration::from_secs(10),
+        "corrected configuration to submit work",
+        || {
+            e.bus
+                .get_task(queued.id)
+                .is_ok_and(|t| t.task.state == "submitted")
+        },
+    );
+    assert!(
+        !e.bus
+            .identify(Some("manager"))
+            .unwrap()
+            .permissions
+            .can_delegate
+    );
     stop.store(true, Ordering::SeqCst);
     handle.join().unwrap().unwrap();
 }

@@ -11,9 +11,9 @@ import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AdapterContext, HarnessInvocation, McpCommand, getHarnessAdapter } from "./adapters.js";
-import { BusConfig, ResolvedAgent, configPathFromProject, loadConfig, resolveAgent } from "./config.js";
+import { AgentDefinition, BusConfig, ResolvedAgent, configPathFromProject, loadConfig, resolveAgent } from "./config.js";
 import { Bus } from "./core/bus.js";
-import type { Identity } from "./core/identity.js";
+import type { AgentPolicy, Identity } from "./core/identity.js";
 import { budgetOver, pausedOf } from "./core/control.js";
 import { BusError, DEFAULT_WAIT_SEC, Message, OPERATOR_ID, Task } from "./core/types.js";
 
@@ -24,6 +24,22 @@ function envValue(...names: string[]): string | undefined {
     if (typeof value === "string" && value.trim()) return value;
   }
   return undefined;
+}
+
+export function policyFromConfig(config: BusConfig, agent: AgentDefinition): AgentPolicy {
+  const policy: AgentPolicy = {
+    canDelegate: agent.permissions.canDelegate,
+    maxDelegationDepth: Math.min(agent.permissions.maxDelegationDepth, config.constraints.maxDelegationDepth),
+    maxConcurrentTasks: config.constraints.maxConcurrentTasks,
+  };
+  if (agent.permissions.allowedChildAgentIds?.length) policy.allowedChildAgentIds = [...agent.permissions.allowedChildAgentIds];
+  return policy;
+}
+
+function isTaskCapacityConflict(error: unknown, agentId: string): boolean {
+  return error instanceof BusError && error.code === "conflict" &&
+    error.message.startsWith(`${agentId} already holds `) &&
+    error.message.endsWith("claimed task(s), its limit; submit or release one first");
 }
 
 export interface ProcessResult {
@@ -337,6 +353,10 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
     if (!agent.enabled) throw new Error(`agent ${agent.id} is disabled in the harness configuration`);
     release = acquireLock(join(home, "supervisors"), agent.id);
 
+    let operator: Identity | null = null;
+    try { operator = bus.identify(OPERATOR_ID); } catch { /* no operator token on this bus */ }
+    bus.setAgentPolicy(operator ?? me, me.agentId, policyFromConfig(config, agent));
+
     const adapter = getHarnessAdapter(agent.harnessDefinition.adapter);
     const managed = supervisorManaged(agent);
     const sessionPath = join(sessionDir, `${agent.id}.json`);
@@ -350,6 +370,7 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
     const mcpCommand = mcpCommandFor(me.agentId, bus.dbPath, qagentBin);
     const blockSec = agent.harnessDefinition.id === "claude" ? "900" : "240";
     const waitMs = options.waitMs ?? DEFAULT_WAIT_SEC * 1000;
+    let retryClaimAtCapacity = false;
     let consecutiveFailures = 0;
     log(`supervising ${agent.id} via ${agent.harnessDefinition.id} in ${workdir} (bus ${bus.dbPath}${managed ? ", supervisor-managed tasks" : ""})`);
 
@@ -376,7 +397,7 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
       }
       const waited = await bus.waitForMail(me, { timeoutMs: waitMs, signal: options.signal });
       if (options.signal?.aborted) break;
-      if (waited.status === "timeout") continue;
+      if (waited.status === "timeout" && !(managed && retryClaimAtCapacity)) continue;
       if (holdForPause(bus, me, log)) continue;
 
       // Consume what the wait saw, so the next wait does not deliver it again.
@@ -404,7 +425,22 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
           }
         }
         if (!messages.length) {
-          try { tasks.push(bus.claimTask(me, null)); } catch (error) { if (!(error instanceof BusError && error.code === "not_found")) throw error; }
+          try {
+            tasks.push(bus.claimTask(me, null));
+            retryClaimAtCapacity = false;
+          } catch (error) {
+            if (error instanceof BusError && error.code === "not_found") {
+              retryClaimAtCapacity = false;
+              continue;
+            }
+            if (isTaskCapacityConflict(error, me.agentId)) {
+              // Our own submit/release frees capacity without waking us; retry on timeout.
+              if (!retryClaimAtCapacity) log("at concurrent task limit; waiting for capacity");
+              retryClaimAtCapacity = true;
+              continue;
+            }
+            throw error;
+          }
         }
       } else if (!messages.length) {
         tasks.push(...bus.listTasks({ states: ["open", "changes_requested"], limit: 50 }).filter((task) => claimableBy(task, me.agentId, role)));
