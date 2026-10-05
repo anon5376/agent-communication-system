@@ -101,27 +101,80 @@ pub fn guarded(agent: &ResolvedAgent) -> bool {
     agent.agent.harness_options["guard"].as_bool() != Some(false)
 }
 
+/// Credentials in GUARDED_SECRETS that are the agent's own model login in some
+/// setups, so the guard keeps them there: Copilot signs in with a GitHub token,
+/// Claude Code on Bedrock and Amazon Q use AWS keys, and Claude or Gemini on Vertex
+/// use Google application credentials.
+fn provider_credentials(env: &HashMap<String, String>, harness: &str) -> Vec<&'static str> {
+    let on = |key: &str| {
+        env.get(key)
+            .map(|v| !matches!(v.trim(), "" | "0" | "false"))
+            .unwrap_or(false)
+    };
+    let mut keep = Vec::new();
+    if harness == "copilot" {
+        keep.extend(["GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN"]);
+    }
+    if harness == "amazonq" || on("CLAUDE_CODE_USE_BEDROCK") {
+        keep.extend(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]);
+    }
+    if on("CLAUDE_CODE_USE_VERTEX") || on("GOOGLE_GENAI_USE_VERTEXAI") {
+        keep.push("GOOGLE_APPLICATION_CREDENTIALS");
+    }
+    keep
+}
+
+/// The push URLs set explicitly on the remotes of the repository at `workdir`.
+/// git skips pushInsteadOf for those, so the guard rewrites them with insteadOf.
+fn explicit_push_urls(workdir: &Path) -> Vec<String> {
+    std::process::Command::new("git")
+        .args(["config", "--get-regexp", r"^remote\..*\.pushurl$"])
+        .current_dir(workdir)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|line| line.split_once(' ').map(|(_, url)| url.trim().to_string()))
+                .filter(|url| !url.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The guard for an unattended agent's environment: drop the credentials in
-/// GUARDED_SECRETS, make every `git push` fail (an empty pushInsteadOf rewrites
-/// every push URL to a scheme git cannot reach; fetch and pull still work), and
-/// never let git wait on a password prompt. This is a guardrail against mistakes
-/// and injected instructions, not a sandbox: a determined agent with a shell can
-/// still read files the operator can.
-pub fn guard_environment(env: &mut HashMap<String, String>) {
+/// GUARDED_SECRETS (except the agent's own model login, see provider_credentials),
+/// make every `git push` fail (an empty pushInsteadOf rewrites every push URL to a
+/// scheme git cannot reach, and remotes in `workdir` with their own pushurl get an
+/// insteadOf for that URL; fetch and pull still work), and never let git wait on a
+/// password prompt. This is a guardrail against mistakes and injected instructions,
+/// not a sandbox: a determined agent with a shell can still read files the operator
+/// can, or change the repository's git config.
+pub fn guard_environment(env: &mut HashMap<String, String>, harness: &str, workdir: &Path) {
+    let keep = provider_credentials(env, harness);
     for key in GUARDED_SECRETS {
-        env.remove(*key);
+        if !keep.contains(key) {
+            env.remove(*key);
+        }
     }
     env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
-    let n: usize = env
+    let mut n: usize = env
         .get("GIT_CONFIG_COUNT")
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(0);
-    env.insert(
-        format!("GIT_CONFIG_KEY_{n}"),
-        "url.aos-blocked-git-push-ask-the-operator:///.pushInsteadOf".into(),
-    );
-    env.insert(format!("GIT_CONFIG_VALUE_{n}"), String::new());
-    env.insert("GIT_CONFIG_COUNT".into(), (n + 1).to_string());
+    const BLOCKED: &str = "url.aos-blocked-git-push-ask-the-operator:///";
+    let mut rules = vec![(format!("{BLOCKED}.pushInsteadOf"), String::new())];
+    for url in explicit_push_urls(workdir) {
+        rules.push((format!("{BLOCKED}.insteadOf"), url));
+    }
+    for (key, value) in rules {
+        env.insert(format!("GIT_CONFIG_KEY_{n}"), key);
+        env.insert(format!("GIT_CONFIG_VALUE_{n}"), value);
+        n += 1;
+    }
+    env.insert("GIT_CONFIG_COUNT".into(), n.to_string());
 }
 
 pub fn retry_delay_ms(consecutive_failures: u32) -> u64 {
@@ -534,7 +587,12 @@ struct Keepalive {
 }
 
 impl Keepalive {
-    fn finish(mut self) {
+    fn finish(self) {}
+}
+
+/// Stops the keepalive thread however the turn ends, a panic included.
+impl Drop for Keepalive {
+    fn drop(&mut self) {
         self.done.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -905,6 +963,12 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
         };
         let wait_ms = options.wait_ms.unwrap_or(DEFAULT_WAIT_SEC as u64 * 1000);
         let mut consecutive_failures: u32 = 0;
+        // Turns whose usage could not be saved (a full disk). The budget reads that
+        // file, so after MAX_FAILED_TURNS of these the agent pauses instead.
+        let mut unrecorded_turns: u32 = 0;
+        // The last message seq a finished turn used. If marking it read failed, the
+        // mail is still unread on the bus, but it is not handed to another turn.
+        let mut used_through: i64 = 0;
         let retry_base_ms = options.retry_base_ms.unwrap_or(2_000);
         let backoff = |failures: u32| retry_delay_ms(failures) * retry_base_ms / 2_000;
         log(&format!(
@@ -971,6 +1035,14 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                 } else {
                     Vec::new()
                 };
+                let already_used = messages.iter().filter(|m| m.seq <= used_through).count();
+                if already_used > 0 {
+                    // A turn used this mail but marking it read failed: mark it now
+                    // instead of paying for the same turn again.
+                    let last = messages.iter().filter(|m| m.seq <= used_through).last().unwrap();
+                    bus.mark_read_through(&me, last.seq, already_used)?;
+                    return Ok(Round::Next);
+                }
                 let mark_read = |bus: &Bus| -> Result<()> {
                     match messages.last() {
                         Some(last) => bus.mark_read_through(&me, last.seq, messages.len()),
@@ -1077,7 +1149,7 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                 let keepalive = keep_claims_alive(&bus.db_path, &me);
                 let mut environment = sanitized_environment(&agent, &invocation.environment);
                 if guarded(&agent) {
-                    guard_environment(&mut environment);
+                    guard_environment(&mut environment, &agent.harness.id, &workdir);
                 }
                 let process_result = run_harness_process(
                     &invocation.command,
@@ -1090,12 +1162,16 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                 keepalive.finish();
                 cap_stdout_file(&out_path);
                 *child_pid.lock().unwrap() = None;
-                if bus
-                    .get_agent(&me.agent_id)?
-                    .map(|a| a.stored_status == "working")
-                    .unwrap_or(false)
-                {
-                    bus.set_status(&me, "idle")?;
+                // From here a paid turn has run: an error must not make the round
+                // fail and run the same mail again, so these steps only log.
+                match bus.get_agent(&me.agent_id) {
+                    Ok(Some(a)) if a.stored_status == "working" => {
+                        if let Err(error) = bus.set_status(&me, "idle") {
+                            log(&format!("could not set status idle: {error}"));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => log(&format!("could not read agent status: {error}")),
                 }
                 if options.stop.load(Ordering::SeqCst) {
                     log(&format!(
@@ -1120,10 +1196,28 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                 } else if let Some(id) = normalized.session_id.clone() {
                     session.session_id = Some(id);
                 }
-                fs::write(
+                match fs::write(
                     &session_path,
                     serde_json::to_string_pretty(&session).unwrap(),
-                )?;
+                ) {
+                    Ok(()) => unrecorded_turns = 0,
+                    Err(error) => {
+                        unrecorded_turns += 1;
+                        log(&format!("could not save usage to {}: {error}", session_path.display()));
+                    }
+                }
+                if unrecorded_turns >= MAX_FAILED_TURNS {
+                    unrecorded_turns = 0;
+                    let reason = format!(
+                        "usage could not be saved to {} after {MAX_FAILED_TURNS} turns, so the budget cannot be enforced",
+                        session_path.display()
+                    );
+                    if let Err(error) =
+                        pause_after_failures(&bus, &me, MAX_FAILED_TURNS, &reason, &log)
+                    {
+                        log(&format!("could not pause: {error}"));
+                    }
+                }
 
                 let mut report_ids: std::collections::BTreeSet<i64> = task_ids;
                 report_ids.extend(tasks.iter().map(|t| t.id));
@@ -1175,10 +1269,20 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                         .iter()
                         .all(|m| m.task_id.is_some_and(|id| failed_back.contains(&id)))
                     {
-                        mark_read(&bus)?;
+                        if let Some(last) = messages.last() {
+                            used_through = last.seq;
+                        }
+                        if let Err(error) = mark_read(&bus) {
+                            log(&format!("could not mark mail read: {error}"));
+                        }
                     }
                     if consecutive_failures >= MAX_FAILED_TURNS {
-                        pause_after_failures(&bus, &me, consecutive_failures, &error, &log)?;
+                        if let Err(pause_error) =
+                            pause_after_failures(&bus, &me, consecutive_failures, &error, &log)
+                        {
+                            log(&format!("could not pause: {pause_error}"));
+                            sleep_interruptible(backoff(consecutive_failures), &options.stop);
+                        }
                         consecutive_failures = 0;
                         return Ok(Round::Next);
                     }
@@ -1189,7 +1293,12 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                 }
 
                 consecutive_failures = 0;
-                mark_read(&bus)?;
+                if let Some(last) = messages.last() {
+                    used_through = last.seq;
+                }
+                if let Err(error) = mark_read(&bus) {
+                    log(&format!("could not mark mail read: {error}"));
+                }
                 if invocation.auto_report {
                     let structured = normalized.structured.unwrap_or(serde_json::json!({}));
                     for id in &report_ids {
