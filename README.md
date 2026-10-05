@@ -52,13 +52,13 @@ cd your-project
 aos
 ```
 
-The first run looks for agent CLIs on your machine and writes a crew of three (lead, builder, reviewer), taking the reviewer from a different CLI than the builder when you have two. Claude Code, Codex CLI and Cursor CLI can join a crew today; Gemini CLI, Hermes, OpenCode, Kimi and Grok are detected but cannot join yet. `aos doctor` says what is missing. Type a goal as a sentence and press Enter; the agents work in this folder, and the result comes back to you to accept. Real turns run on the agent CLIs' own accounts and cost what those CLIs charge. Keys, commands and limits are in [`rust/AOS.md`](https://github.com/anon5376/agent-communication-system/blob/rust-port/rust/AOS.md).
+The first run looks for agent CLIs on your machine and writes a crew of three (lead, builder, reviewer), taking the reviewer from a different CLI than the builder when you have two. In the `aos-v0.1.0` release, Claude Code, Codex CLI and Cursor CLI can join a crew. On `rust-port`, and in the next release, `aos connect <cli> --auto-approve` also adds Gemini CLI, Kimi, OpenCode, Hermes, Grok and other CLIs; those run unattended without approval prompts, so aos asks you to type `--auto-approve` once. None of them has been live-tested. `aos doctor` says what is missing. Type a goal as a sentence and press Enter; the agents work in this folder, and the result comes back to you to accept. Real turns run on the agent CLIs' own accounts and cost what those CLIs charge. Keys, commands and limits are in [`rust/AOS.md`](https://github.com/anon5376/agent-communication-system/blob/rust-port/rust/AOS.md).
 
-The `aos` source lives on the [`rust-port`](https://github.com/anon5376/agent-communication-system/tree/rust-port) branch. This branch, `main`, holds the TypeScript implementation, `qagent`, described below. Both open the same `bus.db`, tokens and signal files, and every `qagent` command also works as `aos <command>`.
+The `aos` source lives on the [`rust-port`](https://github.com/anon5376/agent-communication-system/tree/rust-port) branch. This branch, `main`, holds the TypeScript implementation, `qagent`, described below. Both open the same `bus.db`, tokens and signal files, and the bus commands (`task`, `send`, `inbox`, `log`, `trace`, `mcp` and the rest) also work as `aos <command>`. `aos doctor` is aos's own check, not `qagent doctor`.
 
 ## Watch a worker die and the work survive
 
-[`examples/worker-death-recovery.sh`](examples/worker-death-recovery.sh) runs the whole loop on a throwaway bus with no agent CLI and no account: a worker claims a scoped task and leaves a note, its process is killed with `SIGKILL`, the bus reports the claim as stalled, the operator requeues it, a second worker claims and submits it, the worker's attempt to accept its own work is refused, and the reviewer accepts it.
+[`examples/worker-death-recovery.sh`](examples/worker-death-recovery.sh) runs the whole loop on a throwaway bus with no agent CLI and no account: a worker claims a scoped task and leaves a note, its process is killed with `SIGKILL`, the bus reports the claim as stalled, the operator requeues it, a second worker claims and submits it, the worker's attempt to accept the work is refused, and the reviewer accepts it.
 
 ```bash
 QAGENT=aos sh examples/worker-death-recovery.sh     # with the released binary
@@ -66,10 +66,10 @@ QAGENT=qagent sh examples/worker-death-recovery.sh  # with the TypeScript build 
 ```
 
 ```text
-== the worker cannot accept its own work
+== worker-2 cannot accept the work; only the named reviewer or the operator can
 qagent: only reviewer or the operator may review task 1
 
-== the bus is the trace
+== the bus is the trace (abridged)
   10-04 11:35:02 worker-1 task_claimed — task claimed
   10-04 11:35:02 worker-1 note — reproduced the offset bug, starting the fix
   10-04 11:35:06 operator task_released — task released
@@ -145,8 +145,8 @@ qagent mcp-config --agent codex --client codex
 
 - **Platforms.** CI runs on Linux. The `aos` binaries are built for macOS but have only been run by hand on Linux. No Windows build.
 - **Providers.** No provider CLI runs in CI; adapters are tested against recorded command lines and output. No live provider run is recorded in this repository. [Provider support](docs/provider-support.md) has the per-provider status.
-- **Two implementations.** The TypeScript and Rust builds share one schema and interoperate on the same `bus.db` (`scripts/v2-interop-smoke.mjs` checks mail, cursors, claims and wake-ups across both, in CI on `rust-port`). Some features exist in only one: per-task git worktrees and automatic requeue are TypeScript-only; `aos`, pause/resume and budgets are Rust-only. See [implementation differences](docs/FULL-GUIDE.md#implementation-differences).
-- **Cost.** Budgets (in `aos`) always count turns and minutes. Dollars are counted only when a CLI reports them, and are checked between turns, so a dollar budget is not a hard cap. Codex reports tokens, not a price.
+- **Two implementations.** The TypeScript and Rust builds share one schema and interoperate on the same `bus.db` (`scripts/v2-interop-smoke.mjs` checks mail, cursors, claims and wake-ups across both, in CI on `rust-port`). Some features exist in only one: per-task git worktrees and automatic requeue are TypeScript-only; `aos` and the pause, resume and budget commands are Rust-only. The TypeScript supervisor's config budgets (`optionalTokenBudget`, `optionalApiCostBudgetUSD`) are not enforced on `main` yet; a pending PR (#29) enforces them. See [implementation differences](docs/FULL-GUIDE.md#implementation-differences).
+- **Cost.** Budgets in `aos` always count turns and minutes. Dollars and tokens are counted only when a CLI reports them, and every budget is checked between turns, so one turn can overshoot and a dollar budget is not a hard cap. Codex reports tokens, not a price.
 - **Speed.** A CLI call takes about 2 ms with the Rust binary and about 77 ms with Node (`inbox --peek`, mean of 20 calls on a Linux container, 2026-10-04). Agent turns dominate either way.
 - **Security.** Identity stops agents from impersonating each other by accident. It is not a boundary against a hostile process running as the same OS user, and messages are stored in plaintext. Details below.
 

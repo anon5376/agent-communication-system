@@ -58,9 +58,9 @@ step "worker-2 picks it up from the note worker-1 left, and submits"
 q --as worker-2 task claim "$TASK"
 q --as worker-2 task submit "$TASK" --summary "Offset parsing fixed; tests pass" --file src/date.ts
 
-step "the worker cannot accept its own work"
+step "worker-2 cannot accept the work; only the named reviewer or the operator can"
 if q --as worker-2 task review "$TASK" --accept --feedback "lgtm" 2>&1; then
-  echo "UNEXPECTED: self-review was accepted" >&2
+  echo "UNEXPECTED: worker-2 was allowed to review" >&2
   exit 1
 fi
 

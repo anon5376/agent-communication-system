@@ -20,7 +20,7 @@ Line to lead with everywhere: **Run different coding agents together without bei
 >
 > There is a terminal console, `aos`, with Linux and macOS binaries, and an `aos demo` that runs a sample team without any account. `examples/worker-death-recovery.sh` kills a worker with SIGKILL and walks the task through recovery and independent review, also without any account.
 >
-> Limits, plainly: Claude Code, Codex and Cursor CLI can join an `aos` crew today; other adapters exist but are not live-tested. Same machine only. Identity stops accidents, not a hostile process running as you, and messages are plaintext on disk. No Windows build, and the macOS binaries have not been run by hand yet.
+> Limits, plainly: Claude Code, Codex and Cursor CLI join an `aos` crew out of the box; Gemini, Kimi, OpenCode, Hermes and others join with `aos connect`, which turns off their approval prompts and has not been live-tested. Same machine only. Identity stops accidents, not a hostile process running as you, and messages are plaintext on disk. No Windows build, and the macOS binaries have not been run by hand yet.
 >
 > MIT. I would like to hear how you coordinate several agents today, and where this breaks for you.
 
@@ -40,7 +40,7 @@ Line to lead with everywhere: **Run different coding agents together without bei
 >
 > Try it without any account: `aos demo` after the one-line install, or `sh examples/worker-death-recovery.sh` from the repo.
 >
-> What it is not: an agent framework (it writes no prompts and picks no models), a sandbox, or a cloud service. Linux and macOS binaries, no Windows build yet. Only Claude Code, Codex and Cursor CLI can join a crew today.
+> What it is not: an agent framework (it writes no prompts and picks no models), a sandbox, or a cloud service. Linux and macOS binaries, no Windows build yet. Claude Code, Codex and Cursor join a crew directly; other CLIs join through `aos connect`, not live-tested.
 >
 > Repo: github.com/anon5376/agent-communication-system. A roast of the design is welcome.
 
@@ -76,14 +76,15 @@ Topics: `mcp` `mcp-server` `model-context-protocol` `ai-agents` `multi-agent` `a
 
 | Claim | Evidence | Checked |
 |---|---|---|
-| Worker cannot accept its own work | `src/core/bus.ts` review gate; refused in `examples/worker-death-recovery.sh` with TS `qagent` and the released `aos` 0.1.0 binary; also refused when the worker is named reviewer or is the creator | 2026-10-04 |
+| Worker cannot accept its own work | `src/core/bus.ts` review gate: only the named reviewer (or creator) or the operator may review, and never the assignee. Checked by hand with TS `qagent` and `aos` 0.1.0 with the worker as named reviewer and as creator; the example script shows the reviewer-only rule | 2026-10-04 |
 | Dead worker's claim is reported and recoverable | `task stalled`, `task requeue` in both builds; the example above kills the worker with SIGKILL | 2026-10-04 |
 | Unattended requeue | TS only: `qagent supervise --auto-requeue-min`. Not in the Rust build or `aos` | 2026-10-04 |
 | Overlapping path claims refused | `leaseConflicts` in `src/core/bus.ts`; cooperative, not filesystem-enforced | 2026-10-04 |
 | No daemon | CLI and MCP server open `bus.db` directly; the supervisor and dashboard are optional processes you start | 2026-10-04 |
 | Linux and macOS binaries | Release `aos-v0.1.0` has 4 builds; installer run in a clean `$HOME` on Linux x86_64 only | 2026-10-04 |
 | `aos demo` needs no account | Seeds a sample bus in `$TMPDIR/aos-demo`; starts no agent CLI | 2026-10-04 (code read) |
-| Claude Code, Codex, Cursor can join a crew | `rust/AOS.md` on `rust-port` | 2026-10-04 |
+| Claude Code, Codex, Cursor can join a crew | `rust/AOS.md`; true in `aos-v0.1.0` | 2026-10-04 |
+| Other CLIs join through `aos connect --auto-approve` | `rust/AOS.md` on `rust-port` (#34, #35); flags checked against each CLI's `--help`; not in `aos-v0.1.0`, so post only after the next release | 2026-10-05 |
 | Other adapters exist | `ADAPTERS` in `src/adapters.ts`; unit tests only, no live run recorded | 2026-10-04 |
 | TS and Rust share one bus | `scripts/v2-interop-smoke.mjs` in `rust-port` CI | 2026-10-04 |
 | CLI call ~2 ms (Rust) vs ~77 ms (Node) | `inbox --peek`, mean of 20 calls, Linux container | 2026-10-04 |

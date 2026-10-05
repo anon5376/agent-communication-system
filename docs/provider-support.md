@@ -33,7 +33,7 @@ Every row marked "Implemented, live unverified" above was previously labelled "i
 
 ## Which CLIs can join an aos crew
 
-`aos` (on the `rust-port` branch) detects every CLI above, but only Claude Code, Codex CLI and Cursor CLI can join a crew today, because only their adapters hand the agent the bus tools on every turn. Gemini CLI, Hermes, OpenCode, Kimi and Grok are listed by `aos setup` and `aos doctor` but cannot take crew tasks yet. `qagent supervise` can launch any adapter from `.qagent/config.json`, but an agent can only report back if its CLI is given the bus MCP tools or runs `qagent` itself from its shell.
+In the `aos-v0.1.0` release only Claude Code, Codex CLI and Cursor CLI can join a crew, because only their adapters handed the agent the bus tools on every turn. On `rust-port` (not yet released), `aos connect <cli> --auto-approve` adds Gemini CLI, Kimi, OpenCode, Hermes, Grok and other CLIs, either with the bus tools or supervisor-managed; the full table is in [`rust/AOS.md`](https://github.com/anon5376/agent-communication-system/blob/rust-port/rust/AOS.md#connect-any-agent-cli). Their command lines were checked against each CLI's `--help`, not run live. `qagent supervise` can launch any adapter from `.qagent/config.json`, but an agent can only report back if its CLI is given the bus MCP tools or runs `qagent` itself from its shell.
 
 ## Model discovery
 
