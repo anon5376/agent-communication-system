@@ -14,7 +14,17 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// Seed `path` unless it already holds agents. Returns true when it seeded.
+/// The file next to a sample bus that marks it as simulated. aos shows
+/// SIMULATED on every screen of such a bus and refuses to start agents on it.
+pub const MARKER: &str = "SIMULATED";
+
+pub fn is_simulated(home: &Path) -> bool {
+    home.join(MARKER).exists()
+}
+
+/// Seed `path` unless it already holds agents or tasks. Returns true when it
+/// seeded; only then is the bus marked simulated, so pointing the demo at a
+/// real bus leaves that bus as it was.
 pub fn seed(path: &Path) -> Result<bool> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
@@ -27,6 +37,13 @@ pub fn seed(path: &Path) -> Result<bool> {
             .list_agents()?
             .iter()
             .any(|(a, _)| a.id != OPERATOR_ID)
+            || !probe
+                .list_tasks(crate::bus::ListTasksInput {
+                    include_closed: true,
+                    limit: Some(1),
+                    ..Default::default()
+                })?
+                .is_empty()
         {
             return Ok(false);
         }
@@ -264,5 +281,12 @@ pub fn seed(path: &Path) -> Result<bool> {
         refs: None,
         requires_ack: false,
     })?;
+    if let Some(dir) = path.parent() {
+        std::fs::write(
+            dir.join(MARKER),
+            "A sample bus made by aos demo. Its agents, tasks and results are made up; nothing runs.\n",
+        )
+        .map_err(|e| crate::error::BusError::invalid(format!("{}: {e}", dir.display())))?;
+    }
     Ok(true)
 }

@@ -147,10 +147,17 @@ pub struct AgentView {
     pub budget: Option<crate::control::Budget>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What needs the operator, in the order it is shown: results to review,
+/// then failures and blockers, then stalled claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GateKind {
     /// A submitted task whose reviewer is the operator.
     Review,
+    /// A task that ran out of retries or review rounds while its goal is open.
+    Failed,
+    /// Open work that cannot move until the operator acts: its agent is
+    /// paused or stopped, or it waits on a task that failed or was cancelled.
+    Blocker,
     /// A claimed task with no claim or note activity for the stall window.
     Stalled,
 }
@@ -160,6 +167,25 @@ pub struct Gate {
     pub kind: GateKind,
     pub task: Task,
     pub dependents: Vec<i64>,
+    /// Why it needs the operator, from the bus and crew state.
+    pub reason: String,
+    /// What that reading is based on.
+    pub evidence: String,
+    /// The command-home line that deals with it; [1] types it for the operator.
+    pub next: String,
+}
+
+impl Gate {
+    fn new(kind: GateKind, task: &Task, dependents: &BTreeMap<i64, Vec<i64>>) -> Gate {
+        Gate {
+            kind,
+            task: task.clone(),
+            dependents: dependents.get(&task.id).cloned().unwrap_or_default(),
+            reason: String::new(),
+            evidence: String::new(),
+            next: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +217,39 @@ pub struct Frame {
 }
 
 const CLOSED_RECENT: i64 = 40;
+const DAY_MS: i64 = 86_400_000;
+
+fn closed(t: &Task) -> bool {
+    matches!(t.state.as_str(), "accepted" | "failed" | "cancelled")
+}
+
+/// The task is waiting for this agent to act on it.
+pub fn waits_on_agent(t: &Task, agent: &str) -> bool {
+    let mine = t.assignee.as_deref() == Some(agent);
+    match t.state.as_str() {
+        "claimed" | "open" | "changes_requested" => mine,
+        "submitted" => reviewer_of(t) == agent,
+        _ => false,
+    }
+}
+
+fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Why a task failed, from its task_failed event.
+fn failure_reason(bus: &Bus, t: &Task) -> String {
+    bus.conn
+        .query_row(
+            "SELECT data_json FROM events WHERE kind = 'task_failed' AND entity = 'task' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
+            [t.id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(&p).ok())
+        .and_then(|v| v["reason"].as_str().map(str::to_string))
+        .unwrap_or_else(|| "no reason recorded".into())
+}
 const EVENT_WINDOW: i64 = 400;
 
 impl Frame {
@@ -253,25 +312,157 @@ impl Frame {
             }
         }
 
+        let agents = agent_tree(bus, &tasks, &stalled, now)?;
         let mut gates: Vec<Gate> = Vec::new();
         for t in &open {
             if t.state == "submitted" && reviewer_of(t) == OPERATOR_ID {
-                gates.push(Gate {
-                    kind: GateKind::Review,
-                    task: t.clone(),
-                    dependents: dependents.get(&t.id).cloned().unwrap_or_default(),
-                });
+                let mut g = Gate::new(GateKind::Review, t, &dependents);
+                g.reason = "a result waits for your review".into();
+                g.evidence = format!(
+                    "submitted by {} {}",
+                    t.assignee.as_deref().unwrap_or("nobody"),
+                    age(Some(t.updated_ms), now)
+                );
+                gates.push(g);
             }
         }
-        for t in &open {
-            if stalled.contains(&t.id) {
-                gates.push(Gate {
-                    kind: GateKind::Stalled,
-                    task: t.clone(),
-                    dependents: dependents.get(&t.id).cloned().unwrap_or_default(),
-                });
+        let by_id: BTreeMap<i64, &Task> = tasks.iter().map(|t| (t.id, t)).collect();
+        let is_open = |id: i64| by_id.get(&id).is_some_and(|t| !closed(t));
+        for t in tasks.iter().filter(|t| t.state == "failed") {
+            let goal_open = t.parent_id.is_some_and(is_open);
+            let waited_on = dependents
+                .get(&t.id)
+                .is_some_and(|d| d.iter().any(|&d| is_open(d)));
+            let recent_goal =
+                t.parent_id.is_none() && t.creator == OPERATOR_ID && now - t.updated_ms < DAY_MS;
+            // Already re-created: a newer task with the same title under the same goal.
+            let redone = tasks
+                .iter()
+                .any(|n| n.id > t.id && n.parent_id == t.parent_id && n.title == t.title);
+            if redone || !(goal_open || waited_on || recent_goal) {
+                continue;
             }
+            let mut g = Gate::new(GateKind::Failed, t, &dependents);
+            let why = failure_reason(bus, t);
+            g.reason = format!("failed: {why}");
+            g.evidence = match &t.review {
+                Some(r) if !r.accepted => {
+                    format!("last review by {}: {}", r.reviewer, one_line(&r.feedback))
+                }
+                _ => format!(
+                    "{} of {} attempts used / {}",
+                    t.attempts,
+                    t.max_retries + 1,
+                    age(Some(t.updated_ms), now)
+                ),
+            };
+            g.next = format!(
+                "task add {}{}{}",
+                t.title,
+                t.assignee
+                    .as_deref()
+                    .map(|a| format!(" --to {a}"))
+                    .unwrap_or_default(),
+                t.parent_id
+                    .filter(|p| is_open(*p))
+                    .map(|p| format!(" --under {p}"))
+                    .unwrap_or_default()
+            );
+            gates.push(g);
         }
+        // Open work held by a paused agent: nothing moves until it is resumed.
+        let mut held: BTreeSet<i64> = BTreeSet::new();
+        for a in agents.iter().filter(|a| a.paused.is_some()) {
+            let Some(t) = open.iter().find(|t| waits_on_agent(t, &a.id)) else {
+                continue;
+            };
+            let mut g = Gate::new(GateKind::Blocker, t, &dependents);
+            g.reason = format!("{} is paused, so #{} cannot move", a.id, t.id);
+            g.evidence = format!(
+                "paused: {}{}",
+                a.paused.as_deref().unwrap_or(""),
+                a.budget
+                    .as_ref()
+                    .map(|b| format!(" / budget {}", b.line()))
+                    .unwrap_or_default()
+            );
+            g.next = format!("resume {}", a.id);
+            held.insert(t.id);
+            gates.push(g);
+        }
+        for t in open.iter().filter(|t| t.state == "blocked") {
+            let Some(dead) = t
+                .dependencies
+                .iter()
+                .filter_map(|d| by_id.get(d))
+                .find(|d| matches!(d.state.as_str(), "failed" | "cancelled"))
+            else {
+                continue;
+            };
+            let mut g = Gate::new(GateKind::Blocker, t, &dependents);
+            g.reason = format!(
+                "waits on #{}, which {}",
+                dead.id,
+                if dead.state == "failed" {
+                    "failed"
+                } else {
+                    "was cancelled"
+                }
+            );
+            g.evidence = format!(
+                "#{} {} / {}",
+                dead.id,
+                dead.title,
+                age(Some(dead.updated_ms), now)
+            );
+            g.next = format!("cancel {}", t.id);
+            gates.push(g);
+        }
+        for t in open
+            .iter()
+            .filter(|t| stalled.contains(&t.id) && !held.contains(&t.id))
+        {
+            let mut g = Gate::new(GateKind::Stalled, t, &dependents);
+            let who = t.assignee.clone().unwrap_or_else(|| "nobody".into());
+            let idle = span(now - t.updated_ms);
+            let agent = agents.iter().find(|a| Some(&a.id) == t.assignee.as_ref());
+            let note = bus
+                .get_task(t.id)
+                .ok()
+                .and_then(|d| d.notes.last().cloned())
+                .map(|n| {
+                    format!(
+                        " / last note {}: {}",
+                        age(Some(n.ts_ms), now),
+                        one_line(&n.body)
+                    )
+                })
+                .unwrap_or_else(|| " / no notes".into());
+            match agent {
+                Some(a) if a.st == St::Disconnected || a.stored_status == "offline" => {
+                    g.reason = format!("{who} went offline holding it");
+                    g.evidence = format!("{who} last seen {}{note}", age(a.last_seen_ms, now));
+                    g.next = format!("requeue {} {who} went offline", t.id);
+                }
+                Some(a) if a.last_seen_ms.is_none_or(|t| now - t > stall_ms) => {
+                    g.reason = format!("{who} has not checked in for {idle} while holding it");
+                    g.evidence = format!("{who} last seen {}{note}", age(a.last_seen_ms, now));
+                    g.next = format!("requeue {} {who} stopped checking in", t.id);
+                }
+                Some(a) => {
+                    g.reason = format!("{who} is online but has not touched it for {idle}");
+                    g.evidence = format!("{who} last seen {}{note}", age(a.last_seen_ms, now));
+                    g.next = format!("requeue {} no progress for {idle}", t.id);
+                }
+                None => {
+                    g.reason = format!("no claim or note activity for {idle}");
+                    g.evidence = format!("{who} is not on the bus{note}");
+                    g.next = format!("requeue {}", t.id);
+                }
+            }
+            gates.push(g);
+        }
+        gates.sort_by_key(|g| g.kind);
 
         let agents = agent_tree(bus, &tasks, &stalled, now)?;
         let tree = task_tree(&tasks, &stalled);
@@ -312,6 +503,63 @@ impl Frame {
         })
     }
 
+    /// Open work held by a crew member whose supervisor is not running: a
+    /// blocker the bus cannot see (it only learns the agent left once its
+    /// staleness window passes). Replaces a stalled gate on the same task.
+    pub fn add_crew_blockers(&mut self) {
+        if self.crew.simulated {
+            return;
+        }
+        let stopped: Vec<(String, Option<String>)> = self
+            .crew
+            .members
+            .iter()
+            .filter(|m| m.pid.is_none())
+            .map(|m| (m.id.clone(), m.last_words.clone()))
+            .collect();
+        for (id, last) in stopped {
+            let Some(t) = self
+                .tree
+                .iter()
+                .map(|n| &n.task)
+                .find(|t| waits_on_agent(t, &id))
+                .cloned()
+            else {
+                continue;
+            };
+            if self
+                .gates
+                .iter()
+                .any(|g| g.task.id == t.id && g.kind == GateKind::Blocker)
+            {
+                continue;
+            }
+            self.gates
+                .retain(|g| !(g.task.id == t.id && g.kind == GateKind::Stalled));
+            let dependents = self
+                .tree
+                .iter()
+                .filter(|n| n.task.dependencies.contains(&t.id))
+                .map(|n| n.task.id)
+                .collect();
+            self.gates.push(Gate {
+                kind: GateKind::Blocker,
+                reason: format!("{id} is stopped, so #{} cannot move", t.id),
+                evidence: match last {
+                    Some(l) => format!(
+                        "its supervisor is not running / last log line: {}",
+                        one_line(&l)
+                    ),
+                    None => "its supervisor is not running / no log yet".into(),
+                },
+                next: format!("start {id}"),
+                task: t,
+                dependents,
+            });
+        }
+        self.gates.sort_by_key(|g| g.kind);
+    }
+
     pub fn running(&self) -> usize {
         self.agents.iter().filter(|a| a.st == St::Running).count()
     }
@@ -320,6 +568,18 @@ impl Frame {
         self.gates
             .iter()
             .filter(|g| g.kind == GateKind::Review)
+            .count()
+    }
+
+    pub fn count(&self, kind: GateKind) -> usize {
+        self.gates.iter().filter(|g| g.kind == kind).count()
+    }
+
+    /// Open tasks nobody is working on yet: the queue.
+    pub fn queued(&self) -> usize {
+        self.tree
+            .iter()
+            .filter(|n| matches!(n.task.state.as_str(), "open" | "changes_requested"))
             .count()
     }
 
@@ -334,7 +594,9 @@ impl Frame {
     pub fn overall(&self) -> St {
         if self.reviews() > 0 {
             St::Gate
-        } else if self.stalled() > 0 {
+        } else if self.gates.iter().any(|g| g.kind == GateKind::Failed) {
+            St::Failed
+        } else if !self.gates.is_empty() {
             St::Blocked
         } else if self.running() > 0 {
             St::Running

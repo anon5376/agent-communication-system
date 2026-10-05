@@ -64,6 +64,8 @@ pub struct Watcher {
     pub exe: PathBuf,
     restarts: HashMap<String, Vec<Instant>>,
     log: Box<dyn Fn(&str) + Send>,
+    /// The last reason nothing could be restarted, so it is logged once, not every look.
+    held: Option<String>,
 }
 
 impl Watcher {
@@ -74,35 +76,48 @@ impl Watcher {
             exe,
             restarts: HashMap::new(),
             log,
+            held: None,
         }
+    }
+
+    /// Nothing can be restarted right now: log why (once), and keep watching the
+    /// crashed agents, so a watcher started at login does not exit over a crew file
+    /// it could not read yet or a folder that is not trusted yet.
+    fn hold(&mut self, why: String, waiting: usize) -> usize {
+        if self.held.as_deref() != Some(why.as_str()) {
+            (self.log)(&why);
+            self.held = Some(why);
+        }
+        waiting
     }
 
     /// One look: restart what crashed. Returns how many agents are still watched.
     pub fn check(&mut self) -> usize {
-        let Ok(Some(config)) = crew::load_crew(&self.paths) else {
-            return 0;
+        let config = match crew::load_crew(&self.paths) {
+            Ok(Some(config)) => config,
+            Ok(None) => return 0,
+            Err(error) => return self.hold(format!("could not read the crew: {error}"), 1),
         };
         let ids = crew::member_ids(&config);
         let down = crashed(&self.paths, &ids);
         if down.is_empty() {
             return watched(&self.paths, &ids);
         }
+        let waiting = down.len();
         let Some(dir) = crew::crew_workdir(&self.paths) else {
-            (self.log)("crew has no working folder on record; nothing restarted");
-            return 0;
+            return self.hold("crew has no working folder on record; nothing restarted".into(), waiting);
         };
         // The same checks aos start makes: never in ~ or /, only in a folder the operator trusted.
         if let Some(why) = crew::unsafe_workdir(&dir) {
-            (self.log)(&format!("not restarting: {why}"));
-            return 0;
+            return self.hold(format!("not restarting: {why}"), waiting);
         }
         if !crew::is_trusted(&self.paths, &dir) {
-            (self.log)(&format!(
-                "not restarting: {} is not a trusted folder",
-                dir.display()
-            ));
-            return 0;
+            return self.hold(
+                format!("not restarting: {} is not a trusted folder", dir.display()),
+                waiting,
+            );
         }
+        self.held = None;
         let now = Instant::now();
         let mut due = Vec::new();
         for id in down {

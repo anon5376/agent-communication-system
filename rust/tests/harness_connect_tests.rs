@@ -3,7 +3,7 @@
 //! and a supervisor running a stand-in CLI end to end. No real agent CLI runs.
 
 use acs::adapters::{get_harness_adapter, AdapterContext};
-use acs::aos::crew::{self, Connect, Found, Paths, CLIS};
+use acs::aos::crew::{self, Connect, Found, Paths, SignIn, CLIS};
 use acs::aos::ensure_operator;
 use acs::bus::{Bus, CreateTaskInput};
 use acs::config::{load_config, resolve_agent};
@@ -47,6 +47,7 @@ fn only(ids: &[&str]) -> Vec<Found> {
             cli,
             path: ids.contains(&cli.id).then(|| PathBuf::from("/bin/true")),
             version: None,
+            sign_in: SignIn::Found("test".into()),
         })
         .collect()
 }
@@ -97,7 +98,7 @@ fn auto_approving_clis_need_the_operators_word() {
     .unwrap();
     assert!(
         said.iter()
-            .any(|l| l.contains("reviewer now runs on gemini")),
+            .any(|l| l.contains("reviewer joined the crew on gemini")),
         "{said:?}"
     );
     assert_eq!(crew::allowed(&paths), vec!["gemini".to_string()]);
@@ -106,12 +107,24 @@ fn auto_approving_clis_need_the_operators_word() {
     assert!(config.harnesses["gemini"].features.mcp);
     assert_eq!(config.harnesses["gemini"].options["autoApprove"], true);
 
-    // Once allowed, a rebuilt crew may use it too; still never as the lead
-    // when the CLI has no bus tools.
-    assert!(crew::plan_with(&only(&["hermes"]), &["hermes".to_string()]).is_empty());
+    // Once allowed, a rebuilt crew may use it too. A CLI without bus tools can
+    // build (its supervisor claims and submits) but never review; with one
+    // family the operator reviews.
+    let ids = |p: Vec<crew::Member>| p.iter().map(|m| (m.id, m.cli.id)).collect::<Vec<_>>();
+    assert_eq!(
+        ids(crew::plan_with(&only(&["hermes"]), &["hermes".to_string()])),
+        [("builder", "hermes")]
+    );
+    assert_eq!(
+        ids(crew::plan_with(
+            &only(&["hermes", "gemini"]),
+            &["hermes".to_string(), "gemini".to_string()]
+        )),
+        [("builder", "gemini")],
+        "hermes has no bus tools, so it can't review gemini's work"
+    );
     let plan = crew::plan_with(&only(&["gemini"]), &["gemini".to_string()]);
-    assert_eq!(plan.len(), 3);
-    assert!(plan.iter().all(|m| m.cli.id == "gemini"));
+    assert_eq!(ids(plan), [("builder", "gemini")]);
     assert!(crew::plan(&only(&["gemini"])).is_empty());
 
     // Not installed is a clear failure, not a crew pointing at nothing.

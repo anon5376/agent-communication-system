@@ -157,8 +157,11 @@ fn the_watcher_never_restarts_into_an_untrusted_folder() {
     fs::create_dir_all(paths.pid_file("w1").parent().unwrap()).unwrap();
     fs::write(paths.pid_file("w1"), format!("{}\n", gone.id())).unwrap();
     let mut w = watcher(&db);
-    assert_eq!(w.check(), 0);
+    // Not restarted, but still watched: trusting the folder later lets it restart.
+    assert_eq!(w.check(), 1);
+    assert_eq!(w.check(), 1);
     assert!(crew::running_pid(&paths, "w1").is_none());
+    assert!(paths.pid_file("w1").exists());
 }
 
 #[test]
