@@ -9,39 +9,16 @@
  * deduplicate background hooks.
  *
  * It only peeks. The read cursor does not move, so Claude reads the messages with bus_inbox as
- * usual and their bodies stay out of the system reminder. The last announced seq is kept in
- * <home>/hooks/<agent>.claude-code.seq, so a turn that ends without reading the inbox does not
- * wake the session again for the same messages.
+ * usual and their bodies stay out of the system reminder. The last announced seq is kept in the
+ * bus database, so a turn that ends without reading the inbox does not wake the session again for
+ * the same messages.
  */
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveDbPath } from "../core/db.js";
-import { assertSafeAgentId } from "../core/identity.js";
-import { OPERATOR_ID } from "../core/types.js";
 import { SignalFileWatcher } from "../notify/wait.js";
 /** Headers listed in one wake-up; the rest are counted. */
 const SHOWN = 10;
-export function hookStatePaths(home, agentId) {
-    if (agentId !== OPERATOR_ID)
-        assertSafeAgentId(agentId);
-    const dir = join(home, "hooks");
-    return { dir, owner: join(dir, `${agentId}.claude-code.owner`), seq: join(dir, `${agentId}.claude-code.seq`) };
-}
-function readText(path) {
-    try {
-        return readFileSync(path, "utf8").trim();
-    }
-    catch {
-        return "";
-    }
-}
-function writeAtomic(path, text) {
-    const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync(tmp, text, { mode: 0o600 });
-    renameSync(tmp, path);
-}
 /**
  * Wait until `actor` has unread mail that no earlier wake-up announced, then record it as announced.
  * Returns "superseded" as soon as another call for the same agent has started (checked every
@@ -49,10 +26,8 @@ function writeAtomic(path, text) {
  */
 export async function waitForWake(bus, actor, options) {
     const me = actor.agentId;
-    const paths = hookStatePaths(bus.home, me);
-    mkdirSync(paths.dir, { recursive: true, mode: 0o700 });
     const nonce = `${process.pid}-${randomUUID()}`;
-    writeAtomic(paths.owner, nonce);
+    bus.registerClaudeCodeHookOwner(me, nonce);
     const sliceMs = Math.max(1, options.sliceMs ?? 2000);
     const deadline = Date.now() + Math.max(0, options.timeoutMs);
     const watcher = new SignalFileWatcher(bus.db, bus.dbPath, me, { maxPollMs: 1000 });
@@ -60,15 +35,14 @@ export async function waitForWake(bus, actor, options) {
         let since = bus.latestSeq();
         let check = true;
         for (;;) {
-            if (readText(paths.owner) !== nonce)
+            if (!bus.isClaudeCodeHookOwner(me, nonce))
                 return { status: "superseded", messages: [], total: 0 };
             if (check) {
-                const announced = Number(readText(paths.seq)) || 0;
-                const fresh = bus.unreadAfter(me, announced, SHOWN);
-                if (fresh.messages.length) {
-                    writeAtomic(paths.seq, String(fresh.lastSeq));
+                const fresh = bus.claimClaudeCodeHookMail(me, nonce, SHOWN);
+                if (fresh.status === "superseded")
+                    return { status: "superseded", messages: [], total: 0 };
+                if (fresh.status === "mail")
                     return { status: "mail", messages: fresh.messages, total: fresh.total };
-                }
             }
             const remaining = deadline - Date.now();
             if (remaining <= 0 || options.signal?.aborted)

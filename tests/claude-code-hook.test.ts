@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Bus } from "../src/core/bus.js";
-import { hookStatePaths, renderWake, waitForWake } from "../src/hook/claude-code.js";
+import { renderWake, waitForWake } from "../src/hook/claude-code.js";
 
 const QAGENT = fileURLToPath(new URL("../src/qagent.js", import.meta.url));
 
@@ -45,7 +45,6 @@ test("hook announces unread mail once, then only mail that arrives later", async
   assert.equal(woke.status, "mail");
   assert.deepEqual(woke.messages.map((message) => message.seq), [first.seq, second.seq]);
   assert.equal(woke.total, 2);
-  assert.equal(Number(readFileSync(hookStatePaths(bus.home, "alice").seq, "utf8")), second.seq);
   assert.equal(bus.unreadCount("alice"), 2, "the hook only peeks");
 
   const again = await waitForWake(bus, alice, { timeoutMs: 50, sliceMs: 10 });
@@ -54,6 +53,28 @@ test("hook announces unread mail once, then only mail that arrives later", async
   const [third] = other.send(bob, { to: "alice", subject: "three", body: "" });
   const next = await waitForWake(bus, alice, { timeoutMs: 1000 });
   assert.deepEqual(next.messages.map((message) => message.seq), [third.seq]);
+});
+
+test("database replacement resets hook announcement state", async (t) => {
+  const { dbPath, bus, alice, bob, other } = setup(t);
+  other.send(bob, { to: "alice", subject: "before replacement", body: "" });
+  assert.equal((await waitForWake(bus, alice, { timeoutMs: 1000 })).status, "mail");
+  bus.close();
+  other.close();
+  for (const suffix of ["", "-wal", "-shm"]) rmSync(`${dbPath}${suffix}`, { force: true });
+
+  const replacement = Bus.open({ dbPath });
+  t.after(() => replacement.close());
+  replacement.init();
+  const operator = replacement.identify("operator");
+  replacement.addAgent(operator, { id: "alice", role: "manager", authority: "manager" });
+  replacement.addAgent(operator, { id: "bob", role: "worker" });
+  const replacementAlice = replacement.identify("alice");
+  const replacementBob = replacement.identify("bob");
+  replacement.send(replacementBob, { to: "alice", subject: "after replacement", body: "" });
+  const woke = await waitForWake(replacement, replacementAlice, { timeoutMs: 1000 });
+  assert.equal(woke.status, "mail");
+  assert.equal(woke.messages[0].subject, "after replacement");
 });
 
 test("hook wakes on mail sent while it waits", async (t) => {
@@ -71,6 +92,17 @@ test("a newer hook for the same agent supersedes the older one", async (t) => {
   const newer = waitForWake(bus, alice, { timeoutMs: 200, sliceMs: 20 });
   assert.equal((await older).status, "superseded");
   assert.equal((await newer).status, "timeout");
+});
+
+test("concurrent hooks announce a message only once", async (t) => {
+  const { bus, alice, bob, other } = setup(t);
+  const older = waitForWake(bus, alice, { timeoutMs: 1000, sliceMs: 10 });
+  const newer = waitForWake(bus, alice, { timeoutMs: 1000, sliceMs: 10 });
+  other.send(bob, { to: "alice", subject: "one announcement", body: "" });
+  const [oldResult, newResult] = await Promise.all([older, newer]);
+  assert.equal(oldResult.status, "superseded");
+  assert.equal(newResult.status, "mail");
+  assert.deepEqual(newResult.messages.map((message) => message.subject), ["one announcement"]);
 });
 
 test("a wake-up lists ten headers, counts the rest, and announces all of them", async (t) => {
