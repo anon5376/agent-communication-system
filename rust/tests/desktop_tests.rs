@@ -694,6 +694,56 @@ fn snapshot_keeps_submitted_tasks_older_than_recent_page() {
 }
 
 #[test]
+fn submitted_before_caps_results_and_orders_newest_first() {
+    let db = temp_db("submitted-limit");
+    init_bus(&db);
+    let bus = Bus::open(Some(&db)).unwrap();
+    let operator = bus.identify(Some(OPERATOR_ID)).unwrap();
+    bus.add_agent(
+        &operator,
+        "review-worker",
+        Some("worker"),
+        Some("test-model"),
+        Some("test"),
+        None,
+        Some("worker"),
+    )
+    .unwrap();
+    let worker = bus.identify(Some("review-worker")).unwrap();
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let task = bus
+            .create_task(
+                &operator,
+                acs::bus::CreateTaskInput {
+                    title: format!("submission {i}"),
+                    to: Some("review-worker".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        bus.claim_task(&worker, Some(task.id)).unwrap();
+        bus.submit_task(
+            &worker,
+            task.id,
+            SubmitInput {
+                summary: format!("submitted {i}"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ids.push(task.id);
+    }
+
+    let tasks = bus.submitted_before(ids[2] + 1, 2).unwrap();
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(
+        tasks.iter().map(|task| task.id).collect::<Vec<_>>(),
+        vec![ids[2], ids[1]]
+    );
+}
+
+#[test]
 fn snapshot_previews_multibyte_brief_but_task_action_returns_full_text() {
     let db = temp_db("brief-preview");
     init_bus(&db);

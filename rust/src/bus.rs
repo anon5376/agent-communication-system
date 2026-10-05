@@ -1535,12 +1535,12 @@ impl Bus {
         Ok((tasks, truncated))
     }
 
-    /// Submitted tasks older than `below_id`, newest first — review work a
-    /// newest-first page would otherwise hide.
-    pub fn submitted_before(&self, below_id: i64) -> Result<Vec<Task>> {
+    /// Up to `limit` submitted tasks older than `below_id`, newest first —
+    /// review work a newest-first page would otherwise hide.
+    pub fn submitted_before(&self, below_id: i64, limit: i64) -> Result<Vec<Task>> {
         self.to_tasks(
-            "SELECT * FROM tasks WHERE state = 'submitted' AND id < ? ORDER BY id DESC",
-            &[&below_id as &dyn rusqlite::ToSql],
+            "SELECT * FROM tasks WHERE state = 'submitted' AND id < ? ORDER BY id DESC LIMIT ?",
+            &[&below_id as &dyn rusqlite::ToSql, &limit.max(0)],
         )
     }
 

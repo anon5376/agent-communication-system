@@ -203,6 +203,10 @@ public actor ACSClient {
         let timedOut = Flag()
         let watchdog = DispatchWorkItem {
             guard !finished.isDone else { return }
+            if !process.isRunning {
+                finished.complete(.exited(process.terminationStatus))
+                return
+            }
             timedOut.set()
             escalate()
             abandonLater()

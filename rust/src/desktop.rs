@@ -441,7 +441,7 @@ fn action_snapshot(bus: &Bus) -> Result<Value> {
         let (mut tasks, truncated) = bus.recent_tasks(TASK_LIMIT)?;
         if truncated {
             if let Some(oldest) = tasks.last().map(|task| task.id) {
-                tasks.extend(bus.submitted_before(oldest)?);
+                tasks.extend(bus.submitted_before(oldest, TASK_LIMIT)?);
             }
         }
         let can_operate = bus.identify(Some(OPERATOR_ID)).is_ok();
