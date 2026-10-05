@@ -4,6 +4,35 @@ Native macOS front end for the agent-communication-system. The SwiftUI app is a
 thin shell over the existing Rust bus: the Rust helper binaries ship inside the
 app bundle and the app talks to them locally.
 
+## First run
+
+Open the DMG and drag **ACS** into **Applications**. The app requires macOS 14
+or newer and a build matching your Mac's processor.
+
+- **Try the Sample** opens an isolated, clearly labelled simulated workspace.
+  Explore Tasks, Needs review, Agents, and Messages without accounts or model calls.
+- **Open a Project** creates an empty local workspace for a folder you choose.
+  It does not modify that project's files or start agents.
+- **Connect an existing bus** opens a trusted ACS `bus.db`, including its normal
+  additive migrations. Existing operator credentials are required to make changes.
+
+For real work, open **Agents → Find Installed CLIs → Set Up Local Crew**, then explicitly start
+the agents you want. Installed is not authenticated: follow the displayed sign-in
+guidance in the provider's own CLI. Starting an agent requires choosing a project
+folder and accepting that it may run commands, modify files, send project content
+to its provider, and incur charges. ACS is not a sandbox or a guaranteed spend cap.
+
+Use **New Task** to write a brief, acceptance criteria, and file scope. Choose a
+separate reviewer or review as the operator. Creating a task does not start a
+stopped agent. Open **Needs review** to inspect submitted work before accepting it
+or requesting changes; worker-reported checks are not independently verified by ACS.
+Return open/claimed tasks to the queue to release ownership without losing their
+requirements. Failed/closed tasks are not silently cloned into weaker replacements.
+
+Workspace databases live in `~/Library/Application Support/ACS`. The workspace
+menu can reveal the selected database in Finder. Existing terminal commands remain
+available; this app adds a native operator surface rather than replacing them.
+
 ## Layout
 
 ```
