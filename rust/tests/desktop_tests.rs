@@ -414,6 +414,32 @@ fn send_pause_resume_requeue_cancel() {
     assert_eq!(fail(&reply, code)["code"], "conflict");
 }
 
+#[test]
+fn setup_start_stop_require_the_operator_before_any_writes() {
+    let dir = temp_dir("gated");
+    let db = dir.join("bus.db");
+    init_bus(&db);
+    std::fs::remove_file(dir.join("operator.token")).unwrap();
+
+    let workdir = temp_dir("gated-work");
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    let (reply, code) = call(&db, "setup", json!({}));
+    assert_eq!(fail(&reply, code)["code"], "unauthorized");
+    let (reply, code) = call(
+        &db,
+        "start",
+        json!({"ids": ["builder"], "workdir": workdir.display().to_string(), "confirmed": true}),
+    );
+    assert_eq!(fail(&reply, code)["code"], "unauthorized");
+    let (reply, code) = call(&db, "stop", json!({"ids": ["builder"]}));
+    assert_eq!(fail(&reply, code)["code"], "unauthorized");
+
+    // No aos config, presets, trust file or supervisor records were written.
+    assert!(!dir.join("aos").exists(), "setup wrote into {dir:?}");
+    assert!(!dir.join("supervisors").exists());
+}
+
 // ------------------------------------------------------------------ detect
 
 #[test]
