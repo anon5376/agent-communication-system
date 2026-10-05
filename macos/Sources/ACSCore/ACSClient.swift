@@ -7,7 +7,7 @@ public enum ACSError: LocalizedError, Sendable {
     case helperUnavailable(String)
     /// The helper returned `{ok: false, error: {code, message}}`.
     case helperError(code: String, message: String)
-    /// The helper exited nonzero without a parseable error envelope.
+    /// The helper exited nonzero without a trusted error envelope.
     case helperExited(status: Int32, detail: String)
     /// stdout was not the expected single JSON envelope.
     case malformedResponse(String)
@@ -40,10 +40,15 @@ public enum ACSError: LocalizedError, Sendable {
 ///
 /// Each request spawns a fresh helper process launched directly (no shell),
 /// with a small set of safe tool directories prepended to the inherited PATH
-/// and HOME preserved.
+/// and HOME preserved. Shutdown is bounded: SIGTERM, then SIGKILL on the same
+/// single process if it is still alive after a short grace. Pipe reads are
+/// nonblocking, so a descendant that inherited our pipes can never keep a
+/// finished request waiting on EOF.
 public actor ACSClient {
     /// Maximum bytes retained from each of the helper's stdout and stderr.
     public static let outputLimit = 16 * 1024 * 1024
+    /// How long SIGTERM gets to work before SIGKILL lands on the same process.
+    private static let killGrace: TimeInterval = 0.5
 
     private let executable: URL
     private let database: URL
@@ -64,7 +69,7 @@ public actor ACSClient {
     ) async throws -> T {
         try Task.checkCancellation()
         let envelope: [String: JSONValue] = [
-            "version": .number(1),
+            "version": .integer(1),
             "dbPath": .string(database.path),
             "action": .string(action),
             "payload": .object(payload),
@@ -78,6 +83,36 @@ public actor ACSClient {
         let stdout: Data
         let stderr: Data
         let stdoutTruncated: Bool
+    }
+
+    /// The helper's reply envelope, decoded straight from stdout bytes so
+    /// Int64 fields keep their precision (no Double round-trip).
+    private struct Response<Payload: Decodable>: Decodable {
+        let ok: Bool?
+        let data: Payload?
+        let error: Failure?
+
+        struct Failure: Decodable {
+            let code: String
+            let message: String
+
+            private enum CodingKeys: String, CodingKey { case code, message }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                message = (try? container.decode(String.self, forKey: .message))
+                    ?? "The helper reported failure."
+                if let code = try? container.decode(String.self, forKey: .code) {
+                    self.code = code
+                } else if let code = try? container.decode(Int64.self, forKey: .code) {
+                    self.code = String(code)
+                } else if let code = try? container.decode(Double.self, forKey: .code) {
+                    self.code = String(code)
+                } else {
+                    code = "helper_error"
+                }
+            }
+        }
     }
 
     private func execute(_ input: Data) async throws -> Reply {
@@ -109,45 +144,64 @@ public actor ACSClient {
             try? stdin.fileHandleForWriting.close()
         }
 
-        // Drain both pipes concurrently so a chatty helper can never deadlock
-        // on a full pipe; retained bytes are capped at outputLimit each.
+        // Nonblocking reads on both pipes: a descendant that inherited them
+        // must never keep this request waiting on EOF after our process exits.
+        let outFD = stdout.fileHandleForReading.fileDescriptor
+        let errFD = stderr.fileHandleForReading.fileDescriptor
+        Self.makeNonblocking(outFD)
+        Self.makeNonblocking(errFD)
+
+        let exited = Flag()
         let out = BoundedBuffer(limit: Self.outputLimit)
         let err = BoundedBuffer(limit: Self.outputLimit)
         let drained = DispatchGroup()
-        drained.enter()
-        DispatchQueue.global().async {
-            out.drain(stdout.fileHandleForReading)
-            drained.leave()
-        }
-        drained.enter()
-        DispatchQueue.global().async {
-            err.drain(stderr.fileHandleForReading)
-            drained.leave()
+        for (fd, buffer) in [(outFD, out), (errFD, err)] {
+            drained.enter()
+            DispatchQueue.global().async {
+                buffer.drain(fileDescriptor: fd, done: exited)
+                drained.leave()
+            }
         }
 
-        let timedOut = Flag()
-        if timeout > 0 {
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                if process.isRunning {
-                    timedOut.set()
-                    process.terminate()
+        // SIGTERM first, SIGKILL on the same owned process if still alive
+        // after the grace period. Never the process group: descendants are
+        // the helper's own business; we just stop reading their pipes.
+        let escalate = {
+            if process.isRunning {
+                process.terminate()
+                DispatchQueue.global().asyncAfter(deadline: .now() + Self.killGrace) {
+                    if process.isRunning {
+                        kill(process.processIdentifier, SIGKILL)
+                    }
                 }
             }
         }
+
+        let timedOut = Flag()
+        let watchdog = DispatchWorkItem {
+            if process.isRunning {
+                timedOut.set()
+                escalate()
+            }
+        }
+        if timeout > 0 {
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+        }
+        defer { watchdog.cancel() }
 
         let status: Int32 = await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 DispatchQueue.global().async {
                     process.waitUntilExit()
+                    exited.set()
                     continuation.resume(returning: process.terminationStatus)
                 }
             }
         } onCancel: {
-            // Only our own process is signalled — no shell, no process group.
-            if process.isRunning { process.terminate() }
+            escalate()
         }
 
-        // Pipes reach EOF right after exit; let the drain loops finish.
+        // Drainers finish a bounded final sweep once `exited` is set.
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             drained.notify(queue: .global()) { continuation.resume() }
         }
@@ -160,42 +214,49 @@ public actor ACSClient {
     }
 
     private func decodeReply<T: Decodable>(_ reply: Reply, as type: T.Type) throws -> T {
+        // A truncated stdout can look like valid JSON only because its tail
+        // was dropped — reject before trusting any of it.
+        if reply.stdoutTruncated { throw ACSError.outputTruncated }
+
+        // Probe the envelope without decoding `data` into T yet: a success
+        // whose payload shape doesn't match T should read as malformed, not
+        // as a transport failure.
+        let probe = try? decoder.decode(Response<JSONValue>.self, from: reply.stdout)
+
         // An error envelope is authoritative even when the helper exits nonzero.
-        guard let envelope = try? decoder.decode([String: JSONValue].self, from: reply.stdout)
-        else {
-            if reply.stdoutTruncated { throw ACSError.outputTruncated }
+        if let failure = probe?.error, probe?.ok == false {
+            throw ACSError.helperError(code: failure.code, message: failure.message)
+        }
+        guard probe?.ok == true else {
+            if probe?.ok == false {
+                throw ACSError.helperError(
+                    code: "helper_error", message: "The helper reported failure.")
+            }
             if reply.status != 0 {
                 throw ACSError.helperExited(
                     status: reply.status, detail: Self.snippet(reply.stderr))
             }
             throw ACSError.malformedResponse(
-                "stdout was not a JSON object (\(reply.stdout.count) bytes)")
+                "stdout was not a JSON envelope (\(reply.stdout.count) bytes)")
         }
-        guard let ok = envelope["ok"]?.bool else {
-            throw ACSError.malformedResponse("missing \"ok\" in reply envelope")
-        }
-        guard ok else {
-            let failure = envelope["error"]?.objectValue
-            var message = "The helper reported failure."
-            var code = "helper_error"
-            if let failure {
-                if case .string(let value)? = failure["message"] { message = value }
-                if case .string(let value)? = failure["code"] { code = value }
-                else if case .number(let value)? = failure["code"] {
-                    code = value.truncatingRemainder(dividingBy: 1) == 0
-                        ? String(Int64(value)) : String(value)
-                }
-            }
-            throw ACSError.helperError(code: code, message: message)
-        }
-        guard let data = envelope["data"], !data.isNull else {
-            throw ACSError.malformedResponse("reply had no \"data\" payload")
+        // Success requires a clean exit; an ok:true reply from a crashed
+        // helper cannot be trusted.
+        guard reply.status == 0 else {
+            throw ACSError.helperExited(
+                status: reply.status, detail: Self.snippet(reply.stderr))
         }
         do {
-            return try decoder.decode(T.self, from: encoder.encode(data))
+            guard let payload = try decoder.decode(Response<T>.self, from: reply.stdout).data
+            else {
+                throw ACSError.malformedResponse("reply had no \"data\" payload")
+            }
+            return payload
+        } catch let error as ACSError {
+            throw error
         } catch {
             throw ACSError.malformedResponse(
-                "reply data did not match \(T.self): \(Self.snippet(Data(String(describing: error).utf8)))")
+                "reply data did not match \(T.self): "
+                    + Self.snippet(Data(String(describing: error).utf8)))
         }
     }
 
@@ -219,6 +280,12 @@ public actor ACSClient {
             .filter { !$0.isEmpty && seen.insert($0).inserted }
             .joined(separator: ":")
         return environment
+    }
+
+    private static func makeNonblocking(_ fd: Int32) {
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0 else { return }
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
     }
 
     /// First readable bytes of helper output, trimmed for error messages.
@@ -251,13 +318,34 @@ private final class BoundedBuffer: @unchecked Sendable {
         return storage
     }
 
-    func drain(_ handle: FileHandle) {
-        while let chunk = try? handle.read(upToCount: 256 * 1024), !chunk.isEmpty {
-            lock.lock()
-            let room = limit - storage.count
-            if room > 0 { storage.append(chunk.prefix(room)) }
-            if chunk.count > room { overflow = true }
-            lock.unlock()
+    /// Nonblocking read loop: appends while the owning process runs, and once
+    /// `done` is set, performs a bounded final sweep of whatever bytes remain
+    /// (a descendant holding the pipe open only forfeits further output).
+    func drain(fileDescriptor fd: Int32, done: Flag) {
+        var chunk = [UInt8](repeating: 0, count: 256 * 1024)
+        var postDoneBudget = limit
+        while true {
+            if done.isSet && postDoneBudget <= 0 { return }
+            let count = chunk.withUnsafeMutableBytes {
+                read(fd, $0.baseAddress, chunk.count)
+            }
+            if count > 0 {
+                if done.isSet { postDoneBudget -= count }
+                lock.lock()
+                let room = limit - storage.count
+                if room > 0 { storage.append(contentsOf: chunk[..<min(count, room)]) }
+                if count > room { overflow = true }
+                lock.unlock()
+                continue
+            }
+            if count == 0 { return } // EOF
+            if errno == EINTR { continue }
+            if errno == EAGAIN {
+                if done.isSet { return }
+                usleep(1000)
+                continue
+            }
+            return // real read error
         }
     }
 }

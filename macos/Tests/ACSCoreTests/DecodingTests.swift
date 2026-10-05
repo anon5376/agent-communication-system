@@ -103,6 +103,20 @@ final class DecodingTests: XCTestCase {
         XCTAssertTrue(snapshot.truncated)
     }
 
+    func testSnapshotRejectsMissingSecurityFields() throws {
+        // dbPath/simulated/canOperate/truncated are required: an empty object
+        // must not decode as a usable snapshot.
+        XCTAssertThrowsError(try decoder.decode(
+            Snapshot.self, from: Data("{\"agents\":[],\"tasks\":[],\"messages\":[]}".utf8)))
+        // ...while the collections themselves stay tolerant of omission.
+        let sparse = try decoder.decode(Snapshot.self, from: Data("""
+            {"dbPath": "/tmp/bus.db", "simulated": false, "canOperate": true,
+             "truncated": false}
+            """.utf8))
+        XCTAssertTrue(sparse.tasks.isEmpty)
+        XCTAssertTrue(sparse.canOperate)
+    }
+
     func testTaskDetailDecodesFlattenedShape() throws {
         // Rust serializes TaskDetail with #[serde(flatten)]: the task's own
         // fields live at the top level next to notes/messages/dependents/leases.
