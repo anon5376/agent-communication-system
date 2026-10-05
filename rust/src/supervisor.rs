@@ -1103,7 +1103,7 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
             ));
         }
         // The configuration's limits go into the bus, where every Rust call path (MCP,
-        // CLI, this supervisor) and the TypeScript qagent enforce them.
+        // CLI, this supervisor) and the TypeScript qagent on main enforce them.
         // Failing to apply them fails the start: running unenforced is worse than not running.
         let operator = bus.identify(Some(crate::types::OPERATOR_ID)).ok();
         bus.set_agent_policy(

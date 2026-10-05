@@ -499,7 +499,7 @@ fn action_init(db_path: &Path) -> Result<Value> {
     let bus = Bus::open(Some(db_path))?;
     let result = bus.init()?;
     Ok(message(format!(
-        "operator {} / bus at {}",
+        "operator ready (token {}) / bus at {}",
         result.operator, result.db_path
     )))
 }
@@ -559,6 +559,9 @@ fn sign_in_text(found: &crew::Found) -> String {
 /// `setup` — write the crew (never over an existing crew.json) and put its
 /// members on the bus. Starts nothing.
 fn action_setup(bus: &Bus) -> Result<Value> {
+    // Authenticate before any filesystem write or provider detection: setup
+    // touches the disk well before sync_bus would check the operator.
+    let _operator = operator(bus)?;
     let paths = crew::Paths::for_db(&bus.db_path);
     let report = crew::setup(bus, &paths, &crew::detect(), false)?;
     let members = report
@@ -584,6 +587,8 @@ fn action_setup(bus: &Bus) -> Result<Value> {
 /// Per-agent outcomes are reported verbatim: a partial start is an error that
 /// still says who did start.
 fn action_start(bus: &Bus, payload: &Value) -> Result<Value> {
+    // Authenticate before validation, trust writes or process effects.
+    let _operator = operator(bus)?;
     if payload.get("confirmed").and_then(Value::as_bool) != Some(true) {
         return Err(BusError::invalid(
             "start needs confirmed: true / the app asks the operator first",
@@ -646,7 +651,7 @@ fn action_start(bus: &Bus, payload: &Value) -> Result<Value> {
     let mut lines = started.clone();
     if !budgeted.is_empty() {
         lines.push(format!(
-            "{} budget: {} each, then the agent pauses and writes to you",
+            "{} default limits {} each — turns and minutes always count; the dollar cap only holds on CLIs that report usage / the agent pauses and writes to you at a limit",
             budgeted.join(", "),
             crew::DEFAULT_BUDGET.describe()
         ));
@@ -665,6 +670,8 @@ fn action_start(bus: &Bus, payload: &Value) -> Result<Value> {
 
 /// `stop` — SIGINT each named agent's supervisor, crew members only.
 fn action_stop(bus: &Bus, payload: &Value) -> Result<Value> {
+    // Authenticate before the crew check or any signal to a supervisor.
+    let _operator = operator(bus)?;
     let ids = want_str_list(payload, "ids")?;
     if ids.is_empty() {
         return Err(BusError::invalid("name at least one agent to stop"));
