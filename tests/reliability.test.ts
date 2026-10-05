@@ -256,6 +256,23 @@ test("with worktree isolation, mail about a task the turn does not hold is kept 
   await supervisor.stop();
 });
 
+test("after a worktree refusal, mail that names no task still reaches a later turn", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t);
+  f.add("fake-small", "cheap-worker");
+  const prompts = join(f.home, "prompts.log");
+  // The project is not a git repository, so the task is refused; the plain message must survive that.
+  f.bus.createTask(f.op, { title: "edit in isolation", to: "fake-small", project: f.project });
+  f.bus.send(f.op, { to: "fake-small", type: "question", subject: "plain note", body: "SENTINEL-PLAIN" });
+  const record = `require('fs').appendFileSync(${JSON.stringify(prompts)}, process.argv[1] + '\\n----\\n'); process.stdout.write(JSON.stringify({result: 'ok', usage: {inputTokens: 5, outputTokens: 5, totalTokens: 10, costUSD: 0}}) + '\\n')`;
+  const supervisor = run(f, probeConfig((config) => {
+    config.constraints.isolation = "worktree";
+    config.agents["fake-small"].harnessOptions = { args: ["-e", record, "{prompt}"] };
+  }));
+  t.after(supervisor.stop);
+  await until("a turn that shows the plain message", 10_000, () => existsSync(prompts) && readFileSync(prompts, "utf8").includes("SENTINEL-PLAIN"), () => f.lines.join("\n"));
+  await supervisor.stop();
+});
+
 test("an unchanged task the agent leaves alone is not offered again at every wait timeout", { timeout: 20_000 }, async (t) => {
   const f = fixture(t);
   f.add("fake-small", "cheap-worker");
