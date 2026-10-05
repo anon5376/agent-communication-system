@@ -165,6 +165,19 @@ fn handle(input: &str) -> Result<Value> {
             )?;
             Ok(message("sent".to_string()))
         }
+        "orchestration" => action_orchestration(&open_existing(&db_path)?),
+        "startGoal" => action_start_goal(&open_existing(&db_path)?, &request.payload),
+        "saveMission" => action_save_prompt(
+            &open_existing(&db_path)?,
+            &request.payload,
+            PromptKind::Mission,
+        ),
+        "saveRole" => action_save_prompt(
+            &open_existing(&db_path)?,
+            &request.payload,
+            PromptKind::Role,
+        ),
+        "setAgent" => action_set_agent(&open_existing(&db_path)?, &request.payload),
         other => Err(BusError::invalid(format!("unknown action: {other}"))),
     }
 }
@@ -761,4 +774,280 @@ fn action_create_task(bus: &Bus, payload: &Value) -> Result<Value> {
         },
     )?;
     Ok(message(format!("task #{} created", task.id)))
+}
+
+// ------------------------------------------------------------ orchestration
+//
+// The aos side of the app: goals, the mission and role prompt files in
+// `<bus home>/aos/`, and the crew file. Prompt files are plain text the
+// operator owns; the bridge writes only the one file it is asked to.
+
+/// Most recent operator goals `orchestration` returns.
+const GOAL_LIMIT: i64 = 20;
+/// Largest prompt file the bridge will write.
+const PROMPT_MAX_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Copy)]
+enum PromptKind {
+    Mission,
+    Role,
+}
+
+fn prompt_name(payload: &Value) -> Result<String> {
+    let name = want_str(payload, "name")?.trim().to_lowercase();
+    let ok = !name.is_empty()
+        && name.len() <= 40
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !ok {
+        return Err(BusError::invalid(
+            "name must be 1-40 letters, digits, - or _ (it becomes the file name)",
+        ));
+    }
+    Ok(name)
+}
+
+/// The role prompt files: what is in roles/, or the built-in presets before
+/// that folder exists. Sorted by name.
+fn role_prompts(paths: &crew::Paths) -> Vec<Value> {
+    let mut out: Vec<(String, String, bool)> = match std::fs::read_dir(paths.roles()) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "md"))
+            .filter_map(|p| {
+                let name = p.file_stem()?.to_string_lossy().to_string();
+                let text = std::fs::read_to_string(&p).ok()?;
+                let custom = crew::ROLE_PRESETS
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .is_none_or(|(_, t)| *t != text);
+                Some((name, crew::strip_note(&text).to_string(), custom))
+            })
+            .collect(),
+        Err(_) => crew::ROLE_PRESETS
+            .iter()
+            .map(|(n, t)| (n.to_string(), crew::strip_note(t).to_string(), false))
+            .collect(),
+    };
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.into_iter()
+        .map(|(name, text, custom)| json!({ "name": name, "text": text, "custom": custom }))
+        .collect()
+}
+
+/// `orchestration` — missions, role prompts, the crew and recent goals.
+fn action_orchestration(bus: &Bus) -> Result<Value> {
+    let paths = crew::Paths::for_db(&bus.db_path);
+    let missions: Vec<Value> = crew::missions(&paths)
+        .into_iter()
+        .map(|m| {
+            let file = paths.missions().join(format!("{}.md", m.name));
+            let raw = std::fs::read_to_string(&file).ok();
+            let preset = crew::MISSION_PRESETS
+                .iter()
+                .find(|(n, _)| *n == m.name)
+                .map(|(_, t)| *t);
+            let custom = match (&raw, preset) {
+                (Some(r), Some(p)) => r != p,
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            let text = raw
+                .as_deref()
+                .or(preset)
+                .map(|t| crew::strip_note(t).to_string())
+                .unwrap_or_default();
+            json!({
+                "name": m.name, "summary": m.summary, "brief": m.brief,
+                "acceptance": m.acceptance, "text": text, "custom": custom,
+            })
+        })
+        .collect();
+    let raw_crew: Value = std::fs::read_to_string(paths.crew())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Value::Null);
+    let (configured, crew_error, members, owner) = match crew::load_crew(&paths) {
+        Ok(None) => (false, None, vec![], None),
+        Err(e) => (true, Some(e.message), vec![], None),
+        Ok(Some(config)) => {
+            let mut ids: Vec<&String> = config.agents.keys().collect();
+            ids.sort_by_key(|id| (config.agents[*id].authority != "manager", (*id).clone()));
+            let members = ids
+                .into_iter()
+                .map(|id| {
+                    let a = &config.agents[id];
+                    json!({
+                        "id": id,
+                        "role": a.role,
+                        "authority": a.authority,
+                        "cli": config.models.get(&a.model).map(|m| m.harness.clone()).unwrap_or_default(),
+                        "description": a.description,
+                        "enabled": a.enabled,
+                        "instructions": raw_crew["agents"][id]["instructions"].as_str(),
+                        "running": crew::running_pid(&paths, id).is_some(),
+                    })
+                })
+                .collect();
+            (true, None, members, crew::goal_owner(&config))
+        }
+    };
+    let goals: Vec<Value> = {
+        let mut stmt = bus.conn.prepare_cached(
+            "SELECT id FROM tasks WHERE parent_id IS NULL AND creator = ? ORDER BY id DESC LIMIT ?",
+        )?;
+        let ids = stmt
+            .query_map(rusqlite::params![OPERATOR_ID, GOAL_LIMIT], |row| {
+                row.get::<_, i64>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|id| {
+                let t = bus.get_task(id)?.task;
+                Ok(json!({
+                    "id": t.id, "title": t.title, "state": t.state,
+                    "assignee": t.assignee, "reviewer": t.reviewer, "updatedMs": t.updated_ms,
+                }))
+            })
+            .collect::<Result<_>>()?
+    };
+    Ok(json!({
+        "simulated": demo::is_simulated(&bus.home),
+        "configured": configured,
+        "crewError": crew_error,
+        "crewDir": crew::Paths::show(&paths.dir),
+        "workdir": crew::crew_workdir(&paths).map(|p| p.display().to_string()),
+        "goalOwner": owner,
+        "missions": missions,
+        "roles": role_prompts(&paths),
+        "crew": members,
+        "goals": goals,
+    }))
+}
+
+/// `startGoal` — a mission template filled with the goal, handed to the crew's
+/// lead (or `to`), reviewed independently when the crew allows. Never starts
+/// an agent: that stays an explicit `start`.
+fn action_start_goal(bus: &Bus, payload: &Value) -> Result<Value> {
+    let operator = operator(bus)?;
+    let goal = want_str(payload, "goal")?.trim().to_string();
+    if goal.is_empty() {
+        return Err(BusError::invalid("say what you want done"));
+    }
+    let name = opt_str(payload, "mission").unwrap_or_else(|| "run".to_string());
+    let paths = crew::Paths::for_db(&bus.db_path);
+    let mission = crew::missions(&paths)
+        .into_iter()
+        .find(|m| m.name == name)
+        .ok_or_else(|| BusError::not_found(format!("no mission called {name}")))?;
+    let (title, brief, acceptance) = crew::expand(&mission, &goal);
+    let to = opt_str(payload, "to").filter(|t| !t.trim().is_empty());
+    let config = crew::load_crew(&paths).ok().flatten();
+    let owner = to
+        .clone()
+        .or_else(|| config.as_ref().and_then(crew::goal_owner));
+    let reviewer = match (&config, owner.as_deref()) {
+        (Some(config), Some(id))
+            if config
+                .agents
+                .get(id)
+                .is_some_and(|a| a.authority != "manager") =>
+        {
+            crew::reviewer_for(config, id)
+        }
+        _ => OPERATOR_ID.to_string(),
+    };
+    let task = bus.create_task(
+        &operator,
+        CreateTaskInput {
+            title,
+            brief: Some(brief),
+            acceptance: Some(acceptance).filter(|a| !a.is_empty()),
+            to: owner.clone(),
+            reviewer: Some(reviewer.clone()),
+            project: opt_str(payload, "project"),
+            ..Default::default()
+        },
+    )?;
+    let who = owner.unwrap_or_else(|| "the first free agent".to_string());
+    let review = if reviewer == OPERATOR_ID {
+        "you review the result".to_string()
+    } else {
+        format!("{reviewer} reviews it")
+    };
+    Ok(message(format!(
+        "goal #{} started / {who} takes it / {review}",
+        task.id
+    )))
+}
+
+/// `saveMission` / `saveRole` — write one prompt file. The presets are written
+/// first so the folder never holds only the edited file.
+fn action_save_prompt(bus: &Bus, payload: &Value, kind: PromptKind) -> Result<Value> {
+    let _operator = operator(bus)?;
+    let name = prompt_name(payload)?;
+    let text = want_str(payload, "text")?;
+    if text.trim().is_empty() {
+        return Err(BusError::invalid("the prompt is empty"));
+    }
+    if text.len() > PROMPT_MAX_BYTES {
+        return Err(BusError::invalid("the prompt is over 64 KB"));
+    }
+    let paths = crew::Paths::for_db(&bus.db_path);
+    crew::write_presets(&paths)?;
+    let (dir, what) = match kind {
+        PromptKind::Mission => (paths.missions(), "mission"),
+        PromptKind::Role => (paths.roles(), "role prompt"),
+    };
+    let mut body = text.trim_end().to_string();
+    body.push('\n');
+    std::fs::write(dir.join(format!("{name}.md")), body)?;
+    Ok(message(format!("{what} {name} saved")))
+}
+
+/// `setAgent` — change an existing crew member's `enabled` or `description`
+/// in crew.json, leaving every other field as written.
+fn action_set_agent(bus: &Bus, payload: &Value) -> Result<Value> {
+    let _operator = operator(bus)?;
+    let id = want_str(payload, "id")?;
+    let paths = crew::Paths::for_db(&bus.db_path);
+    let file = paths.crew();
+    let text = std::fs::read_to_string(&file)
+        .map_err(|_| BusError::invalid("no crew configured / set up a crew first"))?;
+    let mut raw: Value = serde_json::from_str(&text)
+        .map_err(|e| BusError::invalid(format!("crew.json does not parse: {e}")))?;
+    let agent = raw["agents"]
+        .get_mut(id)
+        .filter(|a| a.is_object())
+        .ok_or_else(|| BusError::not_found(format!("{id} is not in the crew")))?;
+    let mut changed = Vec::new();
+    if let Some(enabled) = payload.get("enabled").and_then(Value::as_bool) {
+        agent["enabled"] = json!(enabled);
+        changed.push(if enabled { "on" } else { "off" }.to_string());
+    }
+    if let Some(description) = payload.get("description").and_then(Value::as_str) {
+        if description.len() > 500 {
+            return Err(BusError::invalid("description is over 500 characters"));
+        }
+        agent["description"] = json!(description.trim());
+        changed.push("description updated".to_string());
+    }
+    if changed.is_empty() {
+        return Err(BusError::invalid(
+            "nothing to change / send enabled or description",
+        ));
+    }
+    let mut out = serde_json::to_string_pretty(&raw)?;
+    out.push('\n');
+    // Validate before replacing the file so a bad edit never lands.
+    let tmp = file.with_extension("json.tmp");
+    std::fs::write(&tmp, &out)?;
+    if let Err(e) = crate::config::load_config(&tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, &file)?;
+    Ok(message(format!("{id}: {}", changed.join(", "))))
 }

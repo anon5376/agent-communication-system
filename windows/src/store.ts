@@ -13,26 +13,63 @@ import {
   type AcsError,
 } from "./client";
 import {
+  parseOrchestration,
   parseProviders,
   parseSnapshot,
   parseTaskDetail,
   type Acknowledgement,
   type AgentRecord,
   type Id,
+  type Orchestration,
   type ProviderRecord,
   type Snapshot,
   type TaskDetail,
   type TaskRecord,
 } from "./model";
 
-export type Destination = "tasks" | "reviews" | "agents" | "messages";
+export type Mode = "communication" | "orchestration";
+export type Destination = "messages" | "tasks" | "reviews" | "goals" | "presets" | "agents";
 
-export const DESTINATIONS: { id: Destination; label: string; icon: string }[] = [
-  { id: "tasks", label: "Tasks", icon: "checklist" },
-  { id: "reviews", label: "Needs review", icon: "tray" },
-  { id: "agents", label: "Agents", icon: "people" },
-  { id: "messages", label: "Messages", icon: "chat" },
+export interface DestinationInfo {
+  id: Destination;
+  label: string;
+  icon: string;
+}
+
+/// Communication (ACS) is watching and answering the work; Orchestration
+/// (AOS) is deciding what the crew does and how it is set up.
+export const MODES: { id: Mode; label: string; code: string; blurb: string; destinations: DestinationInfo[] }[] = [
+  {
+    id: "communication",
+    label: "Communication",
+    code: "ACS",
+    blurb: "Watch messages, tasks and reviews",
+    destinations: [
+      { id: "messages", label: "Live feed", icon: "chat" },
+      { id: "tasks", label: "Tasks", icon: "checklist" },
+      { id: "reviews", label: "Needs review", icon: "tray" },
+    ],
+  },
+  {
+    id: "orchestration",
+    label: "Orchestration",
+    code: "AOS",
+    blurb: "Set goals, prompts and agents",
+    destinations: [
+      { id: "goals", label: "Goals", icon: "target" },
+      { id: "presets", label: "Prompt presets", icon: "sliders" },
+      { id: "agents", label: "Agents", icon: "people" },
+    ],
+  },
 ];
+
+export const DESTINATIONS: DestinationInfo[] = MODES.flatMap((m) => m.destinations);
+
+export function modeOf(dest: Destination): Mode {
+  return MODES.find((m) => m.destinations.some((d) => d.id === dest))?.id ?? "communication";
+}
+
+const MODE_KEY = "acs.mode";
 
 const DB_KEY = "acs.database";
 const PROJECT_KEY = "acs.project";
@@ -47,7 +84,13 @@ export class WorkspaceStore {
   snapshot = signal<Snapshot | null>(null);
   detail = signal<TaskDetail | null>(null);
   providers = signal<ProviderRecord[]>([]);
-  destination = signal<Destination>("tasks");
+  destination = signal<Destination>(
+    localStorage.getItem(MODE_KEY) === "orchestration" ? "goals" : "messages",
+  );
+  orchestration = signal<Orchestration | null>(null);
+  orchestrationError = signal<string | null>(null);
+  /// Preset the Presets screen should open on (set from elsewhere, e.g. Agents).
+  presetFocus = signal<{ kind: "mission" | "role"; name: string } | null>(null);
   selectedTask = signal<Id | null>(null);
   database = signal<string | null>(null);
   project = signal<string | null>(null);
@@ -64,6 +107,8 @@ export class WorkspaceStore {
 
   private generation = 0;
   private restored = false;
+
+  mode = computed<Mode>(() => modeOf(this.destination.value));
 
   canWrite = computed(() => this.snapshot.value?.canOperate === true && !this.busy.value);
   name = computed(() => {
@@ -155,7 +200,8 @@ export class WorkspaceStore {
       this.detailLoading.value = false;
       this.selectedTask.value = null;
       this.notice.value = null;
-      this.destination.value = "tasks";
+      this.orchestration.value = null;
+      this.destination.value = this.mode.value === "orchestration" ? "goals" : "messages";
       this.lastRefresh.value = new Date();
       localStorage.setItem(DB_KEY, db);
       if (folder) localStorage.setItem(PROJECT_KEY, folder);
@@ -180,6 +226,7 @@ export class WorkspaceStore {
       this.lastRefresh.value = new Date();
       this.error.value = null;
       await this.loadDetail();
+      if (this.mode.value === "orchestration") await this.loadOrchestration();
     } catch (raw) {
       if (gen === this.generation) this.error.value = errorText(raw);
     } finally {
@@ -236,6 +283,37 @@ export class WorkspaceStore {
       this.error.value = actionError;
       return false;
     }
+  }
+
+  async loadOrchestration(): Promise<void> {
+    const db = this.database.value;
+    if (!db) return;
+    const gen = this.generation;
+    try {
+      const raw = await acsRequest<unknown>(db, "orchestration");
+      if (gen !== this.generation) return;
+      this.orchestration.value = parseOrchestration(raw);
+      this.orchestrationError.value = null;
+    } catch (raw) {
+      if (gen === this.generation) this.orchestrationError.value = errorText(raw);
+    }
+  }
+
+  go(dest: Destination): void {
+    this.destination.value = dest;
+    localStorage.setItem(MODE_KEY, modeOf(dest));
+    if (modeOf(dest) === "orchestration") void this.loadOrchestration();
+  }
+
+  switchMode(mode: Mode): void {
+    if (this.mode.value === mode) return;
+    this.go(mode === "orchestration" ? "goals" : "messages");
+  }
+
+  /** Open a task in Communication (e.g. from a goal). */
+  openTask(id: Id): void {
+    this.go("tasks");
+    this.selectTask(id);
   }
 
   async detect(): Promise<void> {

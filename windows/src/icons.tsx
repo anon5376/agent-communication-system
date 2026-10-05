@@ -20,6 +20,22 @@ const PATHS: Record<string, JSX.Element> = {
       />
     </g>
   ),
+  target: (
+    <g>
+      <circle cx="12" cy="12" r="8.5" />
+      <circle cx="12" cy="12" r="4.5" />
+      <circle cx="12" cy="12" r="0.9" fill="currentColor" />
+    </g>
+  ),
+  sliders: (
+    <g>
+      <path d="M4 7h9M17 7h3M4 17h3M11 17h9" />
+      <circle cx="15" cy="7" r="2" />
+      <circle cx="9" cy="17" r="2" />
+    </g>
+  ),
+  bolt: <path d="M13 3 5 13.5h6L10 21l8-10.5h-6L13 3Z" />,
+  pencil: <path d="M4 20h4L19 9l-4-4L4 16v4ZM13.5 6.5l4 4" />,
   checklist: (
     <g>
       <path d="M5 6.5 6.5 8 9.5 4.5" />

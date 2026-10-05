@@ -6,6 +6,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Icon } from "../icons";
 import { relativeTime, type AgentRecord } from "../model";
 import { store } from "../store";
+import { CrewPanel } from "./Orchestration";
 
 export function AgentsView() {
   const [starting, setStarting] = useState<AgentRecord | null>(null);
@@ -21,8 +22,9 @@ export function AgentsView() {
       <div class="view-pad">
         <div class="row-between">
           <div>
+            <div class="hero-kicker">Orchestration / AOS</div>
             <h1 class="view-title">Your agents</h1>
-            <p class="view-sub">Independent tools. Shared tasks and history.</p>
+            <p class="view-sub">Who is in the crew, what each one is told, and whether it is running.</p>
           </div>
           <span style={{ flex: 1 }} />
           <button class="btn" onClick={() => void store.detect()} disabled={store.busy.value}>
@@ -30,6 +32,9 @@ export function AgentsView() {
           </button>
         </div>
 
+        <CrewPanel />
+
+        <h2 class="sec-title" style={{ marginTop: 26 }}>On the bus</h2>
         {agents.length === 0 ? (
           <div style={{ padding: "20px 0", display: "flex", flexDirection: "column", gap: 14 }}>
             <h2 style={{ fontSize: 21, fontWeight: 600, margin: 0 }}>Start with the tools you already use.</h2>

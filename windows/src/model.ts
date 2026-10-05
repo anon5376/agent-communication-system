@@ -526,3 +526,115 @@ export function parseSubjectTag(
   const label = known?.label ?? kind.charAt(0) + kind.slice(1).toLowerCase();
   return { label, tone: known?.tone ?? "muted", taskId, round: round ? Number(round) : null, rest };
 }
+
+// ---------------------------------------------------------------------------
+// Orchestration (aos): missions, role prompts, crew and goals.
+// ---------------------------------------------------------------------------
+
+export interface MissionRecord {
+  name: string;
+  summary: string;
+  brief: string;
+  acceptance: string;
+  text: string;
+  custom: boolean;
+}
+
+export interface RolePrompt {
+  name: string;
+  text: string;
+  custom: boolean;
+}
+
+export interface CrewMember {
+  id: string;
+  role: string;
+  authority: string;
+  cli: string;
+  description: string;
+  enabled: boolean;
+  instructions: string | null;
+  running: boolean;
+}
+
+export interface GoalRecord {
+  id: Id;
+  title: string;
+  state: string;
+  assignee: string | null;
+  reviewer: string | null;
+  updatedMs: Id;
+}
+
+export interface Orchestration {
+  simulated: boolean;
+  configured: boolean;
+  crewError: string | null;
+  crewDir: string;
+  workdir: string | null;
+  goalOwner: string | null;
+  missions: MissionRecord[];
+  roles: RolePrompt[];
+  crew: CrewMember[];
+  goals: GoalRecord[];
+}
+
+function asObj(value: unknown): Record<string, unknown> {
+  return (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+}
+
+export function parseOrchestration(value: unknown): Orchestration {
+  const obj = asObj(value);
+  const list = (v: unknown) => (Array.isArray(v) ? v.map(asObj) : []);
+  return {
+    simulated: asBool(obj.simulated),
+    configured: asBool(obj.configured),
+    crewError: asOptString(obj.crewError),
+    crewDir: asString(obj.crewDir),
+    workdir: asOptString(obj.workdir),
+    goalOwner: asOptString(obj.goalOwner),
+    missions: list(obj.missions).map((m) => ({
+      name: asString(m.name),
+      summary: asString(m.summary),
+      brief: asString(m.brief),
+      acceptance: asString(m.acceptance),
+      text: asString(m.text),
+      custom: asBool(m.custom),
+    })),
+    roles: list(obj.roles).map((r) => ({
+      name: asString(r.name),
+      text: asString(r.text),
+      custom: asBool(r.custom),
+    })),
+    crew: list(obj.crew).map((c) => ({
+      id: asString(c.id),
+      role: asString(c.role),
+      authority: asString(c.authority),
+      cli: asString(c.cli),
+      description: asString(c.description),
+      enabled: asBool(c.enabled),
+      instructions: asOptString(c.instructions),
+      running: asBool(c.running),
+    })),
+    goals: list(obj.goals).map((g) => ({
+      id: asId(g.id),
+      title: asString(g.title),
+      state: asString(g.state),
+      assignee: asOptString(g.assignee),
+      reviewer: asOptString(g.reviewer),
+      updatedMs: asId(g.updatedMs),
+    })),
+  };
+}
+
+/** Mirror of crew::expand: the title, brief and acceptance a goal becomes. */
+export function expandMission(m: MissionRecord, goal: string): { title: string; brief: string; acceptance: string } {
+  let title = m.name === "run" ? goal : `${m.name} ${goal}`;
+  const chars = [...title];
+  if (chars.length > 120) title = `${chars.slice(0, 117).join("")}...`;
+  return {
+    title,
+    brief: m.brief.split("{goal}").join(goal),
+    acceptance: m.acceptance.split("{goal}").join(goal),
+  };
+}

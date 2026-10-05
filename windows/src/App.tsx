@@ -3,12 +3,14 @@
 
 import { useEffect, useRef, useState } from "preact/hooks";
 import { Icon, PixelMark } from "./icons";
-import { DESTINATIONS, store, type Destination } from "./store";
+import { MODES, store, type DestinationInfo } from "./store";
 import { Welcome } from "./views/Welcome";
 import { TaskBrowser } from "./views/Tasks";
 import { AgentsView } from "./views/Agents";
 import { MessagesView } from "./views/Messages";
 import { NewTaskSheet } from "./views/Sheets";
+import { GoalsView, PresetsView } from "./views/Orchestration";
+import { taskGroup } from "./model";
 
 export function App() {
   const snap = store.snapshot.value;
@@ -24,6 +26,9 @@ export function App() {
       } else if (key === "o") {
         e.preventDefault();
         void store.chooseProject();
+      } else if (key === "1" || key === "2") {
+        e.preventDefault();
+        store.switchMode(key === "1" ? "communication" : "orchestration");
       } else if (key === "r") {
         e.preventDefault();
         void store.refresh();
@@ -42,7 +47,8 @@ export function App() {
       )}
       <div class="app-shell">
       <Sidebar />
-      <div class="main">
+      <div class={`main mode-${store.mode.value}`}>
+        <ModeBar />
         <div class="main-body">
           {snap?.simulated === true && (
             <Banner tone="accent" icon="sparkles" text="Sample workspace · simulated agents, no model calls or charges" />
@@ -64,8 +70,15 @@ export function App() {
                 <TaskBrowser reviewOnly={dest === "reviews"} />
               ) : dest === "agents" ? (
                 <AgentsView />
+              ) : dest === "goals" ? (
+                <GoalsView />
+              ) : dest === "presets" ? (
+                <PresetsView />
               ) : (
-                <MessagesView />
+                <>
+                  <Pulse />
+                  <MessagesView />
+                </>
               )}
             </>
           )}
@@ -103,11 +116,12 @@ function Sidebar() {
     return () => window.removeEventListener("mousedown", onDown);
   }, [menuOpen]);
 
-  const destButton = (d: { id: Destination; label: string; icon: string }) => (
+  const mode = MODES.find((m) => m.id === store.mode.value) ?? MODES[0]!;
+  const destButton = (d: DestinationInfo) => (
     <button
       key={d.id}
       class={`nav-item ${store.destination.value === d.id ? "active" : ""}`}
-      onClick={() => (store.destination.value = d.id)}
+      onClick={() => store.go(d.id)}
       aria-current={store.destination.value === d.id ? "page" : undefined}
     >
       <Icon name={d.icon} size={17} hidden />
@@ -127,7 +141,10 @@ function Sidebar() {
           <div class="brand-sub">Agent workspace</div>
         </div>
       </div>
-      <nav aria-label="Workspace">{DESTINATIONS.map(destButton)}</nav>
+      <nav aria-label={mode.label}>
+        <div class="nav-caption">{mode.blurb}</div>
+        {mode.destinations.map(destButton)}
+      </nav>
       <div class="sidebar-footer">
         <div class="ws-name">
           <Icon name={snap?.simulated === true ? "sparkles" : "folder"} size={15} hidden />
@@ -199,6 +216,57 @@ export function EmptyState(props: { icon: string; title: string; message: string
       <Icon name={props.icon} size={38} hidden />
       <h3>{props.title}</h3>
       <p>{props.message}</p>
+    </div>
+  );
+}
+
+/// The Chat/Cowork-style switch: two modes over the same workspace.
+function ModeBar() {
+  const current = store.mode.value;
+  return (
+    <div class="modebar">
+      <div class="mode-switch" role="tablist" aria-label="Mode">
+        {MODES.map((m, i) => (
+          <button
+            key={m.id}
+            role="tab"
+            aria-selected={current === m.id}
+            class={`mode-btn ${m.id} ${current === m.id ? "on" : ""}`}
+            onClick={() => store.switchMode(m.id)}
+            title={`${m.blurb} (Ctrl+${i + 1})`}
+          >
+            <span class="mode-code">{m.code}</span>
+            <span class="mode-label">{m.label}</span>
+          </button>
+        ))}
+      </div>
+      <span class="modebar-ws">{store.name.value}</span>
+    </div>
+  );
+}
+
+/// Communication dashboard header: what needs you and what is moving.
+function Pulse() {
+  const tasks = store.tasks.value;
+  const count = (g: string) => tasks.filter((t) => taskGroup(t.state) === g).length;
+  const agents = store.agents.value;
+  const live = agents.filter((a) => a.running && !a.paused).length;
+  const tiles: { label: string; value: string; hint: string; tone: string; go?: () => void }[] = [
+    { label: "Needs you", value: String(count("review")), hint: "submitted, waiting for review", tone: count("review") ? "hot" : "", go: () => store.go("reviews") },
+    { label: "Stuck", value: String(count("stuck")), hint: "blocked or failed", tone: count("stuck") ? "bad" : "", go: () => store.go("tasks") },
+    { label: "Moving", value: String(count("active")), hint: "claimed by an agent", tone: "", go: () => store.go("tasks") },
+    { label: "Queued", value: String(count("queued")), hint: "waiting for a free agent", tone: "", go: () => store.go("tasks") },
+    { label: "Agents", value: `${live}/${agents.length}`, hint: "running now", tone: "", go: () => store.go("agents") },
+  ];
+  return (
+    <div class="pulse" role="list" aria-label="Workspace at a glance">
+      {tiles.map((t) => (
+        <button key={t.label} role="listitem" class={`pulse-tile ${t.tone}`} onClick={t.go}>
+          <span class="pt-label">{t.label}</span>
+          <span class="pt-value">{t.value}</span>
+          <span class="pt-hint">{t.hint}</span>
+        </button>
+      ))}
     </div>
   );
 }

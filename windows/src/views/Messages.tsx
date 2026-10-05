@@ -77,7 +77,7 @@ export function MessageRow(props: { message: MessageRecord }) {
             <button
               class="link-btn m-task"
               onClick={() => {
-                store.destination.value = "tasks";
+                store.go("tasks");
                 store.selectTask(task.id);
               }}
             >

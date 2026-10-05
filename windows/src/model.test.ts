@@ -142,3 +142,20 @@ describe("task grouping and message tags", () => {
     expect(relativeTime(0, 3 * 3_600_000)).toBe("3 h ago");
   });
 });
+
+describe("orchestration", () => {
+  it("expands a mission like crew::expand", async () => {
+    const { expandMission, parseOrchestration } = await import("./model");
+    const orch = parseOrchestration({
+      simulated: false,
+      configured: false,
+      missions: [{ name: "fix", summary: "s", brief: "Fix {goal} now", acceptance: "- {goal} works", text: "", custom: false }],
+      goals: [{ id: 7, title: "t", state: "open", updatedMs: 1 }],
+    });
+    const plan = expandMission(orch.missions[0]!, "login");
+    expect(plan).toEqual({ title: "fix login", brief: "Fix login now", acceptance: "- login works" });
+    const long = expandMission({ ...orch.missions[0]!, name: "run" }, "x".repeat(130));
+    expect([...long.title].length).toBe(120);
+    expect(orch.roles).toEqual([]);
+  });
+});
