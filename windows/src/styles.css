@@ -1373,7 +1373,7 @@ body { font-family: var(--f-body); background: var(--bg); color: var(--text); }
   background-size: 6px 6px;
 }
 .task-pane { background-color: var(--bg); }
-.pixel-mark { fill: currentColor; flex: none; }
+.brand-mark { flex: none; }
 .sidebar-brand { gap: 10px; align-items: center; }
 .sidebar-brand .brand-title { font-family: var(--f-display); font-weight: 800; font-size: 20px; letter-spacing: -0.01em; }
 .brand-sub { color: var(--text-tertiary); margin-top: 2px; }

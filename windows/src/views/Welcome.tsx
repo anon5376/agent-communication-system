@@ -1,4 +1,4 @@
-import { PixelMark } from "../icons";
+import { Mark } from "../icons";
 import { store } from "../store";
 
 export function Welcome() {
@@ -6,7 +6,7 @@ export function Welcome() {
     <div class="welcome">
       <div class="welcome-inner">
         <div class="mark">
-          <PixelMark size={44} />
+          <Mark size={44} />
         </div>
         <div>
           <h1>{"Different agents.\nOne place to work."}</h1>

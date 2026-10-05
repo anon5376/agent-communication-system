@@ -197,16 +197,15 @@ export function Icon(props: {
   );
 }
 
-// Pixel "A" mark: a 5x5 grid of square cells, drawn crisp at any size.
-const PIXEL_MARK = ["01110", "10001", "11111", "10001", "10001"];
-
-export function PixelMark(props: { size?: number }) {
+// Orbit mark: three agents on one ring.
+export function Mark(props: { size?: number }) {
   const size = props.size ?? 20;
   return (
-    <svg class="pixel-mark" width={size} height={size} viewBox="0 0 5 5" aria-hidden="true" shape-rendering="crispEdges">
-      {PIXEL_MARK.flatMap((row, y) =>
-        [...row].map((bit, x) => (bit === "1" ? <rect key={`${x}-${y}`} x={x} y={y} width="0.86" height="0.86" /> : null)),
-      )}
+    <svg class="brand-mark" width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2.2" />
+      <circle cx="12" cy="4" r="2.6" fill="currentColor" />
+      <circle cx="18.93" cy="16" r="2.6" fill="currentColor" />
+      <circle cx="5.07" cy="16" r="2.6" fill="currentColor" />
     </svg>
   );
 }

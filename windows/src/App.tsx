@@ -2,7 +2,7 @@
 // Keyboard accelerators mirror the macOS menu commands (Ctrl+N, Ctrl+O, Ctrl+R).
 
 import { useEffect, useRef, useState } from "preact/hooks";
-import { Icon, PixelMark } from "./icons";
+import { Icon, Mark } from "./icons";
 import { MODES, store, type DestinationInfo } from "./store";
 import { Welcome } from "./views/Welcome";
 import { TaskBrowser } from "./views/Tasks";
@@ -135,7 +135,7 @@ function Sidebar() {
   return (
     <aside class="sidebar">
       <div class="sidebar-brand">
-        <PixelMark size={22} />
+        <Mark size={22} />
         <div>
           <div class="brand-title">ACS</div>
           <div class="brand-sub">Agent workspace</div>
