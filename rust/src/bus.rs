@@ -1520,6 +1520,21 @@ impl Bus {
         self.to_tasks(&sql, &refs)
     }
 
+    /// The `limit` newest tasks by id (highest first), plus whether older tasks
+    /// remain — the desktop snapshot wants newest-first and an honest
+    /// truncation flag, which list_tasks's oldest-first LIMIT cannot give.
+    pub fn recent_tasks(&self, limit: i64) -> Result<(Vec<Task>, bool)> {
+        let limit = limit.clamp(1, 1000);
+        let fetch = limit + 1;
+        let mut tasks = self.to_tasks(
+            "SELECT * FROM tasks ORDER BY id DESC LIMIT ?",
+            &[&fetch as &dyn rusqlite::ToSql],
+        )?;
+        let truncated = tasks.len() > limit as usize;
+        tasks.truncate(limit as usize);
+        Ok((tasks, truncated))
+    }
+
     /// Claimed tasks with no claim/note activity for `stall_ms` — a probably-dead claim.
     /// `updated_ms` moves on claim and on every note, so it is the last-activity clock.
     /// Whether open work is waiting that `agent_id` may claim: assigned to it, or
