@@ -48,19 +48,7 @@ enum Destination: String, CaseIterable, Identifiable {
 }
 
 extension TaskRecord {
-    var stateTitle: String {
-        switch state {
-        case "open": return "Queued"
-        case "claimed": return "Claimed"
-        case "submitted": return "Needs review"
-        case "changes_requested": return "Changes requested"
-        case "blocked": return "Blocked"
-        case "accepted": return "Accepted"
-        case "cancelled": return "Cancelled"
-        case "failed": return "Failed"
-        default: return state.replacingOccurrences(of: "_", with: " ").capitalized
-        }
-    }
+    var stateTitle: String { taskStateTitle(state) }
     var stateSymbol: String {
         switch state {
         case "claimed": return "circle.dotted"
@@ -100,4 +88,29 @@ extension TaskRecord {
 func timestamp(_ milliseconds: Int64) -> String {
     Date(timeIntervalSince1970: Double(milliseconds) / 1000)
         .formatted(date: .abbreviated, time: .shortened)
+}
+
+func toneColor(_ tone: SubjectTone) -> Color {
+    switch tone {
+    case .ok: return .green
+    case .warn: return .orange
+    case .bad: return .red
+    case .accent: return .indigo
+    case .muted: return .secondary
+    }
+}
+
+/// 8pt state dot: filled in the state's tone, hollow ring when muted.
+struct StateDot: View {
+    let color: Color
+    var body: some View {
+        Group {
+            if color == .secondary {
+                Circle().strokeBorder(Color.secondary.opacity(0.8), lineWidth: 1.5)
+            } else {
+                Circle().fill(color)
+            }
+        }
+        .frame(width: 8, height: 8)
+    }
 }

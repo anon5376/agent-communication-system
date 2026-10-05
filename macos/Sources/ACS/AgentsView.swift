@@ -28,30 +28,61 @@ struct AgentsView: View {
                             .buttonStyle(.borderedProminent).disabled(!store.canWrite || store.snapshot?.simulated == true)
                     }.padding(.vertical, 20)
                 } else {
+                    let simulated = store.snapshot?.simulated == true
                     VStack(spacing: 0) {
                         ForEach(store.agents) { agent in
-                            HStack(spacing: 16) {
-                                Image(systemName: "person.crop.square").font(.title2).foregroundStyle(.secondary).frame(width: 34)
+                            HStack(spacing: 14) {
+                                Text(agent.harness.prefix(1).uppercased())
+                                    .font(.callout.weight(.semibold)).foregroundStyle(.indigo)
+                                    .frame(width: 34, height: 34)
+                                    .background(.indigo.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
                                 VStack(alignment: .leading, spacing: 5) {
                                     Text(agent.id).font(.headline)
                                     Text("\(agent.role) · \(agent.harness) · \(agent.model)").font(.caption).foregroundStyle(.secondary)
-                                    Text(agent.paused ? "Paused — no new turns" : agent.running ? "Supervisor running · bus status: \(agent.status)" : "Supervisor not running · bus status: \(agent.status)")
-                                        .font(.caption).foregroundStyle(.secondary)
                                 }
                                 Spacer(minLength: 12)
-                                if agent.running {
-                                    Button(agent.paused ? "Resume" : "Pause") {
-                                        Task { await store.mutate(agent.paused ? "resume" : "pause", ["id": .string(agent.id)]) }
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(spacing: 6) {
+                                        Group {
+                                            if agent.paused {
+                                                Circle().fill(.orange)
+                                            } else if agent.running {
+                                                Circle().fill(.green)
+                                            } else {
+                                                Circle().strokeBorder(Color.secondary.opacity(0.8), lineWidth: 1.5)
+                                            }
+                                        }
+                                        .frame(width: 8, height: 8)
+                                        Text(agent.paused ? "Paused" : agent.running ? "Running" : "Not running")
+                                            .font(.callout.weight(.semibold))
                                     }
-                                    Button("Stop…", role: .destructive) { stopping = agent }
-                                } else {
-                                    Button("Start…") { starting = agent }.disabled(store.snapshot?.simulated == true)
+                                    Text(agent.lastSeenMs.map { "Seen \(relativeTime($0))" } ?? "Not seen on the bus yet")
+                                        .font(.caption).foregroundStyle(.secondary)
                                 }
-                            }.padding(.vertical, 18).disabled(!store.canWrite)
+                                .frame(width: 190, alignment: .leading)
+                                VStack(alignment: .trailing, spacing: 4) {
+                                    if agent.running {
+                                        HStack {
+                                            Button(agent.paused ? "Resume" : "Pause") {
+                                                Task { await store.mutate(agent.paused ? "resume" : "pause", ["id": .string(agent.id)]) }
+                                            }
+                                            Button("Stop…", role: .destructive) { stopping = agent }
+                                        }
+                                    } else {
+                                        Button("Start…") { starting = agent }
+                                            .disabled(!store.canWrite || simulated)
+                                        if simulated {
+                                            Text("Sample agents can’t start")
+                                                .font(.caption).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
+                                .frame(width: 170, alignment: .trailing)
+                            }.padding(.vertical, 16)
                             Divider()
                         }
                     }
-                    Text("“Supervisor running” means ACS is managing that process, not that the provider is authenticated or actively making progress. Bus presence can also come from a CLI started elsewhere.")
+                    Text("“Running” means ACS is managing that agent’s process. It doesn’t prove the provider is signed in or making progress. “Seen” is the agent’s last activity on the bus, which can also come from a CLI started elsewhere.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if !store.providers.isEmpty {
