@@ -383,6 +383,9 @@ pub fn fit(l: &VLine, w: usize) -> VLine {
 // ------------------------------------------------------------------ frame chrome
 
 fn scope(f: &Frame) -> String {
+    if f.crew.simulated {
+        return "SIMULATED demo".into();
+    }
     let path = std::path::Path::new(&f.db_path);
     let dir = path
         .parent()
@@ -681,20 +684,50 @@ fn readouts(f: &Frame) -> Vec<VLine> {
                 checks.1
             ),
         ),
-        lvs(
-            "stuck",
-            if f.stalled() == 0 {
-                format!("none past {}", span(f.stall_ms))
-            } else {
-                format!(
-                    "{} {} idle past {}",
-                    f.stalled(),
-                    if f.stalled() == 1 { "claim" } else { "claims" },
-                    span(f.stall_ms)
-                )
-            },
-        ),
+        needs_line(f),
     ]
+}
+
+/// What needs the operator, most urgent first: reviews, failures, blockers,
+/// stalled claims. Then the work in progress and the queue.
+fn needs_line(f: &Frame) -> VLine {
+    let parts: Vec<String> = [
+        (GateKind::Review, "to review"),
+        (GateKind::Failed, "failed"),
+        (GateKind::Blocker, "blocked"),
+        (GateKind::Stalled, "stalled"),
+    ]
+    .iter()
+    .filter_map(|(k, word)| {
+        let n = f.count(*k);
+        (n > 0).then(|| format!("{n} {word}"))
+    })
+    .collect();
+    let rest = format!(
+        "{} working, {} queued",
+        f.tree
+            .iter()
+            .filter(|n| n.task.state == "claimed" && !n.stalled)
+            .count(),
+        f.queued()
+    );
+    if parts.is_empty() {
+        lv(
+            "needs you",
+            vec![
+                seg("nothing", Role::Ok),
+                seg(format!(" / {rest}"), Role::Plain),
+            ],
+        )
+    } else {
+        lv(
+            "needs you",
+            vec![
+                seg(parts.join(", "), Role::Gate),
+                seg(format!(" / {rest}"), Role::Plain),
+            ],
+        )
+    }
 }
 
 pub fn tokens_text(n: f64) -> String {
@@ -815,6 +848,7 @@ fn options_line(f: &Frame, i: usize) -> VLine {
     let opts = match g.kind {
         GateKind::Review => "[1] ACCEPT   [2] REVISE   [3] HOLD",
         GateKind::Stalled => "[1] REQUEUE   [2] HOLD   [3] CANCEL",
+        GateKind::Failed | GateKind::Blocker => "[1] TYPE THE FIX   [3] HOLD",
     };
     let more = if f.gates.len() > 1 {
         format!("   {} of {}", i + 1, f.gates.len())
@@ -910,17 +944,11 @@ fn gate_strip(f: &Frame, ui: &Ui) -> Vec<VLine> {
         }
         GateKind::Stalled => {
             let idle = f.now - t.updated_ms;
-            let seen = f
-                .agents
-                .iter()
-                .find(|a| Some(&a.id) == t.assignee.as_ref())
-                .map(|a| age(a.last_seen_ms, f.now))
-                .unwrap_or_else(|| "never".into());
             let impact = if g.dependents.is_empty() {
-                "nothing waits on it".to_string()
+                String::new()
             } else {
                 format!(
-                    "dependents: {}",
+                    " / blocks {}",
                     g.dependents
                         .iter()
                         .map(|d| format!("#{d}"))
@@ -942,17 +970,38 @@ fn gate_strip(f: &Frame, ui: &Ui) -> Vec<VLine> {
                     ]),
                     selected,
                 ),
-                lvs(
-                    "cause",
-                    format!(
-                        "no claim or note activity for {} / {} seen {}",
-                        span(idle),
-                        who,
-                        seen
-                    ),
+                lvs("why", format!("{}{impact}", g.reason)),
+                lvs("evidence", g.evidence.clone()),
+                lvs("next", format!("{} / 1 back to the pool, 3 CANCEL", g.next)),
+                options_line(f, i),
+            ]
+        }
+        GateKind::Failed | GateKind::Blocker => {
+            let st = if g.kind == GateKind::Failed {
+                St::Failed
+            } else {
+                St::Blocked
+            };
+            vec![
+                sel_if(
+                    line(vec![
+                        st_seg(st, 12),
+                        seg(
+                            trunc(&format!("#{} {} / {}", t.id, t.title, who), w - 12),
+                            Role::Bold,
+                        ),
+                    ]),
+                    selected,
                 ),
-                lvs("impact", impact),
-                lvs("reversible", "1 yes: back to the pool / 3 no: type CANCEL"),
+                lvs("why", g.reason.clone()),
+                lvs("evidence", g.evidence.clone()),
+                lv(
+                    "next",
+                    vec![
+                        seg(g.next.clone(), Role::Bold),
+                        seg(" / 1 types it", Role::Dim),
+                    ],
+                ),
                 options_line(f, i),
             ]
         }
@@ -1075,22 +1124,28 @@ fn narrow(f: &Frame, ui: &Ui) -> Vec<VLine> {
         let (st, title) = match g.kind {
             GateKind::Review => (St::Gate, "review"),
             GateKind::Stalled => (St::Blocked, "stalled"),
+            GateKind::Failed => (St::Failed, "failed"),
+            GateKind::Blocker => (St::Blocked, "blocked"),
         };
         body.push(line(vec![
             st_seg(st, 12),
             seg(trunc(&format!("#{} {}", t.id, t.title), w - 12), Role::Bold),
         ]));
-        body.push(lvs(
-            "next",
-            format!("{title} gate / choose 1, 2 or 3 below"),
-        ));
+        body.push(lvs("next", format!("{title} gate / choose below")));
         body.push(rule(w));
         body.push(lvs(
             "assignee",
             t.assignee.clone().unwrap_or_else(|| "nobody".into()),
         ));
-        body.push(lvs("reviewer", reviewer_of(t)));
-        body.push(lvs("round", t.round.to_string()));
+        if g.kind == GateKind::Review {
+            body.push(lvs("reviewer", reviewer_of(t)));
+            body.push(lvs("round", t.round.to_string()));
+        } else {
+            for (k, l) in wrap(&g.reason, w - 12, 2).into_iter().enumerate() {
+                body.push(lvs(if k == 0 { "why" } else { "" }, l));
+            }
+            body.push(lvs("next", g.next.clone()));
+        }
         if let Some(r) = &t.result {
             for (k, l) in wrap(&r.summary, w - 12, if ui.more { 4 } else { 2 })
                 .into_iter()
@@ -1134,6 +1189,17 @@ fn narrow(f: &Frame, ui: &Ui) -> Vec<VLine> {
                     seg(pad("[3] CANCEL", 18), Role::Plain),
                     seg("irreversible / type CANCEL", Role::Gate),
                 ]));
+            }
+            GateKind::Failed | GateKind::Blocker => {
+                body.push(line(vec![
+                    seg(pad("[1] TYPE THE FIX", 18), Role::Plain),
+                    seg("opens command home with it typed", Role::Dim),
+                ]));
+                body.push(line(vec![
+                    seg(pad("[3] HOLD", 18), Role::Plain),
+                    seg("nothing written / next gate", Role::Dim),
+                ]));
+                body.push(blank());
             }
         }
         if let Some(p) = &ui.pending {
@@ -1422,16 +1488,24 @@ pub fn gate(f: &Frame, ui: &Ui) -> Vec<VLine> {
     };
     let g = &f.gates[i];
     let t = &g.task;
-    let st = if g.kind == GateKind::Review {
-        St::Gate
-    } else {
-        St::Blocked
+    let st = match g.kind {
+        GateKind::Review => St::Gate,
+        GateKind::Failed => St::Failed,
+        GateKind::Blocker | GateKind::Stalled => St::Blocked,
     };
     body.push(line(vec![
         st_seg(st, 12),
         seg(trunc(&format!("#{} {}", t.id, t.title), w - 12), Role::Bold),
     ]));
-    body.push(lvs("next", "choose 1, 2 or 3 / esc returns"));
+    if g.kind == GateKind::Review {
+        body.push(lvs("next", "choose 1, 2 or 3 / esc returns"));
+    } else {
+        body.push(lvs("why", trunc(&g.reason, w - 12)));
+        for (k, l) in wrap(&g.evidence, w - 12, 2).into_iter().enumerate() {
+            body.push(lvs(if k == 0 { "evidence" } else { "" }, l));
+        }
+        body.push(lv("next", vec![seg(trunc(&g.next, w - 12), Role::Bold)]));
+    }
     body.push(rule(w));
     body.push(lvs(
         "assignee",
@@ -1512,7 +1586,7 @@ pub fn gate(f: &Frame, ui: &Ui) -> Vec<VLine> {
                 ],
             ));
         }
-    } else {
+    } else if g.kind != GateKind::Failed {
         body.push(lvs(
             "idle",
             format!(
@@ -1560,6 +1634,20 @@ pub fn gate(f: &Frame, ui: &Ui) -> Vec<VLine> {
                 seg(pad("[3] CANCEL", 21), Role::Plain),
                 seg("irreversible / type CANCEL", Role::Gate),
             ]));
+        }
+        GateKind::Failed | GateKind::Blocker => {
+            body.push(line(vec![
+                seg(pad("[1] TYPE THE FIX", 21), Role::Plain),
+                seg(
+                    "opens command home with the next line typed; enter runs it",
+                    Role::Dim,
+                ),
+            ]));
+            body.push(line(vec![
+                seg(pad("[3] HOLD", 21), Role::Plain),
+                seg("nothing written / moves to the next gate", Role::Dim),
+            ]));
+            body.push(blank());
         }
     }
     body.push(match &ui.pending {
@@ -1822,20 +1910,33 @@ fn proc_seg(m: &super::crew::MemberInfo) -> (String, Role) {
     }
 }
 
-/// One line per CLI found, plus the crew-ready ones that are missing.
+/// One line per CLI found, plus the crew-ready ones that are missing. A
+/// crew-ready CLI reads as installed, then signed in, then ready.
 fn found_lines(found: &[super::crew::Found], w: usize) -> Vec<VLine> {
+    use super::crew::SignIn;
     let mut v = Vec::new();
     for f in found {
-        let (mark, role, what) = match (&f.path, f.cli.crew_ready) {
-            (Some(_), true) => (
+        let version = f.version.clone().unwrap_or_else(|| "installed".into());
+        let (mark, role, what) = match (&f.path, f.cli.crew_ready, &f.sign_in) {
+            (Some(_), true, SignIn::Found(why)) => (
                 "+",
                 Role::Ok,
+                format!("ready / {version} / signed in: {why}"),
+            ),
+            (Some(_), true, SignIn::Unknown(why)) => (
+                "?",
+                Role::Plain,
                 format!(
-                    "{} / can join your crew",
-                    f.version.clone().unwrap_or_else(|| f.cli.name.into())
+                    "installed, sign-in not checked ({why}) / if turns fail: {}",
+                    f.cli.sign_in
                 ),
             ),
-            (Some(_), false) => (
+            (Some(_), true, SignIn::Missing) => (
+                "x",
+                Role::Err,
+                format!("installed, not signed in / {}", f.cli.sign_in),
+            ),
+            (Some(_), false, _) => (
                 "~",
                 Role::Dim,
                 format!(
@@ -1843,8 +1944,8 @@ fn found_lines(found: &[super::crew::Found], w: usize) -> Vec<VLine> {
                     f.cli.name, f.cli.id
                 ),
             ),
-            (None, true) => ("-", Role::Dim, format!("not installed / {}", f.cli.install)),
-            (None, false) => continue,
+            (None, true, _) => ("-", Role::Dim, format!("not installed / {}", f.cli.install)),
+            (None, false, _) => continue,
         };
         v.push(line(vec![
             seg(format!("  {mark} "), role),
@@ -1971,7 +2072,7 @@ pub fn welcome(f: &Frame, ui: &Ui) -> Vec<VLine> {
         ]),
     ];
     for l in wrap(
-        "You type a goal. A lead agent plans it, a builder does the work, a reviewer checks it, and the result comes back to you to accept or send back. Nothing is accepted without you.",
+        "You type a task. A builder agent does it here and hands in the result with the checks it ran; a reviewer on another model checks it and accepts it or sends it back. With one model family, you are the reviewer.",
         w,
         3,
     ) {
@@ -1986,14 +2087,21 @@ pub fn welcome(f: &Frame, ui: &Ui) -> Vec<VLine> {
     body.push(rule(w));
     let members = super::crew::plan(&c.found);
     if members.is_empty() {
+        let signed_out = c.found.iter().any(|x| {
+            x.path.is_some() && x.cli.crew_ready && x.sign_in == super::crew::SignIn::Missing
+        });
         body.push(line(vec![
             seg("no crew yet", Role::Bold),
             seg(
-                " / install one CLI marked - above, sign in to it, then press r",
+                if signed_out {
+                    " / sign in to a CLI marked x above, then press r"
+                } else {
+                    " / install one CLI marked - above, sign in to it, then press r"
+                },
                 Role::Plain,
             ),
         ]));
-        body.push(dim("or try a sample team first: q, then aos demo"));
+        body.push(dim("or try a simulated team first: q, then aos demo"));
     } else {
         body.push(dim("your crew"));
         for m in &members {
@@ -2003,13 +2111,18 @@ pub fn welcome(f: &Frame, ui: &Ui) -> Vec<VLine> {
                 seg(trunc(m.description, w.saturating_sub(21)), Role::Dim),
             ]));
         }
-        if members
-            .iter()
-            .all(|m| m.cli.family == members[0].cli.family)
-        {
-            for l in wrap("one CLI, so the reviewer uses the same model family. Install a second CLI for independent reviews.", w, 2) {
-                body.push(dim(l));
-            }
+        if !members.iter().any(|m| m.id == "reviewer") {
+            body.push(line(vec![
+                seg(pad("  reviewer", 12), Role::Bold),
+                seg(pad("you", 9), Role::Plain),
+                seg(
+                    trunc(
+                        "one model family installed, so each result comes to you",
+                        w.saturating_sub(21),
+                    ),
+                    Role::Dim,
+                ),
+            ]));
         }
         for l in wrap("Agents work in the folder you start aos in, and can run commands and edit files there.", w, 2) {
             body.push(line(vec![seg(l, Role::Gate)]));

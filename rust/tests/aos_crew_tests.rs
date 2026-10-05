@@ -1,7 +1,7 @@
 //! The aos crew: first run, goals typed as sentences, missions, and the trust
 //! check before agents start. No agent CLI is run here.
 
-use acs::aos::crew::{self, Found, Paths, CLIS};
+use acs::aos::crew::{self, Found, Paths, SignIn, CLIS};
 use acs::aos::view::{PendingKind, Route};
 use acs::aos::{demo, ensure_operator, App, Key, DEFAULT_STALL_MIN};
 use acs::bus::Bus;
@@ -43,6 +43,7 @@ fn only(ids: &[&str]) -> Vec<Found> {
             cli,
             path: ids.contains(&cli.id).then(|| PathBuf::from("/bin/true")),
             version: None,
+            sign_in: SignIn::Found("test".into()),
         })
         .collect()
 }
@@ -107,7 +108,7 @@ fn setup_writes_the_crew_and_starting_asks_to_trust_the_folder() {
     let paths = Paths::for_db(&db);
     let report = crew::setup(&app.bus, &paths, &only(&["claude"]), false).unwrap();
     assert!(report.wrote_crew);
-    assert_eq!(report.added, ["lead", "builder", "reviewer"]);
+    assert_eq!(report.added, ["builder"]);
     assert!(paths.roles().join("lead.md").exists());
     assert!(paths.missions().join("fix.md").exists());
     app.refresh().unwrap();
