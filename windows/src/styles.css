@@ -1787,3 +1787,90 @@ h1.view-title { font-size: 34px; }
 }
 .crew-card .a-id { font-family: var(--f-mono); font-weight: 600; font-size: 13px; display: flex; align-items: center; }
 .crew-card .a-meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ===================================================================
+   Flat: black on white, thin rules. No shadows, no tinted fills.
+   Selection is inverted ink; red only for stuck and errors.
+   =================================================================== */
+:root {
+  --paper: #ffffff;
+  --bg: #ffffff;
+  --bg-sidebar: #ffffff;
+  --bg-subtle: #ffffff;
+  --border: #e4e4e4;
+  --border-strong: #0a0a0b;
+  --text-secondary: #4a4a4a;
+  --text-tertiary: #6e6e6e;
+  --xray: var(--text);
+  --xray-soft: rgba(10, 10, 11, 0.05);
+  --sun: var(--text);
+  --mode-accent: var(--text);
+  --hard: none;
+  --shadow-sheet: none;
+  --dots: transparent;
+  --bg-banner-ok: transparent;
+  --bg-banner-err: transparent;
+  --bg-banner-warn: transparent;
+  --btn-bg-hover: rgba(10, 10, 11, 0.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0a0a0b;
+    --bg: #0a0a0b;
+    --bg-sidebar: #0a0a0b;
+    --bg-subtle: #0a0a0b;
+    --border: #2a2a2a;
+    --border-strong: #f2f2f2;
+    --xray-soft: rgba(242, 242, 242, 0.07);
+    --btn-bg-hover: rgba(242, 242, 242, 0.07);
+    --hard: none;
+  }
+}
+::selection { background: var(--text); color: var(--bg); }
+.sidebar { border-right: 1px solid var(--border-strong); background: var(--bg); background-image: none; }
+.main, .main-body { background-image: none; }
+.banner { border-bottom: 1px solid var(--border); }
+.banner.accent { background: var(--bg); }
+.sheet, .sheet-card, [role="dialog"] { box-shadow: none !important; border: 1px solid var(--text); }
+
+.mode-switch, .pulse, .composer, .editor-text, .crew-card { box-shadow: none; }
+.mode-switch { border-width: 1px; }
+.mode-btn + .mode-btn { border-left-width: 1px; }
+.mode-btn.on .mode-code,
+.mode-btn.on.communication .mode-code,
+.mode-btn.on.orchestration .mode-code { background: transparent; color: var(--bg); border-color: var(--bg); }
+.hero::before { display: none; }
+.hero { padding-top: 0; }
+
+.nav-item.active,
+.app-shell:has(.main.mode-orchestration) .nav-item.active { background: var(--text); color: var(--bg); box-shadow: none; }
+.nav-item.active * { color: inherit; }
+
+.btn.primary:hover:not(:disabled),
+.main.mode-orchestration .btn.primary:hover:not(:disabled) { background: var(--text); color: var(--bg); border-color: var(--text); opacity: 0.85; }
+.link-btn:hover { background: transparent; text-decoration-thickness: 2px; }
+
+.task-row.selected { background: var(--text); color: var(--bg); box-shadow: none; }
+.task-row.selected * { color: inherit !important; border-color: currentColor; }
+.stage.current .s-dot { box-shadow: inset 0 0 0 2px var(--text); }
+
+.pulse { border-width: 1px; }
+.pulse-tile + .pulse-tile { border-left-color: var(--border); }
+.pulse-tile.hot { background: var(--text); color: var(--bg); }
+.pulse-tile.hot .pt-label, .pulse-tile.hot .pt-hint { color: var(--bg); }
+
+.composer { border-width: 1px; }
+.chip.on { box-shadow: none; }
+.chip-edit { color: inherit; }
+.chip:focus-visible, .goal-row:focus-visible, .editor-text:focus, .mode-btn:focus-visible { outline: 2px solid var(--text); }
+.editor-text { border-width: 1px; }
+
+.crew-card { border-width: 1px; }
+.crew-card.off { opacity: 0.55; }
+.lead-tag { background: var(--text); color: var(--bg); }
+.switch .track { border-width: 1px; }
+.switch input:checked + .track { background: var(--text); }
+.switch input:checked + .track::after { background: var(--bg); }
+.seg, .seg button + button { border-width: 1px; }
+:root { --warn: var(--text); --ok: var(--text); }
+@media (prefers-color-scheme: dark) { :root { --warn: var(--text); --ok: var(--text); } }
