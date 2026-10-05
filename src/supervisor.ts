@@ -36,6 +36,12 @@ export function policyFromConfig(config: BusConfig, agent: AgentDefinition): Age
   return policy;
 }
 
+function isTaskCapacityConflict(error: unknown, agentId: string): boolean {
+  return error instanceof BusError && error.code === "conflict" &&
+    error.message.startsWith(`${agentId} already holds `) &&
+    error.message.endsWith("claimed task(s), its limit; submit or release one first");
+}
+
 export interface ProcessResult {
   code: number;
   output: string;
@@ -418,7 +424,16 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
           }
         }
         if (!messages.length) {
-          try { tasks.push(bus.claimTask(me, null)); } catch (error) { if (!(error instanceof BusError && error.code === "not_found")) throw error; }
+          try {
+            tasks.push(bus.claimTask(me, null));
+          } catch (error) {
+            if (error instanceof BusError && error.code === "not_found") continue;
+            if (isTaskCapacityConflict(error, me.agentId)) {
+              log("at concurrent task limit; waiting for capacity");
+              continue;
+            }
+            throw error;
+          }
         }
       } else if (!messages.length) {
         tasks.push(...bus.listTasks({ states: ["open", "changes_requested"], limit: 50 }).filter((task) => claimableBy(task, me.agentId, role)));

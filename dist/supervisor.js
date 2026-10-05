@@ -34,6 +34,11 @@ export function policyFromConfig(config, agent) {
         policy.allowedChildAgentIds = [...agent.permissions.allowedChildAgentIds];
     return policy;
 }
+function isTaskCapacityConflict(error, agentId) {
+    return error instanceof BusError && error.code === "conflict" &&
+        error.message.startsWith(`${agentId} already holds `) &&
+        error.message.endsWith("claimed task(s), its limit; submit or release one first");
+}
 export function sanitizedEnvironment(agent, additions) {
     const env = { ...process.env, ...additions, MCP_TOOL_TIMEOUT: "3600000" };
     if (envValue("QAGENT_ALLOW_API_KEY", "AGENT_BUS_ALLOW_API_KEY") === "1" || !agent.providerDefinition.subscriptionBacked)
@@ -400,8 +405,13 @@ export async function supervise(options) {
                         tasks.push(bus.claimTask(me, null));
                     }
                     catch (error) {
-                        if (!(error instanceof BusError && error.code === "not_found"))
-                            throw error;
+                        if (error instanceof BusError && error.code === "not_found")
+                            continue;
+                        if (isTaskCapacityConflict(error, me.agentId)) {
+                            log("at concurrent task limit; waiting for capacity");
+                            continue;
+                        }
+                        throw error;
                     }
                 }
             }

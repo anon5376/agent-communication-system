@@ -28,6 +28,16 @@ function fixture(t: { after: (fn: () => void) => void }) {
   return { home, bus, op, lead, store };
 }
 
+async function waitFor<T>(probe: () => T | undefined, timeoutMs = 5000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const result = probe();
+    if (result !== undefined) return result;
+    if (Date.now() >= deadline) assert.fail("timed out waiting for condition");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 test("Rust-style delegation policy is enforced even with a previously resolved identity", (t) => {
   const f = fixture(t);
   f.store("lead", { canDelegate: false });
@@ -97,6 +107,69 @@ test("TypeScript supervisor stops when mixed configuration limits cannot be appl
     signal: controller.signal, waitMs: 100, log: () => {},
   }), /may only narrow its own policy/);
   assert.equal(f.bus.listTasks({ states: ["claimed"] }).length, 0);
+});
+
+test("TypeScript supervisor waits at its concurrent task limit and resumes after capacity is released", { timeout: 10_000 }, async (t) => {
+  const f = fixture(t);
+  f.store("lead", { maxConcurrentTasks: 1 });
+  const holding = f.bus.createTask(f.op, { title: "holding task", to: "lead" });
+  f.bus.claimTask(f.lead, holding.id);
+  f.bus.inbox(f.lead);
+
+  const config = testConfig();
+  config.agents.lead = { ...structuredClone(config.agents["fake-small"]), id: "lead", enabled: true, authority: "manager" };
+  config.harnesses.fake.features.mcp = false;
+  config.constraints.maxConcurrentTasks = 1;
+
+  const controller = new AbortController();
+  let completion: { error: unknown | null } | undefined;
+  let running: Promise<{ error: unknown | null }> | undefined;
+  t.after(async () => {
+    controller.abort();
+    if (running) await running;
+  });
+
+  const logs: string[] = [];
+  running = supervise({
+    agentId: "lead", workdir: f.home, dbPath: f.bus.dbPath, config,
+    signal: controller.signal, waitMs: 50, log: (message) => logs.push(message),
+  }).then(
+    () => ({ error: null }),
+    (error: unknown) => ({ error }),
+  );
+  void running.then((result) => { completion = result; });
+
+  await waitFor(() => {
+    if (completion) assert.fail(`supervisor stopped before waiting: ${String(completion.error)}`);
+    return f.bus.getAgent("lead")?.status === "waiting" ? true : undefined;
+  });
+  const available = f.bus.createTask(f.op, { title: "available task", role: "manager" });
+  assert.equal(f.bus.inbox(f.lead, { peek: true }).messages.length, 0);
+
+  try {
+    await waitFor(() => {
+      if (completion) assert.fail(`supervisor stopped at capacity: ${String(completion.error)}; logs=${logs.join(" | ")}`);
+      return logs.some((line) => line.includes("at concurrent task limit; waiting for capacity")) ? true : undefined;
+    });
+  } catch (error) {
+    assert.fail(`${String(error)}; logs=${logs.join(" | ")}; agent=${JSON.stringify(f.bus.getAgent("lead"))}`);
+  }
+  assert.equal(completion, undefined);
+  assert.equal(f.bus.getTask(available.id).state, "open");
+
+  f.bus.submitTask(f.lead, holding.id, { summary: "capacity released" });
+  f.bus.createTask(f.op, { title: "resume trigger", role: "manager" });
+  const resumed = await waitFor(() => {
+    if (completion) assert.fail(`supervisor stopped after capacity was released: ${String(completion.error)}`);
+    const current = f.bus.getTask(available.id);
+    return current.state === "submitted" ? current : undefined;
+  });
+  assert.equal(resumed.assignee, "lead");
+  assert.equal(completion, undefined);
+
+  controller.abort();
+  const result = await running;
+  assert.equal(result.error, null);
 });
 
 test("only the operator may widen policies, and default workers can only create their own work", (t) => {
