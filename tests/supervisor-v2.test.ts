@@ -408,6 +408,8 @@ test("after repeated failed turns the supervisor stops itself, tells the operato
   // One plain message drove every retry: a failed turn hands its mail to the next one.
   const session = JSON.parse(readFileSync(join(f.home, "sessions", "fake-small.json"), "utf8"));
   assert.equal(session.turns, MAX_FAILED_TURNS);
+  // The mail no turn managed to use waits in the session file for the next start.
+  assert.deepEqual(session.pendingMail.map((m: { subject: string }) => m.subject), ["look at this"]);
   const toOperator = f.bus.inbox(f.bus.identify("operator"), { peek: true }).messages;
   assert.ok(toOperator.some((m) => m.subject === `fake-small stopped: ${MAX_FAILED_TURNS} turns failed in a row`));
   assert.equal(existsSync(join(f.home, "supervisors", "fake-small.pid")), false, "the lock is released");
@@ -452,4 +454,33 @@ test("a supervisor keeps going through a bus locked past the busy timeout", { ti
   await until("the second task to be submitted", 30_000, () => f.bus.getTask(second.id).state === "submitted", () => lines.join("\n"));
   controller.abort();
   await running;
+});
+
+test("a round that fails before its turn runs gives back the task it claimed", { timeout: 60_000 }, async (t) => {
+  const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
+  const config = testConfig();
+  config.harnesses.fake.features.mcp = false;
+  // The fake adapter prepares <workdir>/.agent-bus; a file in its place fails every round.
+  writeFileSync(join(f.project, ".agent-bus"), "not a directory");
+  const created = f.json("operator", ["task", "add", "never started", "--to", "fake-small"]);
+  const lines: string[] = [];
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const running = supervise({
+    agentId: "fake-small",
+    workdir: f.project,
+    dbPath: f.dbPath,
+    config,
+    waitMs: 1_000,
+    retryBaseMs: 20,
+    signal: controller.signal,
+    qagentBin: QAGENT,
+    fakeHarnessPath: FAKE_HARNESS,
+    log: (line) => { lines.push(line); },
+  });
+  await until("two failed rounds", 30_000, () => lines.filter((l) => l.includes("round failed")).length >= 2, () => lines.join("\n"));
+  controller.abort();
+  await running;
+  const task = f.bus.getTask(created.id);
+  assert.notEqual(task.state, "claimed", lines.join("\n"));
 });
