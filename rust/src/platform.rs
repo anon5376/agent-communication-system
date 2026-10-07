@@ -464,12 +464,24 @@ fn npm_node_target(source: &str) -> Option<String> {
     Some(target.replace('\\', "/"))
 }
 
+#[cfg(any(windows, test))]
+fn node_script_path(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(unc_path) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc_path}"));
+    }
+    if let Some(path) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(path);
+    }
+    path
+}
+
 #[cfg(windows)]
 fn npm_node_command<S: AsRef<std::ffi::OsStr>>(program: &Path, args: &[S]) -> Option<Command> {
     let source = fs::read_to_string(program).ok()?;
     let target = npm_node_target(&source)?;
     let base = program.parent()?;
-    let script = base.join(target).canonicalize().ok()?;
+    let script = node_script_path(base.join(target).canonicalize().ok()?);
     if !script.is_file() {
         return None;
     }
@@ -628,5 +640,21 @@ mod npm_shim_tests {
         ] {
             assert!(npm_node_target(&changed).is_none());
         }
+    }
+
+    #[test]
+    fn npm_node_script_path_removes_windows_verbatim_prefixes() {
+        assert_eq!(
+            node_script_path(PathBuf::from(r"\\?\C:\tools\cli.js")),
+            PathBuf::from(r"C:\tools\cli.js")
+        );
+        assert_eq!(
+            node_script_path(PathBuf::from(r"\\?\UNC\server\share\cli.js")),
+            PathBuf::from(r"\\server\share\cli.js")
+        );
+        assert_eq!(
+            node_script_path(PathBuf::from(r"C:\tools\cli.js")),
+            PathBuf::from(r"C:\tools\cli.js")
+        );
     }
 }
