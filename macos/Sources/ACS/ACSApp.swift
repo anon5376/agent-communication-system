@@ -11,7 +11,8 @@ struct ACSApp: App {
             WorkspaceView()
                 .environmentObject(workspace)
                 .frame(minWidth: 960, minHeight: 640)
-                .tint(.indigo)
+                .tint(.black)
+                .preferredColorScheme(.light)
                 .task { await workspace.restore() }
         }
         .defaultSize(width: 1180, height: 780)
@@ -27,6 +28,10 @@ struct ACSApp: App {
                 Button("Try Sample Workspace") { Task { await workspace.openSample() } }
             }
             CommandGroup(after: .toolbar) {
+                Button("Communication") { workspace.mode = .communication }
+                    .keyboardShortcut("1")
+                Button("Orchestration") { workspace.mode = .orchestration }
+                    .keyboardShortcut("2")
                 Button("Refresh Workspace") { Task { await workspace.refresh() } }
                     .keyboardShortcut("r")
             }
@@ -36,6 +41,7 @@ struct ACSApp: App {
 
 enum Destination: String, CaseIterable, Identifiable {
     case tasks = "Tasks", reviews = "Needs review", agents = "Agents", messages = "Messages"
+    case goals = "Goals", presets = "Prompt presets"
     var id: String { rawValue }
     var symbol: String {
         switch self {
@@ -43,7 +49,33 @@ enum Destination: String, CaseIterable, Identifiable {
         case .reviews: return "tray"
         case .agents: return "person.2"
         case .messages: return "bubble.left.and.bubble.right"
+        case .goals: return "scope"
+        case .presets: return "text.alignleft"
         }
+    }
+}
+
+enum WorkspaceMode: String, CaseIterable, Identifiable {
+    case communication = "Communication", orchestration = "Orchestration"
+    var id: String { rawValue }
+    var destinations: [Destination] {
+        self == .communication ? [.messages, .tasks, .reviews] : [.goals, .presets, .agents]
+    }
+}
+
+struct OrbitMark: View {
+    var body: some View {
+        GeometryReader { geometry in
+            let size = min(geometry.size.width, geometry.size.height)
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22).fill(.black)
+                Circle().stroke(.white, lineWidth: size * 0.07).padding(size * 0.2)
+                ForEach(0..<3) { index in
+                    Circle().fill(.white).frame(width: size * 0.17, height: size * 0.17)
+                        .offset(y: -size * 0.3).rotationEffect(.degrees(Double(index) * 120))
+                }
+            }
+        }.accessibilityHidden(true)
     }
 }
 
@@ -62,10 +94,10 @@ extension TaskRecord {
     }
     var stateColor: Color {
         switch state {
-        case "accepted": return .green
+        case "accepted": return .primary
         case "failed": return .red
-        case "submitted", "blocked", "changes_requested": return .orange
-        case "claimed": return .indigo
+        case "blocked": return .red
+        case "submitted", "changes_requested", "claimed": return .primary
         default: return .secondary
         }
     }
@@ -92,10 +124,9 @@ func timestamp(_ milliseconds: Int64) -> String {
 
 func toneColor(_ tone: SubjectTone) -> Color {
     switch tone {
-    case .ok: return .green
-    case .warn: return .orange
+    case .ok, .warn: return .primary
     case .bad: return .red
-    case .accent: return .indigo
+    case .accent: return .primary
     case .muted: return .secondary
     }
 }

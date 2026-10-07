@@ -11,6 +11,7 @@ struct AgentsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                CrewConfiguration()
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Your agents").font(.largeTitle.weight(.semibold))
@@ -33,9 +34,9 @@ struct AgentsView: View {
                         ForEach(store.agents) { agent in
                             HStack(spacing: 14) {
                                 Text(agent.harness.prefix(1).uppercased())
-                                    .font(.callout.weight(.semibold)).foregroundStyle(.indigo)
+                                    .font(.callout.weight(.semibold)).foregroundStyle(.primary)
                                     .frame(width: 34, height: 34)
-                                    .background(.indigo.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary, lineWidth: 1))
                                 VStack(alignment: .leading, spacing: 5) {
                                     Text(agent.id).font(.headline)
                                     Text("\(agent.role) · \(agent.harness) · \(agent.model)").font(.caption).foregroundStyle(.secondary)
@@ -45,9 +46,9 @@ struct AgentsView: View {
                                     HStack(spacing: 6) {
                                         Group {
                                             if agent.paused {
-                                                Circle().fill(.orange)
+                                                Circle().fill(.primary)
                                             } else if agent.running {
-                                                Circle().fill(.green)
+                                                Circle().fill(.primary)
                                             } else {
                                                 Circle().strokeBorder(Color.secondary.opacity(0.8), lineWidth: 1.5)
                                             }
@@ -100,7 +101,7 @@ struct AgentsView: View {
                                 }
                                 if let path = provider.path { Text(path).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled) }
                                 if !provider.signIn.isEmpty { Text(provider.signIn).font(.callout).textSelection(.enabled) }
-                                if provider.requiresApproval { Text("This integration requires explicit approval in crew configuration before starting.").font(.caption).foregroundStyle(.orange) }
+                                if provider.requiresApproval { Text("This integration requires explicit approval in crew configuration before starting.").font(.caption).foregroundStyle(.secondary) }
                             }
                         }.padding(.vertical, 6)
                     }

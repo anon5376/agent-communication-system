@@ -8,6 +8,15 @@ final class WorkspaceStore: ObservableObject {
     @Published var snapshot: Snapshot?
     @Published var detail: TaskDetail?
     @Published var providers: [ProviderRecord] = []
+    @Published var orchestration: Orchestration?
+    @Published var orchestrationError: String?
+    @Published var presetRole: String?
+    @Published var mode = WorkspaceMode(rawValue: UserDefaults.standard.string(forKey: "acs.mode") ?? "") ?? .communication {
+        didSet {
+            destination = mode == .communication ? .messages : .goals
+            UserDefaults.standard.set(mode.rawValue, forKey: "acs.mode")
+        }
+    }
     @Published var destination: Destination? = .tasks
     @Published var selectedTask: Int64?
     @Published var database: URL?
@@ -105,7 +114,10 @@ final class WorkspaceStore: ObservableObject {
             detailLoading = false
             selectedTask = nil
             notice = nil
-            destination = .tasks
+            orchestration = nil
+            orchestrationError = nil
+            presetRole = nil
+            destination = mode == .communication ? .messages : .goals
             lastRefresh = Date()
             UserDefaults.standard.set(db.path, forKey: "acs.database")
             UserDefaults.standard.set(folder?.path, forKey: "acs.project")
@@ -124,6 +136,7 @@ final class WorkspaceStore: ObservableObject {
             lastRefresh = Date()
             error = nil
             await loadDetail()
+            if mode == .orchestration { await loadOrchestration() }
         } catch { if current == generation { self.error = error.localizedDescription } }
     }
 
@@ -142,6 +155,19 @@ final class WorkspaceStore: ObservableObject {
             detailError = error.localizedDescription
         }
         if current == generation, selectedTask == id { detailLoading = false }
+    }
+
+    func loadOrchestration() async {
+        guard let client else { return }
+        let current = generation
+        do {
+            let next: Orchestration = try await client.request("orchestration", as: Orchestration.self)
+            guard current == generation else { return }
+            orchestration = next
+            orchestrationError = nil
+        } catch {
+            if current == generation { orchestrationError = error.localizedDescription }
+        }
     }
 
     @discardableResult

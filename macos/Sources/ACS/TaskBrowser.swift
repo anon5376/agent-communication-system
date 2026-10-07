@@ -82,7 +82,7 @@ struct TaskBrowser: View {
 
     private func groupColor(_ group: TaskListGroup) -> Color {
         switch group {
-        case .review: return .orange
+        case .review: return .primary
         case .stuck: return .red
         default: return .secondary
         }
@@ -91,31 +91,27 @@ struct TaskBrowser: View {
     private func taskRow(_ task: TaskRecord) -> some View {
         let selected = store.selectedTask == task.id
         return HStack(alignment: .top, spacing: 10) {
-            StateDot(color: task.stateColor).padding(.top, 6)
+            StateDot(color: selected ? .white : task.stateColor).padding(.top, 6)
             VStack(alignment: .leading, spacing: 4) {
                 Text(task.title).font(.headline).lineLimit(2)
                 HStack(spacing: 8) {
                     if let label = rowStateLabel(task.state) {
-                        Text(label).font(.caption.weight(.semibold)).foregroundStyle(task.stateColor)
+                        Text(label).font(.caption.weight(.semibold)).foregroundStyle(selected ? .white : task.stateColor)
                     }
                     Text(task.assignee ?? "Unassigned")
-                    Text("·").foregroundStyle(.tertiary)
+                    Text("·")
                     Text(relativeTime(task.updatedMs))
                     Spacer()
-                    Text("#\(task.id)").monospacedDigit().foregroundStyle(.tertiary)
+                    Text("#\(task.id)").monospacedDigit()
                 }
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(selected ? Color.white : Color.secondary)
             }
         }
         .padding(.vertical, 7)
+        .foregroundStyle(selected ? Color.white : Color.primary)
         .tag(task.id)
         .listRowBackground(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(selected ? Color.indigo.opacity(0.4) : Color.clear, lineWidth: 1)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(selected ? Color.indigo.opacity(0.09) : Color.clear)
-                )
+            Rectangle().fill(selected ? Color.black : Color.clear)
         )
     }
 }
@@ -135,7 +131,7 @@ struct TaskInspector: View {
                         Label(task.stateTitle, systemImage: task.stateSymbol)
                             .font(.caption.weight(.semibold))
                             .padding(.horizontal, 9).padding(.vertical, 4)
-                            .background(task.stateColor.opacity(0.13), in: Capsule())
+                            .overlay(Capsule().stroke(task.stateColor, lineWidth: 1))
                             .foregroundStyle(task.stateColor)
                         Text("Task #\(task.id)").font(.callout).foregroundStyle(.secondary).monospacedDigit()
                         if task.priority != "normal" {
@@ -186,7 +182,7 @@ struct TaskInspector: View {
                             Text("Worker-reported checks").font(.headline)
                             ForEach(Array(result.validation.enumerated()), id: \.offset) { _, check in
                                 Label(check.summary, systemImage: check.passed == true ? "checkmark.circle" : "exclamationmark.circle")
-                                    .foregroundStyle(check.passed == true ? Color.secondary : Color.orange)
+                                    .foregroundStyle(check.passed == true ? Color.secondary : Color.red)
                             }
                             Text("Reported by the worker, not independently verified by ACS.").font(.caption).foregroundStyle(.secondary)
                         }
@@ -244,7 +240,7 @@ struct TaskInspector: View {
                     }
                     .padding(.horizontal, 28).padding(.vertical, 12)
                 }
-                .background(.bar)
+                .background(.white)
             }
         }
         .sheet(item: $decision) { DecisionSheet(task: task, decision: $0).environmentObject(store) }
@@ -271,12 +267,11 @@ private struct StageStrip: View {
         let progress = progress
         if index == progress.reached, let outcome = progress.outcome {
             switch outcome {
-            case .ok: return .green
-            case .warn: return .orange
+            case .ok, .warn: return .primary
             case .bad: return .red
             }
         }
-        return index <= progress.reached ? .indigo : .secondary.opacity(0.5)
+        return index <= progress.reached ? .primary : .secondary.opacity(0.5)
     }
 
     var body: some View {
@@ -303,7 +298,7 @@ private struct StageStrip: View {
                 }
                 if index < taskStages.count - 1 {
                     Rectangle()
-                        .fill(index < progress.reached ? Color.indigo : Color.secondary.opacity(0.3))
+                        .fill(index < progress.reached ? Color.primary : Color.secondary.opacity(0.3))
                         .frame(height: 1.5)
                         .frame(maxWidth: .infinity)
                         .padding(.top, 10)

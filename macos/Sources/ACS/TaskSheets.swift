@@ -12,6 +12,8 @@ struct NewTaskSheet: View {
     @State private var scope = ""
     @State private var priority = "normal"
     @State private var failure: String?
+    @FocusState private var focused: Field?
+    private enum Field: Hashable { case title, brief, acceptance }
 
     private var valid: Bool {
         !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
@@ -26,9 +28,15 @@ struct NewTaskSheet: View {
             Text("Describe the outcome. Define what good looks like. Keep review independent.")
                 .foregroundStyle(.secondary)
             Form {
-                TextField("Task title", text: $title, prompt: Text("e.g. Add validation to the signup form"))
-                LabeledContent("Brief") { TextEditor(text: $brief).frame(height: 100).border(.quaternary).accessibilityLabel("Task brief") }
-                LabeledContent("Acceptance criteria") { TextEditor(text: $acceptance).frame(height: 80).border(.quaternary).accessibilityLabel("Acceptance criteria") }
+                TextField("Task title", text: $title, prompt: Text("e.g. Add validation to the signup form")).focused($focused, equals: .title)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Brief")
+                    TextEditor(text: $brief).focused($focused, equals: .brief).frame(height: 100).border(.quaternary).accessibilityLabel("Task brief")
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Acceptance criteria")
+                    TextEditor(text: $acceptance).focused($focused, equals: .acceptance).frame(height: 80).border(.quaternary).accessibilityLabel("Acceptance criteria")
+                }
                 Picker("Worker", selection: $assignee) {
                     Text("Any eligible worker").tag("")
                     ForEach(store.agents) { Text($0.id).tag($0.id) }
@@ -55,6 +63,7 @@ struct NewTaskSheet: View {
                     .disabled(!valid || !store.canWrite)
             }
         }.padding(24).frame(width: 640).interactiveDismissDisabled(store.busy)
+            .onAppear { focused = .title }
             .onChange(of: assignee) { _, next in if reviewer == next { reviewer = "operator" } }
     }
 

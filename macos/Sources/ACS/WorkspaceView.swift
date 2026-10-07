@@ -8,14 +8,16 @@ struct WorkspaceView: View {
         NavigationSplitView {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 10) {
-                    Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .font(.system(size: 25)).foregroundStyle(.indigo)
+                    OrbitMark().frame(width: 36, height: 36)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("ACS").font(.title2.bold())
                         Text("Agent workspace").font(.caption).foregroundStyle(.secondary)
                     }
                 }.padding(20)
-                List(Destination.allCases, selection: $store.destination) { destination in
+                Picker("Workspace mode", selection: $store.mode) {
+                    ForEach(WorkspaceMode.allCases) { Text($0.rawValue).tag($0) }
+                }.pickerStyle(.segmented).padding(.horizontal, 12).padding(.bottom, 16)
+                List(store.mode.destinations, selection: $store.destination) { destination in
                     HStack {
                         Label(destination.rawValue, systemImage: destination.symbol)
                         Spacer()
@@ -42,27 +44,32 @@ struct WorkspaceView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }.padding(16)
             }
-            .navigationSplitViewColumnWidth(min: 185, ideal: 210, max: 250)
+            .navigationSplitViewColumnWidth(min: 260, ideal: 280, max: 320)
         } detail: {
             VStack(spacing: 0) {
                 if store.snapshot?.simulated == true {
-                    Banner(symbol: "sparkles", text: "Sample workspace · simulated agents, no model calls or charges", color: .indigo)
+                    Banner(symbol: "sparkles", text: "Sample workspace · simulated agents, no model calls or charges", color: .primary)
                 }
                 if let error = store.error {
                     Banner(symbol: "exclamationmark.triangle", text: error, color: .red) { store.error = nil }
                 } else if let notice = store.notice {
-                    Banner(symbol: "checkmark.circle", text: notice, color: .green) { store.notice = nil }
+                    Banner(symbol: "checkmark.circle", text: notice, color: .primary) { store.notice = nil }
                 }
                 if store.snapshot == nil {
                     WelcomeView()
                 } else {
                     if store.snapshot?.canOperate == false {
-                        Banner(symbol: "lock", text: "Read-only connection. The operator identity is unavailable for this bus.", color: .orange)
+                        Banner(symbol: "lock", text: "Read-only connection. The operator identity is unavailable for this bus.", color: .primary)
+                    }
+                    if store.mode == .orchestration, let error = store.orchestrationError ?? store.orchestration?.crewError {
+                        Banner(symbol: "exclamationmark.triangle", text: error, color: .red)
                     }
                     switch store.destination ?? .tasks {
                     case .tasks, .reviews: TaskBrowser(reviewOnly: store.destination == .reviews)
                     case .agents: AgentsView()
                     case .messages: MessagesView()
+                    case .goals: GoalsView()
+                    case .presets: PresetsView()
                     }
                 }
                 Divider()
@@ -86,6 +93,9 @@ struct WorkspaceView: View {
             }
         }
         .sheet(isPresented: $store.showNewTask) { NewTaskSheet().environmentObject(store) }
+        .task(id: "\(store.database?.path ?? "")/\(store.mode.rawValue)") {
+            if store.mode == .orchestration { await store.loadOrchestration() }
+        }
         .task {
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(4)) } catch { break }
@@ -99,9 +109,7 @@ struct WelcomeView: View {
     @EnvironmentObject private var store: WorkspaceStore
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
-            Image(systemName: "point.3.connected.trianglepath.dotted")
-                .font(.system(size: 52, weight: .light)).foregroundStyle(.indigo)
-                .accessibilityHidden(true)
+            OrbitMark().frame(width: 64, height: 64)
             VStack(alignment: .leading, spacing: 12) {
                 Text("Different agents.\nOne place to work.")
                     .font(.system(size: 36, weight: .semibold, design: .rounded))
@@ -133,8 +141,8 @@ private struct WelcomeStep: View {
     let subtitle: String
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
-            Text(number).font(.callout.weight(.semibold)).foregroundStyle(.indigo)
-                .frame(width: 26, height: 26).background(.indigo.opacity(0.08), in: Circle())
+            Text(number).font(.callout.weight(.semibold)).foregroundStyle(.primary)
+                .frame(width: 26, height: 26).overlay(Circle().stroke(.secondary, lineWidth: 1))
             VStack(alignment: .leading, spacing: 3) {
                 Text(title).font(.headline)
                 Text(subtitle).foregroundStyle(.secondary)
@@ -157,7 +165,8 @@ struct Banner: View {
                     .buttonStyle(.plain).accessibilityLabel("Dismiss message")
             }
         }.font(.callout).padding(.horizontal, 18).padding(.vertical, 10)
-            .background(color.opacity(0.07))
+            .background(.white)
+            .overlay(alignment: .bottom) { Divider() }
     }
 }
 
