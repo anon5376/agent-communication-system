@@ -61,7 +61,7 @@ struct MessageRow: View {
                     Text(tag.round.map { $0 > 1 ? "\(tag.label), round \($0)" : tag.label } ?? tag.label)
                         .font(.caption.weight(.semibold))
                         .padding(.horizontal, 8).padding(.vertical, 2)
-                        .background(toneColor(tag.tone).opacity(0.13), in: Capsule())
+                        .overlay(Capsule().stroke(toneColor(tag.tone), lineWidth: 1))
                         .foregroundStyle(toneColor(tag.tone))
                 }
                 Text(tag?.rest ?? message.subject).font(.headline).textSelection(.enabled)
