@@ -1,113 +1,84 @@
 #!/bin/sh
-# Install aos, mission control for a team of AI coding agents.
-#
-#   curl -fsSL https://raw.githubusercontent.com/anon5376/agent-communication-system/rust-port/install.sh | sh
-#
-# It downloads a prebuilt aos for your computer from the project's GitHub
-# releases. If there is none yet, it builds aos from source, which needs Git,
-# Rust (rustup.rs) and a C compiler. Nothing else is installed or changed.
-#
-# Settings (environment variables):
-#   AOS_INSTALL_DIR   where the aos command goes (default ~/.local/bin)
-#   AOS_FROM_SOURCE=1 skip the download and build from source
-#   AOS_BRANCH        the branch to build from source (default rust-port)
+# Install four ACS commands from one tagged, checksummed release.
+# ACS_VERSION=v1.0.0 ACS_INSTALL_DIR=$HOME/.local/bin sh install.sh
+# Explicit source build: ACS_FROM_SOURCE=1 ACS_VERSION=<tag> sh install.sh
 set -eu
-
-repo="anon5376/agent-communication-system"
-branch="${AOS_BRANCH:-rust-port}"
-dest="${AOS_INSTALL_DIR:-$HOME/.local/bin}"
-
-say() { printf '%s\n' "$*"; }
-fail() { printf 'aos install: %s\n' "$*" >&2; exit 1; }
+repo=anon5376/agent-communication-system
+dest=${ACS_INSTALL_DIR:-${AOS_INSTALL_DIR:-$HOME/.local/bin}}
+version=${ACS_VERSION:-}
+source_build=${ACS_FROM_SOURCE:-${AOS_FROM_SOURCE:-0}}
+commands='acs aos qagent acs-desktop'
+fail() { printf 'ACS install: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
-
+fetch() {
+    if have curl; then curl --proto '=https' --tlsv1.2 -fsSL "$1" -o "$2"
+    elif have wget; then wget --https-only -q "$1" -O "$2"
+    else fail 'install curl or wget first'; fi
+}
 case "$(uname -s)" in
     Linux) os=unknown-linux-musl ;;
     Darwin) os=apple-darwin ;;
-    *) fail "aos runs on Linux and macOS. On Windows, use WSL2 and run this there." ;;
+    *) fail 'Use the Windows setup.exe from https://github.com/anon5376/agent-communication-system/releases' ;;
 esac
 case "$(uname -m)" in
-    x86_64 | amd64) arch=x86_64 ;;
-    arm64 | aarch64) arch=aarch64 ;;
-    *) fail "no aos build for $(uname -m) yet." ;;
+    x86_64|amd64) arch=x86_64 ;;
+    arm64|aarch64) arch=aarch64 ;;
+    *) fail "unsupported architecture: $(uname -m)" ;;
 esac
-target="$arch-$os"
-
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-
-fetch() {
-    if have curl; then curl -fsSL "$1" -o "$2"
-    elif have wget; then wget -q "$1" -O "$2"
-    else return 1
-    fi
-}
-
-# Replace the command without disturbing agents still running the old one:
-# write next to it, then rename over it.
-put() {
-    mkdir -p "$dest" || fail "cannot create $dest; set AOS_INSTALL_DIR to a folder you can write"
-    cp "$1" "$dest/.aos.new"
-    chmod 755 "$dest/.aos.new"
-    mv -f "$dest/.aos.new" "$dest/aos"
-}
-
-download() {
-    # The newest release that carries aos builds (tags start with aos-v).
-    fetch "https://api.github.com/repos/$repo/releases?per_page=30" "$tmp/releases.json" 2>/dev/null || return 1
-    url="$(grep -o "https://github.com/$repo/releases/download/aos-v[^\"]*/aos-$target.tar.gz" "$tmp/releases.json" | head -n 1)"
-    [ -n "$url" ] || return 1
-    say "downloading $url"
-    fetch "$url" "$tmp/aos.tar.gz" || return 1
-    if fetch "$url.sha256" "$tmp/aos.tar.gz.sha256" 2>/dev/null; then
-        want="$(cut -d ' ' -f 1 "$tmp/aos.tar.gz.sha256")"
-        if have sha256sum; then got="$(sha256sum "$tmp/aos.tar.gz" | cut -d ' ' -f 1)"
-        elif have shasum; then got="$(shasum -a 256 "$tmp/aos.tar.gz" | cut -d ' ' -f 1)"
-        else got="$want"
-        fi
-        [ "$want" = "$got" ] || fail "checksum mismatch for $url; nothing was installed"
-    fi
-    tar -xzf "$tmp/aos.tar.gz" -C "$tmp" aos || return 1
-    put "$tmp/aos"
-}
-
-build() {
-    have git || fail "building aos needs Git. Install it, then run this again."
-    if ! have cargo; then
-        say ""
-        say "There is no ready-made aos for your computer yet, so it has to be built,"
-        say "and building needs Rust. Install Rust (about 2 minutes), then run this again:"
-        say ""
-        say "    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-        say ""
-        exit 1
-    fi
-    have cc || have gcc || have clang || fail "building aos needs a C compiler: on macOS run xcode-select --install; on Debian or Ubuntu, sudo apt install build-essential."
-    say "building aos from source ($branch); this takes a few minutes the first time"
-    git clone --quiet --depth 1 --branch "$branch" "https://github.com/$repo.git" "$tmp/src"
-    cargo build --quiet --release --locked --manifest-path "$tmp/src/rust/Cargo.toml" --bin aos
-    put "$tmp/src/rust/target/release/aos"
-}
-
-if [ "${AOS_FROM_SOURCE:-}" = "1" ] || ! download; then
-    build
+target=$arch-$os
+tmp=$(mktemp -d)
+stage=
+trap 'rm -rf "$tmp"; if [ -n "$stage" ]; then rm -rf "$stage"; fi' 0
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ "$source_build" = 1 ] && [ -z "$version" ]; then
+    fail 'source builds require ACS_VERSION=<tag>; no branch is selected implicitly'
 fi
-
-say ""
-say "installed $dest/aos ($("$dest/aos" --version 2>/dev/null || echo aos))"
-case ":$PATH:" in
-    *":$dest:"*) ;;
-    *)
-        say ""
-        case "${SHELL:-}" in
-            *zsh) rc="~/.zshrc" ;;
-            *bash) rc="~/.bashrc" ;;
-            *) rc="~/.profile" ;;
-        esac
-        say "$dest is not on your PATH yet. Add it, then open a new terminal:"
-        say "    echo 'export PATH=\"$dest:\$PATH\"' >> $rc"
-        ;;
-esac
-say ""
-say "next: cd into a project folder and run  aos"
-say "      (to look around first with a simulated team, no account needed:  aos demo)"
+if [ -z "$version" ]; then
+    fetch "https://api.github.com/repos/$repo/releases/latest" "$tmp/release.json" || fail 'cannot resolve latest release; set ACS_VERSION=<tag> to pin a release'
+    version=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp/release.json")
+fi
+case "$version" in ''|*[!a-zA-Z0-9._-]*) fail 'invalid release tag' ;; esac
+printf 'ACS release: %s\nTarget: %s\nDestination: %s\n' "$version" "$target" "$dest"
+if [ "$source_build" = 1 ]; then
+    have git && have cargo || fail 'explicit source builds require Git, Rust and a C compiler'
+    printf 'Source: https://github.com/%s.git at tag %s (not a prebuilt release)\n' "$repo" "$version"
+    git init -q "$tmp/src"
+    git -C "$tmp/src" remote add origin "https://github.com/$repo.git"
+    git -C "$tmp/src" fetch -q --depth 1 origin "refs/tags/$version" || fail 'requested tag does not exist'
+    git -C "$tmp/src" checkout -q --detach FETCH_HEAD
+    cargo build --release --locked --manifest-path "$tmp/src/rust/Cargo.toml" --bin acs --bin aos --bin qagent --bin acs-desktop
+    binaries=$tmp/src/rust/target/release
+else
+    asset=acs-$target.tar.gz
+    url=https://github.com/$repo/releases/download/$version/$asset
+    printf 'Source: %s\n' "$url"
+    fetch "$url" "$tmp/$asset" || fail 'this tag has no ACS archive for your platform; nothing installed (source builds require ACS_FROM_SOURCE=1)'
+    fetch "$url.sha256" "$tmp/checksum" || fail 'checksum is missing; refusing to install'
+    want=$(awk 'NR==1 {print $1}' "$tmp/checksum")
+    [ "${#want}" = 64 ] || fail 'invalid checksum'
+    case "$want" in *[!a-fA-F0-9]*) fail 'invalid checksum' ;; esac
+    if have sha256sum; then got=$(sha256sum "$tmp/$asset" | awk '{print $1}')
+    elif have shasum; then got=$(shasum -a 256 "$tmp/$asset" | awk '{print $1}')
+    else fail 'SHA-256 verification requires sha256sum or shasum'; fi
+    [ "$(printf '%s' "$want" | tr A-F a-f)" = "$got" ] || fail 'checksum mismatch; nothing installed'
+    printf 'SHA-256 verified: %s\n' "$got"
+    tar -tzf "$tmp/$asset" > "$tmp/entries" || fail 'invalid archive'
+    printf '%s\n' acs acs-desktop aos qagent > "$tmp/expected"
+    LC_ALL=C sort "$tmp/entries" > "$tmp/sorted"
+    cmp -s "$tmp/expected" "$tmp/sorted" || fail 'unexpected archive contents'
+    mkdir "$tmp/bin"
+    tar -xzf "$tmp/$asset" -C "$tmp/bin"
+    binaries=$tmp/bin
+fi
+mkdir -p "$dest" || fail "cannot create $dest"
+stage=$(mktemp -d "$dest/.acs-install.XXXXXX")
+for name in $commands; do
+    [ -f "$binaries/$name" ] && [ ! -L "$binaries/$name" ] || fail "missing regular binary: $name"
+    cp "$binaries/$name" "$stage/$name"
+    chmod 755 "$stage/$name"
+done
+for name in $commands; do mv -f "$stage/$name" "$dest/$name"; done
+printf '\nInstalled acs, aos, qagent and acs-desktop from %s.\n' "$version"
+case ":$PATH:" in *":$dest:"*) ;; *) printf 'Add this directory to PATH: %s\n' "$dest" ;; esac
+printf 'Try: aos demo\nSet up real tools: aos setup\nDesktop downloads: https://github.com/%s/releases/tag/%s\n' "$repo" "$version"

@@ -2,27 +2,25 @@ name: SwiftUI macOS app
 
 # Builds the ACS SwiftUI app, runs its package tests, and packages ACS.app as
 # a DMG on a native-architecture macOS runner. The DMG and its SHA-256
-# checksum are uploaded as workflow artifacts only — this workflow never
-# creates releases.
+# checksum are uploaded for CI and the reusable tagged-release workflow.
 
 on:
   push:
     branches:
-      - swiftui
-      - "devin/swiftui-*"
+      - main
     paths:
       - "macos/**"
       - "rust/**"
       - ".github/workflows/swiftui-macos.yml"
   pull_request:
     branches:
-      - swiftui
-      - rust-port
+      - main
     paths:
       - "macos/**"
       - "rust/**"
       - ".github/workflows/swiftui-macos.yml"
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
