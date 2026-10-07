@@ -7,6 +7,7 @@ import { Icon } from "../icons";
 import { relativeTime, type AgentRecord } from "../model";
 import { store } from "../store";
 import { CrewPanel } from "./Orchestration";
+import { Modal } from "./Modal";
 
 export function AgentsView() {
   const [starting, setStarting] = useState<AgentRecord | null>(null);
@@ -22,7 +23,6 @@ export function AgentsView() {
       <div class="view-pad">
         <div class="row-between">
           <div>
-            <div class="hero-kicker">Orchestration / AOS</div>
             <h1 class="view-title">Your agents</h1>
             <p class="view-sub">Who is in the crew, what each one is told, and whether it is running.</p>
           </div>
@@ -34,7 +34,7 @@ export function AgentsView() {
 
         <CrewPanel />
 
-        <h2 class="sec-title" style={{ marginTop: 26 }}>On the bus</h2>
+        <h2 class="sec-title" style={{ marginTop: 26 }}>Agent activity</h2>
         {agents.length === 0 ? (
           <div style={{ padding: "20px 0", display: "flex", flexDirection: "column", gap: 14 }}>
             <h2 style={{ fontSize: 21, fontWeight: 600, margin: 0 }}>Start with the tools you already use.</h2>
@@ -210,7 +210,7 @@ function StartAgentSheet(props: { agent: AgentRecord; onClose: () => void }) {
   };
 
   return (
-    <SheetShell width={580} onClose={props.onClose}>
+    <SheetShell title={`Start ${props.agent.id}`} width={580} onClose={props.onClose}>
       <h2>Start {props.agent.id}</h2>
       <p style={{ fontWeight: 650, margin: 0 }}>This starts a real coding agent.</p>
       <p class="sheet-sub">
@@ -258,7 +258,7 @@ function AlertSheet(props: {
   onCancel: () => void;
 }) {
   return (
-    <SheetShell width={430} onClose={props.onCancel}>
+    <SheetShell title={props.title} width={430} onClose={props.onCancel}>
       <h2>{props.title}</h2>
       <p class="sheet-sub">{props.message}</p>
       <div class="actions">
@@ -274,30 +274,10 @@ function AlertSheet(props: {
   );
 }
 
-// Shared modal shell (same behavior as Sheets.tsx's Sheet, kept local so this
-// file stays self-contained like the Swift views).
-import { useEffect } from "preact/hooks";
-
-function SheetShell(props: { width: number; onClose: () => void; children: preact.ComponentChildren }) {
-  const busy = store.busy.value;
-  useEffect(() => {
-    if (busy) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") props.onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy, props.onClose]);
+function SheetShell(props: { title: string; width: number; onClose: () => void; children: preact.ComponentChildren }) {
   return (
-    <div
-      class="sheet-scrim"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !busy) props.onClose();
-      }}
-    >
-      <div class="sheet" role="dialog" aria-modal="true" style={{ width: props.width }}>
-        {props.children}
-      </div>
-    </div>
+    <Modal title={props.title} width={props.width} onClose={props.onClose}>
+      {props.children}
+    </Modal>
   );
 }

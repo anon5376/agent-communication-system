@@ -1,5 +1,4 @@
-/* ACS Windows shell — Fluent-flavored light/dark styles matching the macOS
-   app's visual language: quiet sidebar, indigo accent, semantic tones. */
+/* ACS desktop: monochrome workspaces, thin rules, and Orbit branding. */
 
 :root {
   --accent: #6366f1;
@@ -1874,3 +1873,45 @@ h1.view-title { font-size: 34px; }
 .seg, .seg button + button { border-width: 1px; }
 :root { --warn: var(--text); --ok: var(--text); }
 @media (prefers-color-scheme: dark) { :root { --warn: var(--text); --ok: var(--text); } }
+
+/* Operator controls stay readable without competing with the work. */
+.brand-sub, .nav-caption, .statusbar, .banner, .modebar-ws, .group-head,
+.sec-title, .f-label, .p-tag, .pt-label, .lead-tag {
+  font-family: var(--f-body);
+  text-transform: none;
+  letter-spacing: normal;
+}
+.nav-caption { font-size: 13px; line-height: 1.5; padding: 10px 12px 16px; }
+.nav-item { padding: 11px 12px; font-size: 14px; }
+.brand-sub, .statusbar, .banner, .group-head, .f-label, .p-tag { font-size: 12px; }
+.group-head { font-weight: 600; padding-top: 20px; }
+.t-line { font-size: 12px; }
+.t-title { font-size: 14px; line-height: 1.45; }
+.task-row { padding-top: 13px; padding-bottom: 13px; }
+.task-pane { width: 360px; min-width: 300px; }
+.crew-card.off { opacity: 1; color: var(--text-secondary); }
+.agent-settings {
+  display: flex; align-items: center; gap: 9px; width: 100%; padding: 12px 0;
+  border: 0; border-top: 1px solid var(--border); background: none;
+  text-align: left; cursor: pointer; font-weight: 600; margin-bottom: 12px;
+}
+.agent-settings:hover { text-decoration: underline; text-underline-offset: 4px; }
+.setup-note { display: flex; align-items: center; gap: 24px; padding: 18px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin-bottom: 24px; }
+.setup-note > div { flex: 1; }
+.setup-note p { color: var(--text-secondary); margin: 6px 0 0; max-width: 64ch; }
+.setup-note .btn { flex-shrink: 0; }
+.draft-status { font-size: 12px; color: var(--text-secondary); }
+.native-dialog { margin: auto; max-height: calc(100dvh - 48px); max-width: calc(100vw - 48px); color: var(--text); overflow: auto; }
+.native-dialog::backdrop { background: var(--sheet-scrim); }
+:where(button, input, textarea, select, a):focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+.switch .track { pointer-events: none; }
+@media (max-width: 1050px) {
+  .sidebar { width: 195px; min-width: 180px; }
+  .task-pane { width: 310px; min-width: 260px; }
+  .presets { grid-template-columns: 225px minmax(0, 1fr); }
+  .presets-editor { padding: 22px 20px; }
+  .row-between { flex-wrap: wrap; }
+  .goal-row { grid-template-columns: 45px minmax(0, 1fr) auto; }
+  .goal-row .goal-who, .goal-row .m-time { display: none; }
+  .setup-note { flex-wrap: wrap; }
+}

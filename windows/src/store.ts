@@ -81,6 +81,7 @@ function errorText(raw: unknown): string {
 }
 
 export class WorkspaceStore {
+  presetDrafts = new Map<string, { name: string; text: string }>();
   snapshot = signal<Snapshot | null>(null);
   detail = signal<TaskDetail | null>(null);
   providers = signal<ProviderRecord[]>([]);

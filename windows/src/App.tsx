@@ -20,6 +20,10 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
       const key = e.key.toLowerCase();
+      if (document.querySelector("dialog[open]")) {
+        if (["n", "o", "1", "2", "r"].includes(key)) e.preventDefault();
+        return;
+      }
       if (key === "n" && store.canWrite.value) {
         e.preventDefault();
         store.showNewTask.value = true;
@@ -146,6 +150,11 @@ function Sidebar() {
         {mode.destinations.map(destButton)}
       </nav>
       <div class="sidebar-footer">
+        {snap && store.destination.value !== "agents" && (
+          <button class="agent-settings" onClick={() => store.go("agents")}>
+            <Icon name="sliders" size={16} hidden /> Configure agents
+          </button>
+        )}
         <div class="ws-name">
           <Icon name={snap?.simulated === true ? "sparkles" : "folder"} size={15} hidden />
           <span>{store.name.value}</span>
@@ -225,12 +234,11 @@ function ModeBar() {
   const current = store.mode.value;
   return (
     <div class="modebar">
-      <div class="mode-switch" role="tablist" aria-label="Mode">
+      <div class="mode-switch" role="group" aria-label="Mode">
         {MODES.map((m, i) => (
           <button
             key={m.id}
-            role="tab"
-            aria-selected={current === m.id}
+            aria-pressed={current === m.id}
             class={`mode-btn ${m.id} ${current === m.id ? "on" : ""}`}
             onClick={() => store.switchMode(m.id)}
             title={`${m.blurb} (Ctrl+${i + 1})`}

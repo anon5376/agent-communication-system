@@ -25,7 +25,6 @@ function useOrchestration() {
 export function ModeHero(props: { kicker: string; title: string; lede: string; children?: preact.ComponentChildren }) {
   return (
     <header class="hero">
-      <div class="hero-kicker">{props.kicker}</div>
       <div class="row-between" style={{ alignItems: "flex-end" }}>
         <div>
           <h1 class="hero-title">{props.title}</h1>
@@ -78,6 +77,13 @@ export function GoalsView() {
           lede="Say the outcome in one line. Pick a preset and it becomes a full brief with acceptance criteria."
         />
 
+        {!store.snapshot.value?.simulated && store.agents.value.length === 0 && (
+          <div class="setup-note">
+            <div><strong>Connect your agents first.</strong><p>You can queue a goal now, but it will wait until you configure and start a worker.</p></div>
+            <button class="btn" onClick={() => store.go("agents")}>Configure agents</button>
+          </div>
+        )}
+
         <section class="composer" aria-label="New goal">
           <textarea
             class="composer-input"
@@ -89,12 +95,11 @@ export function GoalsView() {
             }}
             aria-label="Goal"
           />
-          <div class="preset-chips" role="radiogroup" aria-label="Preset">
+          <div class="preset-chips" role="group" aria-label="Preset">
             {missions.map((m) => (
               <button
                 key={m.name}
-                role="radio"
-                aria-checked={picked?.name === m.name}
+                aria-pressed={picked?.name === m.name}
                 class={`chip ${picked?.name === m.name ? "on" : ""}`}
                 onClick={() => setMission(m.name)}
                 title={m.summary}
@@ -109,7 +114,7 @@ export function GoalsView() {
             <label class="inline-select">
               <span>Hand to</span>
               <select value={to} onChange={(e) => setTo((e.target as HTMLSelectElement).value)} aria-label="Hand to">
-                <option value="">{orch?.goalOwner ? `${orch.goalOwner} (crew lead)` : "First free agent"}</option>
+                <option value="">{orch?.goalOwner ? `${orch.goalOwner} (crew lead)` : "Any eligible agent"}</option>
                 {agents.map((a) => (
                   <option key={a.id} value={a.id}>{a.id}</option>
                 ))}
@@ -191,12 +196,11 @@ export function PresetsView() {
   return (
     <div class="presets">
       <div class="presets-list">
-        <div class="seg small" role="tablist" aria-label="Preset type">
+        <div class="seg small" role="group" aria-label="Preset type">
           {(["mission", "role"] as Kind[]).map((k) => (
             <button
               key={k}
-              role="tab"
-              aria-selected={kind === k}
+              aria-pressed={kind === k}
               class={kind === k ? "on" : ""}
               onClick={() => {
                 setKind(k);
@@ -265,8 +269,15 @@ The operator wants: {goal}
 `;
 
 function PresetEditor(props: { kind: Kind; name: string; text: string; isNew?: boolean; onSaved: (name: string) => void }) {
-  const [text, setText] = useState(props.text);
-  const [name, setName] = useState(props.name);
+  const draftKey = JSON.stringify([store.database.value, props.kind, props.name]);
+  const draft = store.presetDrafts.get(draftKey);
+  const [text, setText] = useState(draft?.text ?? props.text);
+  const [name, setName] = useState(draft?.name ?? props.name);
+  const update = (next: { text: string; name: string }) => {
+    setText(next.text);
+    setName(next.name);
+    store.presetDrafts.set(draftKey, next);
+  };
   const dirty = text !== props.text || name !== props.name;
   const derived = useMemo(() => {
     if (!props.isNew) return name;
@@ -277,6 +288,7 @@ function PresetEditor(props: { kind: Kind; name: string; text: string; isNew?: b
   const save = async () => {
     const ok = await store.mutate(props.kind === "mission" ? "saveMission" : "saveRole", { name: derived, text });
     if (ok) {
+      store.presetDrafts.delete(draftKey);
       await store.loadOrchestration();
       props.onSaved(derived);
     }
@@ -286,35 +298,39 @@ function PresetEditor(props: { kind: Kind; name: string; text: string; isNew?: b
     <div class="editor">
       <div class="row-between">
         <div>
-          <div class="hero-kicker">{props.kind === "mission" ? "Goal preset" : "Agent role"}</div>
           {props.isNew ? (
             <input
               class="editor-name"
               value={derived}
-              onInput={(e) => setName((e.target as HTMLInputElement).value)}
+              onInput={(e) => update({ text, name: (e.target as HTMLInputElement).value })}
               aria-label="Preset name"
               placeholder="name"
+              disabled={!store.canWrite.value}
             />
           ) : (
             <h2 class="editor-title">{props.name}</h2>
           )}
         </div>
         <span style={{ flex: 1 }} />
-        {dirty && !props.isNew && (
-          <button class="btn" onClick={() => { setText(props.text); setName(props.name); }}>
+        {dirty && <span class="draft-status" role="status">Unsaved changes</span>}
+        {dirty && (
+          <button class="btn" disabled={store.busy.value} onClick={() => {
+            setText(props.text); setName(props.name); store.presetDrafts.delete(draftKey);
+          }}>
             Discard
           </button>
         )}
         <button class="btn primary" disabled={!dirty || !derived || !store.canWrite.value} onClick={() => void save()}>
-          Save
+          Save prompt
         </button>
       </div>
       <textarea
         class="editor-text"
         value={text}
         spellcheck={false}
-        onInput={(e) => setText((e.target as HTMLTextAreaElement).value)}
+        onInput={(e) => update({ name, text: (e.target as HTMLTextAreaElement).value })}
         aria-label={`${props.kind} prompt`}
+        disabled={!store.canWrite.value}
       />
       <p class="fine">
         Saved as a plain file in the workspace’s aos folder; the terminal tools read the same file.

@@ -5,6 +5,7 @@ import { useState } from "preact/hooks";
 import { EmptyState } from "../App";
 import { parseSubjectTag, relativeTime, timestamp, type MessageRecord } from "../model";
 import { store } from "../store";
+import { Modal } from "./Modal";
 
 export function MessagesView() {
   const [composing, setComposing] = useState(false);
@@ -112,16 +113,7 @@ function ComposeMessageSheet(props: { onClose: () => void }) {
   };
 
   return (
-    <div
-      class="sheet-scrim"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !busy) props.onClose();
-      }}
-      onKeyDown={(e) => {
-        if (e.key === "Escape" && !busy) props.onClose();
-      }}
-    >
-      <div class="sheet" role="dialog" aria-modal="true" style={{ width: 540 }}>
+    <Modal title="New message" onClose={props.onClose}>
         <h2>New message</h2>
         <div class="field">
           <span class="f-label">To</span>
@@ -166,7 +158,6 @@ function ComposeMessageSheet(props: { onClose: () => void }) {
             Send Message
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

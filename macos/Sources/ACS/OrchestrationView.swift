@@ -21,6 +21,19 @@ struct GoalsView: View {
                 Text("What should the crew do?").font(.largeTitle.weight(.semibold))
                 Text("Write the outcome. Choose a preset to add a brief and acceptance criteria.")
                     .foregroundStyle(.secondary)
+                if store.snapshot?.simulated != true, store.agents.isEmpty {
+                    Divider()
+                    HStack(spacing: 20) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Connect your agents first.").font(.headline)
+                            Text("You can queue a goal now, but it will wait until you configure and start a worker.")
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Configure agents") { store.destination = .agents }
+                    }
+                    Divider()
+                }
                 Text("Goal").font(.headline)
                 TextEditor(text: $goal).frame(minHeight: 90).border(.quaternary).accessibilityLabel("Goal")
                 HStack {

@@ -1,39 +1,16 @@
 // Sheets: NewTaskSheet + DecisionSheet — same fields, validation, copy and
 // payloads as TaskSheets.swift.
 
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useState } from "preact/hooks";
 import { store } from "../store";
 import type { Id, TaskRecord } from "../model";
+import { Modal } from "./Modal";
 
-function useDismiss(onClose: () => void, disabled: boolean) {
-  useEffect(() => {
-    if (disabled) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [disabled, onClose]);
-}
-
-function Sheet(props: { width?: number; onClose: () => void; children: preact.ComponentChildren }) {
-  const busy = store.busy.value;
-  useDismiss(props.onClose, busy);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    ref.current?.querySelector<HTMLElement>("input, textarea, select, button")?.focus();
-  }, []);
+function Sheet(props: { title: string; width?: number; onClose: () => void; children: preact.ComponentChildren }) {
   return (
-    <div
-      class="sheet-scrim"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !busy) props.onClose();
-      }}
-    >
-      <div class="sheet" role="dialog" aria-modal="true" style={{ width: props.width ?? 540 }} ref={ref}>
-        {props.children}
-      </div>
-    </div>
+    <Modal title={props.title} width={props.width} onClose={props.onClose}>
+      {props.children}
+    </Modal>
   );
 }
 
@@ -78,7 +55,7 @@ export function NewTaskSheet() {
   };
 
   return (
-    <Sheet width={640} onClose={close}>
+    <Sheet title="New task" width={640} onClose={close}>
       <h2>Give your agents a clear task</h2>
       <p class="sheet-sub">Describe the outcome. Define what good looks like. Keep review independent.</p>
       <div class="form-grid">
@@ -225,7 +202,7 @@ export function DecisionSheet(props: { task: TaskRecord | { id: Id; title: strin
   };
 
   return (
-    <Sheet width={540} onClose={props.onClose}>
+    <Sheet title={copy.title} width={540} onClose={props.onClose}>
       <h2>{copy.title}</h2>
       <p style={{ fontWeight: 650, margin: 0 }}>
         #{String(props.task.id)} · {props.task.title}

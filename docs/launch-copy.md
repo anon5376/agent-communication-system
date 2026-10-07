@@ -8,7 +8,7 @@ Line to lead with everywhere: **Run different coding agents together without bei
 
 ## Show HN
 
-**Title** (73 characters):
+**Title:**
 
 > Show HN: ACS – run Claude Code, Codex and others together on one task board
 
@@ -16,11 +16,11 @@ Line to lead with everywhere: **Run different coding agents together without bei
 
 > I kept running two or three coding agents on the same repo and ended up as their message bus: pasting briefs between terminals, remembering who was editing what, and checking every result myself.
 >
-> ACS moves that into one SQLite file on your machine. Agents claim tasks from it (one owner at a time, overlapping path claims refused), leave notes as they go, and submit. A worker cannot accept its own submission; a named reviewer or you does. If a worker dies mid-task, its claim shows up as stalled, you requeue it, and the next agent picks it up from the notes. `qagent trace` prints the whole chain afterwards. There is no daemon or server: every command opens the file directly.
+> ACS moves that into one SQLite file on your machine. Agents claim tasks from it (one owner at a time), leave notes and submit work for review. A worker cannot accept its own submission; a designated reviewer or the operator does. Cooperative path leases help agents avoid overlapping edits, but they are not a filesystem sandbox. Supervised failures are recorded; external claims need lease/stall inspection and explicit recovery. Stop the original worker before requeueing. `qagent trace` shows the history. No always-on server is required.
 >
-> There is a terminal console, `aos`, with Linux and macOS binaries, and an `aos demo` that runs a sample team without any account. `examples/worker-death-recovery.sh` kills a worker with SIGKILL and walks the task through recovery and independent review, also without any account.
+> Use terminal mission control (`aos`) or the native Mac and Windows apps. Communication shows messages, tasks and reviews; Orchestration configures goals, prompts and agents. `aos demo` and the desktop sample need no account and make no model calls. Queueing a desktop goal does not start an agent.
 >
-> Limits, plainly: Claude Code, Codex and Cursor CLI join an `aos` crew out of the box; Gemini, Kimi, OpenCode, Hermes and others join with `aos connect`, which turns off their approval prompts and has not been live-tested. Same machine only. Identity stops accidents, not a hostile process running as you, and messages are plaintext on disk. No Windows build, and the macOS binaries have not been run by hand yet.
+> Limits, plainly: adapter/control-plane tests do not certify every live provider. Unattended execution needs explicit approval in a trusted project. Same machine only; identity stops accidents, not a hostile process running as you, and messages are plaintext on disk. Desktop downloads are unsigned/not notarized; the Mac app requires Apple Silicon and macOS 14+. See the release notes for the exact tested versions and limitations.
 >
 > MIT. I would like to hear how you coordinate several agents today, and where this breaks for you.
 
@@ -34,17 +34,17 @@ Line to lead with everywhere: **Run different coding agents together without bei
 
 > I run Claude Code and Codex on the same projects and was spending more time relaying between them than reviewing their work. So I built ACS: a local task board in one SQLite file that the agents use directly.
 >
-> - A task has one owner at a time. If that agent dies, the claim shows up as stalled; requeue it and another agent continues from the notes it left.
+> - A task has one owner at a time. Inspect failures/stalled claims, stop the original worker, then explicitly requeue when needed; the history stays with the task.
 > - The agent that did the work cannot accept it. A reviewer agent (from a different CLI if you have two) or you does.
 > - `qagent trace <task>` shows who claimed, noted, submitted and reviewed, and when.
 >
 > Try it without any account: `aos demo` after the one-line install, or `sh examples/worker-death-recovery.sh` from the repo.
 >
-> What it is not: an agent framework (it writes no prompts and picks no models), a sandbox, or a cloud service. Linux and macOS binaries, no Windows build yet. Claude Code, Codex and Cursor join a crew directly; other CLIs join through `aos connect`, not live-tested.
+> What it is not: a sandbox, a cloud service, or a replacement coding model. It coordinates your existing CLIs, with editable goal and role prompts. Rust is the primary product; the TypeScript `qagent` package remains compatible. Use the terminal or Mac/Windows apps; desktop artifacts are unsigned. Provider adapters are not blanket live-provider certification.
 >
 > Repo: github.com/anon5376/agent-communication-system. A roast of the design is welcome.
 
-For r/LocalLLaMA, add one sentence: local models are reached through a real coding harness (Codex `--oss` or OpenCode), and that path is documented but not live-tested.
+For r/LocalLLaMA, link the exact local-model release evidence. Local inference is reached through a coding harness such as OpenCode, not through a fake Ollama agent. Do not call the workflow validated unless the worker actually claims/submits and an independent reviewer checks/accepts the result.
 
 ---
 
@@ -93,4 +93,6 @@ Topics: `mcp` `mcp-server` `model-context-protocol` `ai-agents` `multi-agent` `a
 | Delegation and claim limits enforced in the core, both builds | TS `tests/reliability.test.ts` (#29, on `main`); Rust `rust/tests/reliability_tests.rs` (#32, on `rust-port`) | 2026-10-05 |
 | Release binary size | `aos` x86_64 Linux: 5,242,048 bytes (earlier drafts said 3 or 4 MB, which was the older `acs` binary) | 2026-10-04 |
 
-Do not claim, until evidence exists: "works with every agent", Windows support, macOS tested by hand, a dollar cap (dollar budgets are checked between turns and only when a CLI reports cost), automatic restart of crashed agents in `aos` before a release after 2026-10-05 includes #28, star counts or user numbers, or "first"/"only" anything.
+The table above is historical evidence for the old AOS-only release, not a certification of a new unified release. Native macOS and Windows candidate builds now exist; use the release PR's revision-specific tests, installer hashes and limitations rather than carrying forward the old "no Windows"/"Mac untested" statements. Historical timing and binary-size measurements are not current performance promises.
+
+Do not claim "works with every agent", a hard dollar cap (budgets are checked between turns and only when a CLI reports cost), a passing local-model workflow without its acceptance evidence, clean-machine installation from a local reinstall, star/user counts without evidence, or "first"/"only" anything. Do not publish these drafts before the owner checklist passes.

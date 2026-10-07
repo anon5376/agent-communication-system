@@ -39,6 +39,15 @@ struct WorkspaceView: View {
                 Spacer(minLength: 0)
                 VStack(alignment: .leading, spacing: 10) {
                     Divider()
+                    if store.snapshot != nil, store.destination != .agents {
+                        Button {
+                            store.mode = .orchestration
+                            store.destination = .agents
+                        } label: {
+                            Label("Configure agents", systemImage: "slider.horizontal.3")
+                                .font(.callout.weight(.semibold)).padding(.vertical, 6)
+                        }.buttonStyle(.plain)
+                    }
                     Label(store.name, systemImage: store.snapshot?.simulated == true ? "sparkles" : "folder")
                         .font(.callout.weight(.medium)).lineLimit(2)
                     Menu {
