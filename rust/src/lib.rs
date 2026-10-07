@@ -13,6 +13,7 @@ pub mod config;
 pub mod control;
 pub mod dashboard;
 pub mod db;
+pub mod desktop;
 pub mod error;
 pub mod identity;
 pub mod import;

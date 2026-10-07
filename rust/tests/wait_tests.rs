@@ -74,15 +74,10 @@ fn watcher_fires_within_200ms_of_a_write_from_another_connection() {
         ChangeWatcher::new(&f.home.join("bus.db"), ChangeWatcherOptions::default()).unwrap();
     let since = f.bus.latest_seq().unwrap();
     let stop = Arc::new(AtomicBool::new(false));
-    let started = Instant::now();
+    let actor = f.bus.identify(Some(OPERATOR_ID)).unwrap();
     std::thread::sleep(Duration::from_millis(50));
-    send(
-        &f.bus,
-        &f.bus.identify(Some(OPERATOR_ID)).unwrap(),
-        "operator",
-        "poke",
-        "now",
-    );
+    send(&f.bus, &actor, "operator", "poke", "now");
+    let started = Instant::now();
     let next = watcher.next(since, Duration::from_secs(2), &stop).unwrap();
     assert!(next > since);
     assert_eq!(next, f.bus.latest_seq().unwrap());

@@ -15,3 +15,10 @@ scripts/devin-cloud-bridge.mjs
 
 # Rust port build artifacts
 rust/target/
+
+# Native macOS app outputs
+macos/.build/
+macos/output/
+macos/dist/
+macos/build/
+macos/.swiftpm/
