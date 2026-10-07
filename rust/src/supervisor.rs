@@ -116,7 +116,11 @@ fn provider_credentials(env: &HashMap<String, String>, harness: &str) -> Vec<&'s
         keep.extend(["GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN"]);
     }
     if harness == "amazonq" || on("CLAUDE_CODE_USE_BEDROCK") {
-        keep.extend(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]);
+        keep.extend([
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+        ]);
     }
     if on("CLAUDE_CODE_USE_VERTEX") || on("GOOGLE_GENAI_USE_VERTEXAI") {
         keep.push("GOOGLE_APPLICATION_CREDENTIALS");
@@ -225,6 +229,68 @@ impl OutputCapture {
     }
 }
 
+#[cfg(unix)]
+fn output_ready(fd: i32, settled: &AtomicBool, draining: &mut Option<Instant>) -> bool {
+    loop {
+        if settled.load(Ordering::SeqCst)
+            && draining.get_or_insert_with(Instant::now).elapsed() >= Duration::from_millis(250)
+        {
+            return false;
+        }
+        let mut descriptor = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut descriptor, 1, 50) };
+        if result > 0 {
+            return descriptor.revents & (libc::POLLIN | libc::POLLHUP) != 0;
+        }
+        if result < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return false;
+        }
+        if result == 0 && settled.load(Ordering::SeqCst) {
+            return false;
+        }
+    }
+}
+
+#[cfg(windows)]
+fn output_ready_windows(
+    handle: std::os::windows::io::RawHandle,
+    settled: &AtomicBool,
+    draining: &mut Option<Instant>,
+) -> bool {
+    loop {
+        if settled.load(Ordering::SeqCst)
+            && draining.get_or_insert_with(Instant::now).elapsed() >= Duration::from_millis(250)
+        {
+            return false;
+        }
+        let mut available = 0;
+        let ok = unsafe {
+            windows_sys::Win32::System::Pipes::PeekNamedPipe(
+                handle,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return false;
+        }
+        if available > 0 {
+            return true;
+        }
+        if settled.load(Ordering::SeqCst) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Spawn the harness CLI detached in its own process group, tee stdout+stderr
 /// to ours while capturing (head 256KB + tail 8MB), SIGTERM→SIGKILL the group
 /// on timeout. Port of runHarnessProcess (with the head+tail output cap).
@@ -297,9 +363,26 @@ pub fn run_harness_process(
     let mut stdout_reader = child.stdout.take().unwrap();
     let mut stderr_reader = child.stderr.take().unwrap();
     let capture_out = Arc::clone(&capture);
+    let settled_out = Arc::clone(&settled);
     let out_thread = std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
+        let mut draining = None;
         loop {
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsRawFd;
+                if !output_ready(stdout_reader.as_raw_fd(), &settled_out, &mut draining) {
+                    break;
+                }
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::AsRawHandle;
+                if !output_ready_windows(stdout_reader.as_raw_handle(), &settled_out, &mut draining)
+                {
+                    break;
+                }
+            }
             match std::io::Read::read(&mut stdout_reader, &mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
@@ -311,9 +394,26 @@ pub fn run_harness_process(
         }
     });
     let capture_err = Arc::clone(&capture);
+    let settled_err = Arc::clone(&settled);
     let err_thread = std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
+        let mut draining = None;
         loop {
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsRawFd;
+                if !output_ready(stderr_reader.as_raw_fd(), &settled_err, &mut draining) {
+                    break;
+                }
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::AsRawHandle;
+                if !output_ready_windows(stderr_reader.as_raw_handle(), &settled_err, &mut draining)
+                {
+                    break;
+                }
+            }
             match std::io::Read::read(&mut stderr_reader, &mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
@@ -564,7 +664,10 @@ fn rotated(path: &Path) -> PathBuf {
 }
 
 fn rotate_log(path: &Path) {
-    if fs::metadata(path).map(|m| m.len() > MAX_LOG_BYTES).unwrap_or(false) {
+    if fs::metadata(path)
+        .map(|m| m.len() > MAX_LOG_BYTES)
+        .unwrap_or(false)
+    {
         let _ = fs::rename(path, rotated(path));
     }
 }
@@ -723,7 +826,11 @@ pub fn policy_from_config(
         can_delegate: agent.permissions["canDelegate"].as_bool(),
         allowed_child_agent_ids: agent.permissions["allowedChildAgentIds"]
             .as_array()
-            .map(|ids| ids.iter().filter_map(|id| id.as_str().map(str::to_string)).collect::<Vec<_>>())
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| id.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
             .filter(|ids| !ids.is_empty()),
         max_delegation_depth: depth,
         max_concurrent_tasks: number(&config.constraints["maxConcurrentTasks"]).filter(|n| *n >= 1),
@@ -751,14 +858,17 @@ pub fn config_budget_reached(
     }
     if let Some(dollars) = config.constraints["optionalApiCostBudgetUSD"].as_f64() {
         if cost_usd >= dollars {
-            return Some(format!("${cost_usd:.2} of ${dollars:.2} reported cost used"));
+            return Some(format!(
+                "${cost_usd:.2} of ${dollars:.2} reported cost used"
+            ));
         }
     }
     None
 }
 
 /// Why this build refuses work that asked for per-task git worktrees.
-pub const NO_WORKTREES: &str = "worktree isolation is not available in this build (the Rust qagent/aos); \
+pub const NO_WORKTREES: &str =
+    "worktree isolation is not available in this build (the Rust qagent/aos); \
      nothing was claimed or started. Use the TypeScript qagent for worktrees, or set \
      constraints.isolation to \"path-locks\" in the config";
 
@@ -895,6 +1005,35 @@ struct SessionRecord {
     #[serde(rename = "costUSD")]
     cost_usd: f64,
     latency_ms: f64,
+    failure: Option<RuntimeFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeFailure {
+    exit_code: i32,
+    consecutive_failures: u32,
+    reason: String,
+    backoff_ms: u64,
+    next_retry_ms: Option<i64>,
+}
+
+pub fn runtime_note(home: &Path, agent_id: &str) -> Option<String> {
+    let failure = read_session(&home.join("sessions").join(format!("{agent_id}.json"))).failure?;
+    let state = match failure.next_retry_ms {
+        Some(at) => format!(
+            "backoff {}s / retry eligible after {} if running and resumed",
+            failure.backoff_ms / 1000,
+            chrono::DateTime::from_timestamp_millis(at)
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_else(|| at.to_string())
+        ),
+        None => "crashing / inspect the agent log, fix the cause, then resume".into(),
+    };
+    Some(format!(
+        "Last turn: {} (exit {}) / {} consecutive failures / {state}",
+        failure.reason, failure.exit_code, failure.consecutive_failures
+    ))
 }
 
 fn read_session(path: &Path) -> SessionRecord {
@@ -1105,7 +1244,9 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
             )));
         }
         if !agent.harness.features.usage_reporting
-            && bus.budget_of(&bus_agent).is_some_and(|b| b.limits.usd.is_some())
+            && bus
+                .budget_of(&bus_agent)
+                .is_some_and(|b| b.limits.usd.is_some())
         {
             log(&format!(
                 "{} reports no usage, so the dollar part of {}'s budget never counts; its turn and minute limits still apply",
@@ -1167,366 +1308,398 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
         // Checked before the next wait instead of after a whole wait period.
         let mut backlog_due = true;
         while !options.stop.load(Ordering::SeqCst) {
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Round> {
-                // Pause and budget come first, so a paused agent's mail stays unread for later.
-                if hold_for_pause(&bus, &me, &log)? {
-                    if paused_since.is_none() {
-                        log("paused; no new turn until the operator resumes this agent");
-                        bus.set_status(&me, "idle")?;
-                        paused_since = Some(Instant::now());
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || -> Result<Round> {
+                    // Pause and budget come first, so a paused agent's mail stays unread for later.
+                    if hold_for_pause(&bus, &me, &log)? {
+                        if paused_since.is_none() {
+                            log("paused; no new turn until the operator resumes this agent");
+                            bus.set_status(&me, "idle")?;
+                            paused_since = Some(Instant::now());
+                        }
+                        if last_beat.elapsed() >= Duration::from_secs(60) {
+                            bus.heartbeat(&me)?;
+                            last_beat = Instant::now();
+                        }
+                        let until = Instant::now() + Duration::from_secs(2);
+                        while Instant::now() < until && !options.stop.load(Ordering::SeqCst) {
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        return Ok(Round::Next);
                     }
-                    if last_beat.elapsed() >= Duration::from_secs(60) {
-                        bus.heartbeat(&me)?;
-                        last_beat = Instant::now();
-                    }
-                    let until = Instant::now() + Duration::from_secs(2);
-                    while Instant::now() < until && !options.stop.load(Ordering::SeqCst) {
-                        std::thread::sleep(Duration::from_millis(100));
-                    }
-                    return Ok(Round::Next);
-                }
-                // The configuration's usage budget: counted from what the CLI reported into
-                // sessions/<agent>.json and checked between turns, so one turn can overshoot it.
-                if let Some(over) = config_budget_reached(&config, session.total_tokens, session.cost_usd) {
-                    if budget_noticed.as_deref() != Some(over.as_str()) {
-                        log(&format!(
+                    // The configuration's usage budget: counted from what the CLI reported into
+                    // sessions/<agent>.json and checked between turns, so one turn can overshoot it.
+                    if let Some(over) =
+                        config_budget_reached(&config, session.total_tokens, session.cost_usd)
+                    {
+                        if budget_noticed.as_deref() != Some(over.as_str()) {
+                            log(&format!(
                             "budget reached ({over}); no new turns until the configuration budget is raised"
                         ));
-                        budget_noticed = Some(over);
+                            budget_noticed = Some(over);
+                        }
+                        sleep_interruptible(wait_ms, &options.stop);
+                        return Ok(Round::Next);
                     }
-                    sleep_interruptible(wait_ms, &options.stop);
-                    return Ok(Round::Next);
-                }
-                if paused_since.take().is_some() {
-                    log("resumed");
-                    consecutive_failures = 0;
-                    backlog_due = true;
-                }
-                let backlog = std::mem::take(&mut backlog_due)
-                    && bus.unread_count(&me.agent_id)? == 0
-                    && bus.has_claimable(&me.agent_id, &bus_agent.role)?;
-                let waited = if backlog {
-                    log("queued work is waiting; starting without new mail");
-                    crate::bus::WaitResult {
-                        status: "backlog".into(),
-                        messages: vec![],
-                        events: vec![],
-                        seq: bus.latest_seq()?,
+                    if paused_since.take().is_some() {
+                        log("resumed");
+                        consecutive_failures = 0;
+                        backlog_due = true;
                     }
-                } else {
-                    crate::wait::wait_for_mail(
-                        &bus,
-                        &me,
-                        Duration::from_millis(wait_ms),
-                        &options.stop,
-                    )?
-                };
-                if options.stop.load(Ordering::SeqCst) {
-                    return Ok(Round::Stop);
-                }
-                // A wait that ends with no mail ("none") falls through: the queue is
-                // checked below, so claimable work never needs fresh mail.
-                if hold_for_pause(&bus, &me, &log)? {
-                    return Ok(Round::Next);
-                }
+                    let backlog = std::mem::take(&mut backlog_due)
+                        && bus.unread_count(&me.agent_id)? == 0
+                        && bus.has_claimable(&me.agent_id, &bus_agent.role)?;
+                    let waited = if backlog {
+                        log("queued work is waiting; starting without new mail");
+                        crate::bus::WaitResult {
+                            status: "backlog".into(),
+                            messages: vec![],
+                            events: vec![],
+                            seq: bus.latest_seq()?,
+                        }
+                    } else {
+                        crate::wait::wait_for_mail(
+                            &bus,
+                            &me,
+                            Duration::from_millis(wait_ms),
+                            &options.stop,
+                        )?
+                    };
+                    if options.stop.load(Ordering::SeqCst) {
+                        return Ok(Round::Stop);
+                    }
+                    // A wait that ends with no mail ("none") falls through: the queue is
+                    // checked below, so claimable work never needs fresh mail.
+                    if hold_for_pause(&bus, &me, &log)? {
+                        return Ok(Round::Next);
+                    }
 
-                // Read what the wait saw without consuming it: the mail is marked read
-                // only once a turn has used it, so a turn that dies does not lose it.
-                let messages = if waited.status == "mail" {
-                    bus.inbox(&me, true, Some(50))?.messages
-                } else {
-                    Vec::new()
-                };
-                let already_used = messages.iter().filter(|m| m.seq <= used_through).count();
-                if already_used > 0 {
-                    // A turn used this mail but marking it read failed: mark it now
-                    // instead of paying for the same turn again.
-                    let last = messages.iter().filter(|m| m.seq <= used_through).last().unwrap();
-                    bus.mark_read_through(&me, last.seq, already_used)?;
-                    return Ok(Round::Next);
-                }
-                let mark_read = |bus: &Bus| -> Result<()> {
-                    match messages.last() {
-                        Some(last) => bus.mark_read_through(&me, last.seq, messages.len()),
-                        None => Ok(()),
+                    // Read what the wait saw without consuming it: the mail is marked read
+                    // only once a turn has used it, so a turn that dies does not lose it.
+                    let messages = if waited.status == "mail" {
+                        bus.inbox(&me, true, Some(50))?.messages
+                    } else {
+                        Vec::new()
+                    };
+                    let already_used = messages.iter().filter(|m| m.seq <= used_through).count();
+                    if already_used > 0 {
+                        // A turn used this mail but marking it read failed: mark it now
+                        // instead of paying for the same turn again.
+                        let last = messages.iter().rfind(|m| m.seq <= used_through).unwrap();
+                        bus.mark_read_through(&me, last.seq, already_used)?;
+                        return Ok(Round::Next);
                     }
-                };
-                if cancellation_only(&messages) {
-                    mark_read(&bus)?;
-                    log("received cancellation control; no model turn started");
-                    return Ok(Round::Next);
-                }
+                    let mark_read = |bus: &Bus| -> Result<()> {
+                        match messages.last() {
+                            Some(last) => bus.mark_read_through(&me, last.seq, messages.len()),
+                            None => Ok(()),
+                        }
+                    };
+                    if cancellation_only(&messages) {
+                        mark_read(&bus)?;
+                        log("received cancellation control; no model turn started");
+                        return Ok(Round::Next);
+                    }
 
-                let role = bus_agent.role.clone();
-                let mut task_ids: std::collections::BTreeSet<i64> = Default::default();
-                for message in &messages {
-                    if let Some(task_id) = message.task_id {
-                        if (message.msg_type == "task" || message.msg_type == "feedback")
-                            && !message.subject.starts_with("[ACCEPTED")
-                        {
-                            task_ids.insert(task_id);
+                    let role = bus_agent.role.clone();
+                    let mut task_ids: std::collections::BTreeSet<i64> = Default::default();
+                    for message in &messages {
+                        if let Some(task_id) = message.task_id {
+                            if (message.msg_type == "task" || message.msg_type == "feedback")
+                                && !message.subject.starts_with("[ACCEPTED")
+                            {
+                                task_ids.insert(task_id);
+                            }
                         }
                     }
-                }
-                let mut tasks: Vec<Task> = Vec::new();
-                if managed {
-                    // Port of /task/start: claim for a CLI that has no bus tools.
-                    for id in &task_ids {
-                        match bus.get_task(*id) {
-                            Ok(current) => {
-                                if claimable_by(&current.task, &me.agent_id, &role) {
-                                    match bus.claim_task(&me, Some(*id)) {
-                                        Ok(task) => tasks.push(task),
-                                        Err(error) => {
-                                            log(&format!("claim of task #{id} failed: {error}"))
+                    let mut tasks: Vec<Task> = Vec::new();
+                    if managed {
+                        // Port of /task/start: claim for a CLI that has no bus tools.
+                        for id in &task_ids {
+                            match bus.get_task(*id) {
+                                Ok(current) => {
+                                    if claimable_by(&current.task, &me.agent_id, &role) {
+                                        match bus.claim_task(&me, Some(*id)) {
+                                            Ok(task) => tasks.push(task),
+                                            Err(error) => {
+                                                log(&format!("claim of task #{id} failed: {error}"))
+                                            }
                                         }
+                                    } else if current.task.state == "claimed"
+                                        && current.task.assignee.as_deref()
+                                            == Some(me.agent_id.as_str())
+                                    {
+                                        tasks.push(current.task);
                                     }
-                                } else if current.task.state == "claimed"
-                                    && current.task.assignee.as_deref() == Some(me.agent_id.as_str())
-                                {
-                                    tasks.push(current.task);
                                 }
+                                Err(error) => log(&format!("claim of task #{id} failed: {error}")),
                             }
-                            Err(error) => log(&format!("claim of task #{id} failed: {error}")),
                         }
-                    }
-                    if messages.is_empty() {
-                        match bus.claim_task(&me, None) {
-                            Ok(task) => tasks.push(task),
-                            // Nothing to claim, or the agent already holds its claim limit.
-                            Err(error) => {
-                                if !matches!(error.code.as_str(), "not_found" | "conflict") {
-                                    return Err(error);
+                        if messages.is_empty() {
+                            match bus.claim_task(&me, None) {
+                                Ok(task) => tasks.push(task),
+                                // Nothing to claim, or the agent already holds its claim limit.
+                                Err(error) => {
+                                    if !matches!(error.code.as_str(), "not_found" | "conflict") {
+                                        return Err(error);
+                                    }
                                 }
                             }
                         }
+                    } else if messages.is_empty()
+                        && bus.has_claimable(&me.agent_id, &bus_agent.role)?
+                    {
+                        // has_claimable is false at the claim limit, so a full agent gets no turn.
+                        tasks.extend(
+                            bus.list_tasks(ListTasksInput {
+                                states: Some(vec![
+                                    "open".to_string(),
+                                    "changes_requested".to_string(),
+                                ]),
+                                limit: Some(50),
+                                ..Default::default()
+                            })?
+                            .into_iter()
+                            .filter(|task| claimable_by(task, &me.agent_id, &role)),
+                        );
                     }
-                } else if messages.is_empty() && bus.has_claimable(&me.agent_id, &bus_agent.role)? {
-                    // has_claimable is false at the claim limit, so a full agent gets no turn.
-                    tasks.extend(
-                        bus.list_tasks(ListTasksInput {
-                            states: Some(vec!["open".to_string(), "changes_requested".to_string()]),
-                            limit: Some(50),
-                            ..Default::default()
-                        })?
-                        .into_iter()
-                        .filter(|task| claimable_by(task, &me.agent_id, &role)),
-                    );
-                }
-                if messages.is_empty() && tasks.is_empty() {
-                    return Ok(Round::Next);
-                }
+                    if messages.is_empty() && tasks.is_empty() {
+                        return Ok(Round::Next);
+                    }
 
-                let context = AdapterContext {
-                    agent: &agent,
-                    qagent_bin: qagent_bin.clone(),
-                    prompt: with_role_prompt(
-                        crate::aos::crew::role_prompt(&config_path, &agent.agent.id),
-                        build_brief(&agent, &messages, &tasks, managed),
-                    ),
-                    session_id: session.session_id.clone(),
-                    pinned_session_id: pinned_session_id.clone(),
-                    workdir: workdir.display().to_string(),
-                    mcp_server_path: "mcp".to_string(),
-                    fake_harness_path: options
-                        .fake_harness_path
-                        .clone()
-                        .unwrap_or_else(|| "fake-harness".to_string()),
-                    bus_environment: HashMap::from([
-                        ("QAGENT_AGENT_ID".to_string(), me.agent_id.clone()),
-                        (
-                            "QAGENT_BUS_DB".to_string(),
-                            bus.db_path.display().to_string(),
+                    let context = AdapterContext {
+                        agent: &agent,
+                        qagent_bin: qagent_bin.clone(),
+                        prompt: with_role_prompt(
+                            crate::aos::crew::role_prompt(&config_path, &agent.agent.id),
+                            build_brief(&agent, &messages, &tasks, managed),
                         ),
-                        ("QAGENT_BLOCK_SEC".to_string(), block_sec.to_string()),
-                        ("AGENT_BUS_BLOCK_SEC".to_string(), block_sec.to_string()),
-                        // A CLI without bus tools reaches the bus from its shell with this binary.
-                        ("QAGENT_CLI".to_string(), qagent_bin.clone()),
-                    ]),
-                    mcp_command: Some(mcp_command.clone()),
-                };
-                if let Some(prepare) = adapter.prepare {
-                    prepare(&context)?;
-                }
-                let invocation = (adapter.build)(&context);
-                bus.set_status(&me, "working")?;
-                let keepalive = keep_claims_alive(&bus.db_path, &me);
-                let mut environment = sanitized_environment(&agent, &invocation.environment);
-                if guarded(&agent) {
-                    guard_environment(&mut environment, &agent.harness.id, &workdir);
-                }
-                let process_result = run_harness_process(
-                    &invocation.command,
-                    &invocation.args,
-                    &environment,
-                    &workdir.display().to_string(),
-                    invocation.timeout_ms,
-                    &child_pid,
-                );
-                keepalive.finish();
-                cap_stdout_file(&out_path);
-                *child_pid.lock().unwrap() = None;
-                // From here a paid turn has run: an error must not make the round
-                // fail and run the same mail again, so these steps only log.
-                match bus.get_agent(&me.agent_id) {
-                    Ok(Some(a)) if a.stored_status == "working" => {
-                        if let Err(error) = bus.set_status(&me, "idle") {
-                            log(&format!("could not set status idle: {error}"));
-                        }
+                        session_id: session.session_id.clone(),
+                        pinned_session_id: pinned_session_id.clone(),
+                        workdir: workdir.display().to_string(),
+                        mcp_server_path: "mcp".to_string(),
+                        fake_harness_path: options
+                            .fake_harness_path
+                            .clone()
+                            .unwrap_or_else(|| "fake-harness".to_string()),
+                        bus_environment: HashMap::from([
+                            ("QAGENT_AGENT_ID".to_string(), me.agent_id.clone()),
+                            (
+                                "QAGENT_BUS_DB".to_string(),
+                                bus.db_path.display().to_string(),
+                            ),
+                            ("QAGENT_BLOCK_SEC".to_string(), block_sec.to_string()),
+                            ("AGENT_BUS_BLOCK_SEC".to_string(), block_sec.to_string()),
+                            // A CLI without bus tools reaches the bus from its shell with this binary.
+                            ("QAGENT_CLI".to_string(), qagent_bin.clone()),
+                        ]),
+                        mcp_command: Some(mcp_command.clone()),
+                    };
+                    if let Some(prepare) = adapter.prepare {
+                        prepare(&context)?;
                     }
-                    Ok(_) => {}
-                    Err(error) => log(&format!("could not read agent status: {error}")),
-                }
-                if options.stop.load(Ordering::SeqCst) {
-                    log(&format!(
-                        "stopped during a turn; {} process group killed",
-                        agent.harness.id
-                    ));
-                    return Ok(Round::Stop);
-                }
-                let normalized = (adapter.parse)(&process_result.output, process_result.code);
-                let session_mismatch = resumed_unexpected_session(
-                    pinned_session_id.as_deref(),
-                    normalized.session_id.as_deref(),
-                );
-                session.turns += 1;
-                session.input_tokens += normalized.usage.input_tokens;
-                session.output_tokens += normalized.usage.output_tokens;
-                session.total_tokens += normalized.usage.total_tokens;
-                session.cost_usd += normalized.usage.cost_usd;
-                if let Some(dollars) = dollar_budget {
-                    if !cost_noticed && normalized.usage.cost_usd == 0.0 {
-                        cost_noticed = true;
+                    let invocation = (adapter.build)(&context);
+                    bus.set_status(&me, "working")?;
+                    let keepalive = keep_claims_alive(&bus.db_path, &me);
+                    let mut environment = sanitized_environment(&agent, &invocation.environment);
+                    if guarded(&agent) {
+                        guard_environment(&mut environment, &agent.harness.id, &workdir);
+                    }
+                    let process_result = run_harness_process(
+                        &invocation.command,
+                        &invocation.args,
+                        &environment,
+                        &workdir.display().to_string(),
+                        invocation.timeout_ms,
+                        &child_pid,
+                    );
+                    keepalive.finish();
+                    cap_stdout_file(&out_path);
+                    *child_pid.lock().unwrap() = None;
+                    // From here a paid turn has run: an error must not make the round
+                    // fail and run the same mail again, so these steps only log.
+                    match bus.get_agent(&me.agent_id) {
+                        Ok(Some(a)) if a.stored_status == "working" => {
+                            if let Err(error) = bus.set_status(&me, "idle") {
+                                log(&format!("could not set status idle: {error}"));
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => log(&format!("could not read agent status: {error}")),
+                    }
+                    if options.stop.load(Ordering::SeqCst) {
                         log(&format!(
+                            "stopped during a turn; {} process group killed",
+                            agent.harness.id
+                        ));
+                        return Ok(Round::Stop);
+                    }
+                    let normalized = (adapter.parse)(&process_result.output, process_result.code);
+                    let session_mismatch = resumed_unexpected_session(
+                        pinned_session_id.as_deref(),
+                        normalized.session_id.as_deref(),
+                    );
+                    session.turns += 1;
+                    session.input_tokens += normalized.usage.input_tokens;
+                    session.output_tokens += normalized.usage.output_tokens;
+                    session.total_tokens += normalized.usage.total_tokens;
+                    session.cost_usd += normalized.usage.cost_usd;
+                    if let Some(dollars) = dollar_budget {
+                        if !cost_noticed && normalized.usage.cost_usd == 0.0 {
+                            cost_noticed = true;
+                            log(&format!(
                             "{} reported no cost for this turn; the ${dollars} budget only counts cost the CLI reports",
                             agent.harness.id
                         ));
+                        }
                     }
-                }
-                session.latency_ms += process_result.duration_ms as f64;
-                if let Some(pinned) = &pinned_session_id {
-                    session.session_id = Some(pinned.clone());
-                } else if let Some(id) = normalized.session_id.clone() {
-                    session.session_id = Some(id);
-                }
-                match fs::write(
-                    &session_path,
-                    serde_json::to_string_pretty(&session).unwrap(),
-                ) {
-                    Ok(()) => unrecorded_turns = 0,
-                    Err(error) => {
-                        unrecorded_turns += 1;
-                        log(&format!("could not save usage to {}: {error}", session_path.display()));
-                    }
-                }
-                if unrecorded_turns >= MAX_FAILED_TURNS {
-                    unrecorded_turns = 0;
-                    let reason = format!(
-                        "usage could not be saved to {} after {MAX_FAILED_TURNS} turns, so the budget cannot be enforced",
-                        session_path.display()
-                    );
-                    if let Err(error) =
-                        pause_after_failures(&bus, &me, MAX_FAILED_TURNS, &reason, &log)
-                    {
-                        log(&format!("could not pause: {error}"));
-                    }
-                }
-
-                let mut report_ids: std::collections::BTreeSet<i64> = task_ids;
-                report_ids.extend(tasks.iter().map(|t| t.id));
-                let failed = process_result.code != 0
-                    || process_result.timed_out
-                    || normalized.malformed
-                    || session_mismatch;
-                if failed {
-                    consecutive_failures += 1;
-                    let error = if process_result.timed_out {
-                        format!("harness timed out after {} ms", process_result.duration_ms)
+                    session.latency_ms += process_result.duration_ms as f64;
+                    let failure_reason = if process_result.timed_out {
+                        Some(format!(
+                            "harness timed out after {} ms",
+                            process_result.duration_ms
+                        ))
                     } else if session_mismatch {
-                        format!(
+                        Some(format!(
                             "harness resumed unexpected session {}; expected {}",
                             normalized.session_id.as_deref().unwrap_or(""),
                             pinned_session_id.as_deref().unwrap_or("")
-                        )
+                        ))
                     } else if normalized.malformed {
-                        "harness returned malformed output".to_string()
+                        Some("harness returned malformed output".to_string())
+                    } else if process_result.code != 0 {
+                        Some(format!("harness exited {}", process_result.code))
                     } else {
-                        format!("harness exited {}", process_result.code)
+                        None
                     };
-                    // Each task this turn still holds is failed back (retry or escalate).
-                    let mut failed_back: std::collections::BTreeSet<i64> = Default::default();
-                    for id in &report_ids {
-                        match bus.get_task(*id) {
-                            Ok(task) => {
-                                if task.task.assignee.as_deref() == Some(me.agent_id.as_str())
-                                    && task.task.state == "claimed"
-                                {
-                                    match bus.fail_task(&me, *id, &format!("supervisor: {error}")) {
-                                        Ok(_) => {
-                                            failed_back.insert(*id);
-                                        }
-                                        Err(fail_error) => log(&format!(
+                    session.failure = failure_reason.as_ref().map(|reason| {
+                        let failures = consecutive_failures.saturating_add(1);
+                        let delay = backoff(failures);
+                        RuntimeFailure {
+                            exit_code: process_result.code,
+                            consecutive_failures: failures,
+                            reason: reason.clone(),
+                            backoff_ms: delay,
+                            next_retry_ms: (failures < MAX_FAILED_TURNS).then(|| {
+                                chrono::Utc::now()
+                                    .timestamp_millis()
+                                    .saturating_add(delay as i64)
+                            }),
+                        }
+                    });
+                    if let Some(pinned) = &pinned_session_id {
+                        session.session_id = Some(pinned.clone());
+                    } else if let Some(id) = normalized.session_id.clone() {
+                        session.session_id = Some(id);
+                    }
+                    match fs::write(
+                        &session_path,
+                        serde_json::to_string_pretty(&session).unwrap(),
+                    ) {
+                        Ok(()) => unrecorded_turns = 0,
+                        Err(error) => {
+                            unrecorded_turns += 1;
+                            log(&format!(
+                                "could not save usage to {}: {error}",
+                                session_path.display()
+                            ));
+                        }
+                    }
+                    if unrecorded_turns >= MAX_FAILED_TURNS {
+                        unrecorded_turns = 0;
+                        let reason = format!(
+                        "usage could not be saved to {} after {MAX_FAILED_TURNS} turns, so the budget cannot be enforced",
+                        session_path.display()
+                    );
+                        if let Err(error) =
+                            pause_after_failures(&bus, &me, MAX_FAILED_TURNS, &reason, &log)
+                        {
+                            log(&format!("could not pause: {error}"));
+                        }
+                    }
+
+                    let mut report_ids: std::collections::BTreeSet<i64> = task_ids;
+                    report_ids.extend(tasks.iter().map(|t| t.id));
+                    if let Some(error) = failure_reason {
+                        consecutive_failures += 1;
+                        // Each task this turn still holds is failed back (retry or escalate).
+                        let mut failed_back: std::collections::BTreeSet<i64> = Default::default();
+                        for id in &report_ids {
+                            match bus.get_task(*id) {
+                                Ok(task) => {
+                                    if task.task.assignee.as_deref() == Some(me.agent_id.as_str())
+                                        && task.task.state == "claimed"
+                                    {
+                                        match bus.fail_task(
+                                            &me,
+                                            *id,
+                                            &format!("supervisor: {error}"),
+                                        ) {
+                                            Ok(_) => {
+                                                failed_back.insert(*id);
+                                            }
+                                            Err(fail_error) => log(&format!(
                                             "failure report on task #{id} rejected: {fail_error}"
                                         )),
+                                        }
                                     }
                                 }
+                                Err(fail_error) => log(&format!(
+                                    "failure report on task #{id} rejected: {fail_error}"
+                                )),
                             }
-                            Err(fail_error) => log(&format!(
-                                "failure report on task #{id} rejected: {fail_error}"
-                            )),
                         }
-                    }
-                    // Mail about tasks that were failed back is carried on by their
-                    // retry messages; anything else stays unread for the next turn.
-                    if messages
-                        .iter()
-                        .all(|m| m.task_id.is_some_and(|id| failed_back.contains(&id)))
-                    {
-                        if let Some(last) = messages.last() {
-                            used_through = last.seq;
-                        }
-                        if let Err(error) = mark_read(&bus) {
-                            log(&format!("could not mark mail read: {error}"));
-                        }
-                    }
-                    if consecutive_failures >= MAX_FAILED_TURNS {
-                        if let Err(pause_error) =
-                            pause_after_failures(&bus, &me, consecutive_failures, &error, &log)
+                        // Mail about tasks that were failed back is carried on by their
+                        // retry messages; anything else stays unread for the next turn.
+                        if messages
+                            .iter()
+                            .all(|m| m.task_id.is_some_and(|id| failed_back.contains(&id)))
                         {
-                            log(&format!("could not pause: {pause_error}"));
-                            sleep_interruptible(backoff(consecutive_failures), &options.stop);
+                            if let Some(last) = messages.last() {
+                                used_through = last.seq;
+                            }
+                            if let Err(error) = mark_read(&bus) {
+                                log(&format!("could not mark mail read: {error}"));
+                            }
                         }
-                        consecutive_failures = 0;
+                        if consecutive_failures >= MAX_FAILED_TURNS {
+                            if let Err(pause_error) =
+                                pause_after_failures(&bus, &me, consecutive_failures, &error, &log)
+                            {
+                                log(&format!("could not pause: {pause_error}"));
+                                sleep_interruptible(backoff(consecutive_failures), &options.stop);
+                            }
+                            consecutive_failures = 0;
+                            return Ok(Round::Next);
+                        }
+                        let delay = backoff(consecutive_failures);
+                        log(&format!("{error}; backing off {}s", delay / 1000));
+                        sleep_interruptible(delay, &options.stop);
                         return Ok(Round::Next);
                     }
-                    let delay = backoff(consecutive_failures);
-                    log(&format!("{error}; backing off {}s", delay / 1000));
-                    sleep_interruptible(delay, &options.stop);
-                    return Ok(Round::Next);
-                }
 
-                consecutive_failures = 0;
-                if let Some(last) = messages.last() {
-                    used_through = last.seq;
-                }
-                if let Err(error) = mark_read(&bus) {
-                    log(&format!("could not mark mail read: {error}"));
-                }
-                // Work queued during the turn announced itself to nobody. A managed agent
-                // claims it next round; an agent with bus tools sees it at its next wait's end.
-                backlog_due = managed;
-                if invocation.auto_report {
-                    let structured = normalized.structured.unwrap_or(serde_json::json!({}));
-                    for id in &report_ids {
-                        match bus.get_task(*id) {
-                            Ok(task) => {
-                                // A CLI that submitted through its own bus tools leaves nothing to report.
-                                if task.task.assignee.as_deref() != Some(me.agent_id.as_str())
-                                    || task.task.state != "claimed"
-                                {
-                                    continue;
-                                }
-                                if let Err(error) = bus.submit_task(&me, *id, SubmitInput {
+                    consecutive_failures = 0;
+                    if let Some(last) = messages.last() {
+                        used_through = last.seq;
+                    }
+                    if let Err(error) = mark_read(&bus) {
+                        log(&format!("could not mark mail read: {error}"));
+                    }
+                    // Work queued during the turn announced itself to nobody. A managed agent
+                    // claims it next round; an agent with bus tools sees it at its next wait's end.
+                    backlog_due = managed;
+                    if invocation.auto_report {
+                        let structured = normalized.structured.unwrap_or(serde_json::json!({}));
+                        for id in &report_ids {
+                            match bus.get_task(*id) {
+                                Ok(task) => {
+                                    // A CLI that submitted through its own bus tools leaves nothing to report.
+                                    if task.task.assignee.as_deref() != Some(me.agent_id.as_str())
+                                        || task.task.state != "claimed"
+                                    {
+                                        continue;
+                                    }
+                                    if let Err(error) = bus.submit_task(&me, *id, SubmitInput {
                                     summary: normalized.text.chars().take(20_000).collect(),
                                     details: Some(
                                         "Unverified CLI output, needs independent review. Auto-submitted by the supervisor; a successful exit does not verify the requested work.".to_string(),
@@ -1540,24 +1713,30 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                                 }) {
                                     log(&format!("auto-submit failed for task #{id}: {error}"));
                                 }
+                                }
+                                Err(error) => {
+                                    log(&format!("auto-submit failed for task #{id}: {error}"))
+                                }
                             }
-                            Err(error) => log(&format!("auto-submit failed for task #{id}: {error}")),
                         }
                     }
-                }
-                log(&format!(
-                    "turn complete in {} ms",
-                    process_result.duration_ms
-                ));
-                Ok(Round::Next)
-            }));
+                    log(&format!(
+                        "turn complete in {} ms",
+                        process_result.duration_ms
+                    ));
+                    Ok(Round::Next)
+                },
+            ));
             match outcome {
                 Ok(Ok(Round::Next)) => error_streak = 0,
                 Ok(Ok(Round::Stop)) => break,
                 Ok(Err(error)) => {
                     error_streak += 1;
                     let delay = backoff(error_streak);
-                    log(&format!("round failed: {error}; retrying in {}s", delay / 1000));
+                    log(&format!(
+                        "round failed: {error}; retrying in {}s",
+                        delay / 1000
+                    ));
                     sleep_interruptible(delay, &options.stop);
                 }
                 Err(panic) => {
@@ -1568,7 +1747,10 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                         .cloned()
                         .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
                         .unwrap_or_else(|| "unknown panic".into());
-                    log(&format!("round panicked: {what}; reopening the bus, retrying in {}s", delay / 1000));
+                    log(&format!(
+                        "round panicked: {what}; reopening the bus, retrying in {}s",
+                        delay / 1000
+                    ));
                     sleep_interruptible(delay, &options.stop);
                     // A panic can leave a transaction half open on this connection.
                     match Bus::open(Some(&options.db_path)) {
@@ -1595,12 +1777,12 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
     #[cfg(windows)]
     let acquired_lock = release.is_some();
     options.stop.store(true, Ordering::SeqCst);
-    if let Some(release) = release.take() {
-        release();
-    }
     #[cfg(windows)]
     if acquired_lock {
         let _ = fs::remove_file(&stop_file);
+    }
+    if let Some(release) = release.take() {
+        release();
     }
     log("supervisor stopped");
     result

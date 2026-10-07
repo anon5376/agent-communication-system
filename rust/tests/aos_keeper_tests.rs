@@ -2,8 +2,8 @@
 //! started again; one stopped on purpose is left alone. Only the stand-in CLI runs.
 
 use acs::aos::crew::{self, Paths};
-use acs::aos::keeper::{self, Watcher, MAX_RESTARTS};
 use acs::aos::ensure_operator;
+use acs::aos::keeper::{self, Watcher, MAX_RESTARTS};
 use acs::bus::Bus;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -152,7 +152,8 @@ fn the_watcher_gives_up_on_an_agent_that_keeps_dying() {
     let op = bus.identify(Some(acs::types::OPERATOR_ID)).unwrap();
     let mail = bus.inbox(&op, true, None).unwrap().messages;
     assert!(
-        mail.iter().any(|m| m.subject.starts_with("w1 keeps stopping")),
+        mail.iter()
+            .any(|m| m.subject.starts_with("w1 keeps stopping")),
         "{mail:?}"
     );
 }
@@ -180,7 +181,9 @@ fn autostart_files_name_the_watcher_and_keep_path() {
         Path::new("/srv/crew/.agent-bus/bus.db"),
         "/srv/crew/.local/bin:/usr/bin",
     );
-    assert!(unit.contains("ExecStart=\"/opt/aos/bin/aos\" --db \"/srv/crew/.agent-bus/bus.db\" watch"));
+    assert!(
+        unit.contains("ExecStart=\"/opt/aos/bin/aos\" --db \"/srv/crew/.agent-bus/bus.db\" watch")
+    );
     assert!(unit.contains("Environment=\"PATH=/srv/crew/.local/bin:/usr/bin\""));
     assert!(unit.contains("Restart=on-failure"));
     let plist = keeper::launchd_plist(
@@ -206,7 +209,9 @@ fn a_default_budget_is_given_once_and_off_stays_off() {
     // The operator turns it off: the next start does not put it back.
     let op = bus.identify(Some(acs::types::OPERATOR_ID)).unwrap();
     bus.set_budget(&op, "w1", None).unwrap();
-    assert!(crew::apply_default_budget(&bus, &paths, &ids).unwrap().is_empty());
+    assert!(crew::apply_default_budget(&bus, &paths, &ids)
+        .unwrap()
+        .is_empty());
     let agent = bus.get_agent("w1").unwrap().unwrap();
     assert!(agent.meta.get("budget").is_none());
 }

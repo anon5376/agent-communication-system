@@ -49,9 +49,22 @@ fn init_bus(dir: &std::path::Path) -> std::path::PathBuf {
 
 fn add_agent(db: &std::path::Path, id: &str, role: &str) {
     // Delegating needs manager authority; a "manager" role here stands for that.
-    let authority = if role == "manager" { "manager" } else { "worker" };
+    let authority = if role == "manager" {
+        "manager"
+    } else {
+        "worker"
+    };
     let out = Command::new(qagent())
-        .args(["agent", "add", id, "--role", role, "--authority", authority, "--db"])
+        .args([
+            "agent",
+            "add",
+            id,
+            "--role",
+            role,
+            "--authority",
+            authority,
+            "--db",
+        ])
         .arg(db)
         .output()
         .unwrap();

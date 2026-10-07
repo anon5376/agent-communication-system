@@ -448,7 +448,8 @@ impl Bus {
                 return Err(BusError::not_found(format!("unknown agent: {id}")));
             }
             let mut value = identity::stored_permissions_json(&bus.conn, &id)?;
-            let current = identity::parse_policy(value.get("policy").unwrap_or(&serde_json::Value::Null));
+            let current =
+                identity::parse_policy(value.get("policy").unwrap_or(&serde_json::Value::Null));
             if actor.authority != "operator" && identity::policy_widens(&current, &next) {
                 return Err(BusError::forbidden(format!(
                     "{id} may only narrow its own policy; ask the operator to widen it"
@@ -464,11 +465,19 @@ impl Bus {
                 value.insert("policy".into(), stored);
             }
             bus.conn
-                .prepare_cached("UPDATE identities SET permissions_json = ?, updated_ms = ? WHERE agent_id = ?")?
+                .prepare_cached(
+                    "UPDATE identities SET permissions_json = ?, updated_ms = ? WHERE agent_id = ?",
+                )?
                 .execute(params![serde_json::to_string(&value)?, now, id])?;
-            bus.event(&actor.agent_id, "agent_policy", "agent", &id, json!({
-                "policy": value.get("policy").cloned().unwrap_or(serde_json::Value::Null),
-            }))?;
+            bus.event(
+                &actor.agent_id,
+                "agent_policy",
+                "agent",
+                &id,
+                json!({
+                    "policy": value.get("policy").cloned().unwrap_or(serde_json::Value::Null),
+                }),
+            )?;
             Ok(identity::current_permissions(&bus.conn, &id)?.expect("identity checked above"))
         })
     }
@@ -1851,7 +1860,12 @@ impl Bus {
     /// only agents this one may assign and how deep under existing tasks it may create work.
     /// Mirror: assertMayDelegate in src/core/bus.ts on main (#29); the TypeScript copy on
     /// rust-port does not check delegation yet.
-    fn assert_may_delegate(&self, actor: &Identity, to: Option<&str>, parent_id: Option<i64>) -> Result<()> {
+    fn assert_may_delegate(
+        &self,
+        actor: &Identity,
+        to: Option<&str>,
+        parent_id: Option<i64>,
+    ) -> Result<()> {
         if actor.authority == "operator" {
             return Ok(());
         }
@@ -1872,9 +1886,11 @@ impl Bus {
                 )));
             }
         }
-        if let (true, Some(max), Some(parent_id)) =
-            (for_someone_else, permissions.max_delegation_depth, parent_id)
-        {
+        if let (true, Some(max), Some(parent_id)) = (
+            for_someone_else,
+            permissions.max_delegation_depth,
+            parent_id,
+        ) {
             let mut depth: i64 = 0;
             let mut next = Some(parent_id);
             while let Some(id) = next {

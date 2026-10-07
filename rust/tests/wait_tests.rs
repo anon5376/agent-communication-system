@@ -255,7 +255,11 @@ fn mail_or_an_open_task_landing_as_a_wait_starts_wakes_the_waiter() {
     })
     .unwrap();
     assert_eq!(mail.status, "mail");
-    assert!(started.elapsed() < Duration::from_secs(2), "woke after {:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "woke after {:?}",
+        started.elapsed()
+    );
     f.bus.inbox(&worker, false, None).unwrap();
 
     let started = Instant::now();
@@ -273,5 +277,9 @@ fn mail_or_an_open_task_landing_as_a_wait_starts_wakes_the_waiter() {
     })
     .unwrap();
     assert_eq!(task.status, "task");
-    assert!(started.elapsed() < Duration::from_secs(2), "woke after {:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "woke after {:?}",
+        started.elapsed()
+    );
 }

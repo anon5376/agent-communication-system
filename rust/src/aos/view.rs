@@ -1237,6 +1237,11 @@ fn agent_facts(f: &Frame, a: &AgentView, w: usize, max: usize) -> Vec<VLine> {
                 (None, None) => "stopped / c, then start".into(),
             },
         ));
+        if m.pid.is_some() {
+            if let Some(note) = &m.last_words {
+                v.push(lvs("last turn", trunc(note, w.saturating_sub(12))));
+            }
+        }
     }
     if let Some(why) = &a.paused {
         v.push(lvs(
@@ -2018,14 +2023,13 @@ pub fn crew(f: &Frame, ui: &Ui) -> Vec<VLine> {
                     seg(trunc(&notes.join(" / "), w.saturating_sub(11)), Role::Dim),
                 ]));
             }
-            if let (None, Some(last)) = (m.pid, &m.last_words) {
-                body.push(line(vec![
-                    seg(pad("", 11), Role::Plain),
-                    seg(
-                        trunc(&format!("last: {last}"), w.saturating_sub(11)),
-                        Role::Dim,
-                    ),
-                ]));
+            if let Some(last) = &m.last_words {
+                for diagnostic in wrap(&format!("last: {last}"), w.saturating_sub(11), 6) {
+                    body.push(line(vec![
+                        seg(pad("", 11), Role::Plain),
+                        seg(diagnostic, Role::Dim),
+                    ]));
+                }
             }
         }
     }

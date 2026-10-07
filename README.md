@@ -100,11 +100,13 @@ detecting tools and queuing a task do not themselves run a model.
    aos "Add a regression test for the empty input case"
    ```
 
-   This queues work; it does not prove any agent has claimed it. If no eligible crew
-   exists, configure one first. In the app: **Orchestration → Goals → Queue goal**.
-5. Explicitly start the configured agents with `aos start`, or use **Orchestration
-   → Agents** and approve the project. Some integrations need explicit unattended
-   execution approval. Read that prompt before proceeding.
+   This terminal run-goal may start the configured crew after project approval; if
+   no eligible member can take it, the goal remains queued. For a queue-only flow,
+   use `qagent task add "..."` or the app's **Orchestration → Goals → Queue goal**;
+   neither starts agents by itself.
+5. For queue-only flows, explicitly start the configured agents with `aos start`, or
+   use **Orchestration → Agents** and approve the project. Some integrations need
+   explicit unattended execution approval. Read that prompt before proceeding.
 6. Review the submission against its acceptance criteria before accepting it.
    Use the AOS review gate, **Communication → Needs review**, or `qagent task show N`.
    A successful process exit and plain CLI output are not verification of the work.

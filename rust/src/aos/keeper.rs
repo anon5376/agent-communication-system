@@ -105,7 +105,10 @@ impl Watcher {
         }
         let waiting = down.len();
         let Some(dir) = crew::crew_workdir(&self.paths) else {
-            return self.hold("crew has no working folder on record; nothing restarted".into(), waiting);
+            return self.hold(
+                "crew has no working folder on record; nothing restarted".into(),
+                waiting,
+            );
         };
         // The same checks aos start makes: never in ~ or /, only in a folder the operator trusted.
         if let Some(why) = crew::unsafe_workdir(&dir) {
@@ -417,13 +420,22 @@ fn autostart_inner(db_path: &Path, action: &str) -> Result<Vec<String>> {
                 let log = paths.home.join("logs").join("aos-watch.out");
                 fs::write(&file, launchd_plist(&exe, db_path, &path_env, &log))?;
                 let target = launchd_target();
-                let _ = run_quiet("launchctl", &["bootout", &target, &file.display().to_string()]);
-                run_quiet("launchctl", &["bootstrap", &target, &file.display().to_string()])
-                    .or_else(|_| run_quiet("launchctl", &["load", "-w", &file.display().to_string()]))
-                    .map_err(|e| {
-                        let _ = fs::remove_file(&file);
-                        BusError::invalid(format!("launchctl refused {} ({e}), so autostart is off", file.display()))
-                    })?;
+                let _ = run_quiet(
+                    "launchctl",
+                    &["bootout", &target, &file.display().to_string()],
+                );
+                run_quiet(
+                    "launchctl",
+                    &["bootstrap", &target, &file.display().to_string()],
+                )
+                .or_else(|_| run_quiet("launchctl", &["load", "-w", &file.display().to_string()]))
+                .map_err(|e| {
+                    let _ = fs::remove_file(&file);
+                    BusError::invalid(format!(
+                        "launchctl refused {} ({e}), so autostart is off",
+                        file.display()
+                    ))
+                })?;
                 lines.push(format!("ok autostart on / {}", crew::Paths::show(&file)));
                 lines.push("aos watch runs at login and restarts any agent that went down without aos stop".into());
             } else {
@@ -441,14 +453,19 @@ fn autostart_inner(db_path: &Path, action: &str) -> Result<Vec<String>> {
                     })?;
                 lines.push(format!("ok autostart on / {}", crew::Paths::show(&file)));
                 lines.push("aos watch runs at login and restarts any agent that went down without aos stop".into());
-                lines.push("to have it run at boot before you log in: loginctl enable-linger".into());
+                lines.push(
+                    "to have it run at boot before you log in: loginctl enable-linger".into(),
+                );
             }
             Ok(lines)
         }
         "off" => {
             if macos {
                 let target = launchd_target();
-                let _ = run_quiet("launchctl", &["bootout", &target, &file.display().to_string()]);
+                let _ = run_quiet(
+                    "launchctl",
+                    &["bootout", &target, &file.display().to_string()],
+                );
             } else {
                 let _ = run_quiet("systemctl", &["--user", "disable", "--now", UNIT_NAME]);
             }

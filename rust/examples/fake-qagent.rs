@@ -25,7 +25,10 @@ fn main() {
         eprintln!("fake-qagent: missing supervise <id>");
         std::process::exit(2);
     };
-    let home = Path::new(&db).parent().expect("db has a parent").to_path_buf();
+    let home = Path::new(&db)
+        .parent()
+        .expect("db has a parent")
+        .to_path_buf();
     let supervisors = home.join("supervisors");
     std::fs::create_dir_all(&supervisors).expect("supervisors dir");
     let pid_file = supervisors.join(format!("{id}.pid"));

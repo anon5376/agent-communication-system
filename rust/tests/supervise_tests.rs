@@ -651,7 +651,9 @@ fn supervise_pauses_after_repeated_failures_and_keeps_the_mail() {
             .unwrap()
             .and_then(|a| acs::control::paused(&a.meta))
     };
-    wait_for(Duration::from_secs(30), "failure pause", || paused().is_some());
+    wait_for(Duration::from_secs(30), "failure pause", || {
+        paused().is_some()
+    });
     let reason = paused().unwrap().reason;
     assert!(
         reason.starts_with(&format!("{MAX_FAILED_TURNS} turns failed in a row")),
@@ -667,6 +669,11 @@ fn supervise_pauses_after_repeated_failures_and_keeps_the_mail() {
         serde_json::from_str(&fs::read_to_string(e.home.join("sessions/w4.json")).unwrap())
             .unwrap();
     assert_eq!(session["turns"].as_i64(), Some(MAX_FAILED_TURNS as i64));
+    assert_eq!(session["failure"]["consecutiveFailures"], MAX_FAILED_TURNS);
+    assert!(session["failure"]["nextRetryMs"].is_null());
+    assert!(acs::supervisor::runtime_note(&e.home, "w4")
+        .unwrap()
+        .contains("crashing"));
     // Paused, no further turns.
     std::thread::sleep(Duration::from_millis(1_500));
     let session: serde_json::Value =
@@ -676,8 +683,106 @@ fn supervise_pauses_after_repeated_failures_and_keeps_the_mail() {
     // The message no turn managed to handle is still unread.
     let w4 = e.bus.identify(Some("w4")).unwrap();
     let unread = e.bus.inbox(&w4, true, None).unwrap().messages;
-    assert!(unread.iter().any(|m| m.subject == "look at this"), "{unread:?}");
+    assert!(
+        unread.iter().any(|m| m.subject == "look at this"),
+        "{unread:?}"
+    );
 
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap().unwrap();
+}
+
+#[test]
+fn supervise_reports_one_failure_and_clears_it_after_success() {
+    let e = e2e("w6", "fail");
+    let config_path = e.workdir.join("agent-bus.config.json");
+    let start_supervisor = |stop: Arc<AtomicBool>, config_path: PathBuf| {
+        let db_path = e.home.join("bus.db");
+        let workdir = e.workdir.display().to_string();
+        std::thread::spawn(move || {
+            supervise(SuperviseOptions {
+                agent_id: "w6".to_string(),
+                workdir,
+                db_path,
+                config_path: Some(config_path),
+                stop,
+                wait_ms: Some(1_000),
+                retry_base_ms: Some(2_000),
+                fake_harness_path: Some("fake-harness".to_string()),
+                qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
+                log: Some(Box::new(|_| {})),
+            })
+        })
+    };
+    e.bus
+        .send(
+            &e.operator,
+            SendInput {
+                to: "w6".into(),
+                subject: Some("diagnose one turn".into()),
+                body: "please".into(),
+                msg_type: None,
+                thread: None,
+                task_id: None,
+                refs: None,
+                requires_ack: false,
+            },
+        )
+        .unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = start_supervisor(Arc::clone(&stop), config_path.clone());
+    let session_path = e.home.join("sessions/w6.json");
+    wait_for(
+        Duration::from_secs(15),
+        "single failure diagnostics",
+        || {
+            fs::read_to_string(&session_path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .is_some_and(|session| session["failure"]["consecutiveFailures"] == 1)
+        },
+    );
+    let session: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&session_path).unwrap()).unwrap();
+    assert_eq!(session["turns"].as_i64(), Some(1));
+    assert_eq!(session["failure"]["exitCode"].as_i64(), Some(23));
+    assert_eq!(session["failure"]["backoffMs"].as_u64(), Some(2_000));
+    let next_retry = session["failure"]["nextRetryMs"].as_i64().unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    assert!(
+        next_retry > now,
+        "next retry {next_retry} should be after {now}"
+    );
+    let note = acs::supervisor::runtime_note(&e.home, "w6").unwrap();
+    assert!(note.contains("harness exited 23"), "{note}");
+    assert!(note.contains("1 consecutive failures"), "{note}");
+    assert!(note.contains("backoff 2s"), "{note}");
+    assert!(note.contains("retry eligible after"), "{note}");
+
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap().unwrap();
+    write_config(&e.workdir, &[("w6", "fake-model")], "");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = start_supervisor(Arc::clone(&stop), config_path);
+    wait_for(
+        Duration::from_secs(15),
+        "successful turn clears diagnostics",
+        || {
+            fs::read_to_string(&session_path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .is_some_and(|session| {
+                    session["turns"].as_i64().unwrap_or_default() >= 2
+                        && session["failure"].is_null()
+                })
+        },
+    );
+    assert!(acs::supervisor::runtime_note(&e.home, "w6").is_none());
     stop.store(true, Ordering::SeqCst);
     handle.join().unwrap().unwrap();
 }
@@ -706,11 +811,19 @@ fn supervise_does_not_replay_a_turn_whose_usage_cannot_be_saved() {
                 retry_base_ms: Some(20),
                 fake_harness_path: Some("fake-harness".to_string()),
                 qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
-                log: Some(Box::new(move |line| logs.lock().unwrap().push(line.to_string()))),
+                log: Some(Box::new(move |line| {
+                    logs.lock().unwrap().push(line.to_string())
+                })),
             })
         })
     };
-    let turns = || logs.lock().unwrap().iter().filter(|l| l.contains("] turn complete")).count();
+    let turns = || {
+        logs.lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains("] turn complete"))
+            .count()
+    };
     let w5 = e.bus.identify(Some("w5")).unwrap();
     for n in 1..=MAX_FAILED_TURNS as usize {
         e.bus
@@ -730,7 +843,11 @@ fn supervise_does_not_replay_a_turn_whose_usage_cannot_be_saved() {
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(20);
         while turns() < n {
-            assert!(Instant::now() < deadline, "turn {n}: {:?}", logs.lock().unwrap());
+            assert!(
+                Instant::now() < deadline,
+                "turn {n}: {:?}",
+                logs.lock().unwrap()
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
         wait_for(Duration::from_secs(5), "mail read", || {
@@ -742,8 +859,16 @@ fn supervise_does_not_replay_a_turn_whose_usage_cannot_be_saved() {
             assert_eq!(turns(), 1);
         }
     }
-    assert!(logs.lock().unwrap().iter().any(|l| l.contains("could not save usage")));
-    let paused = e.bus.get_agent("w5").unwrap().and_then(|a| acs::control::paused(&a.meta));
+    assert!(logs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|l| l.contains("could not save usage")));
+    let paused = e
+        .bus
+        .get_agent("w5")
+        .unwrap()
+        .and_then(|a| acs::control::paused(&a.meta));
     let reason = paused.expect("paused after unsaved turns").reason;
     // The reason is cut to 200 chars; a long Windows temp path can push the
     // "budget cannot be enforced" tail off the end.
@@ -759,7 +884,12 @@ fn supervise_does_not_replay_a_turn_whose_usage_cannot_be_saved() {
 #[test]
 fn guard_keeps_the_agents_own_login_and_blocks_explicit_push_urls() {
     let mut env: HashMap<String, String> = HashMap::new();
-    for key in ["GH_TOKEN", "AWS_ACCESS_KEY_ID", "GOOGLE_APPLICATION_CREDENTIALS", "NPM_TOKEN"] {
+    for key in [
+        "GH_TOKEN",
+        "AWS_ACCESS_KEY_ID",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "NPM_TOKEN",
+    ] {
         env.insert(key.into(), "x".into());
     }
     let tmp = std::env::temp_dir();
@@ -794,15 +924,34 @@ fn guard_keeps_the_agents_own_login_and_blocks_explicit_push_urls() {
         c.output().unwrap()
     };
     let run = |args: &[&str]| {
-        assert!(std::process::Command::new("git").args(args).current_dir(&dir).status().unwrap().success())
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success())
     };
     run(&["init", "-q", "--bare", "fetch.git"]);
     run(&["init", "-q", "--bare", "push.git"]);
     run(&["clone", "-q", "fetch.git", "work"]);
     let push_url = dir.join("push.git").display().to_string();
-    assert!(git(&["remote", "set-url", "--push", "origin", &push_url], None).status.success());
+    assert!(
+        git(&["remote", "set-url", "--push", "origin", &push_url], None)
+            .status
+            .success()
+    );
     assert!(git(
-        &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "x"],
+        &[
+            "-c",
+            "user.email=a@b",
+            "-c",
+            "user.name=a",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x"
+        ],
         None
     )
     .status
@@ -810,9 +959,16 @@ fn guard_keeps_the_agents_own_login_and_blocks_explicit_push_urls() {
     let mut guarded_env: HashMap<String, String> = std::env::vars().collect();
     guard_environment(&mut guarded_env, "claude", &dir.join("work"));
     let pushed = git(&["push", "-q", "origin", "HEAD"], Some(&guarded_env));
-    assert!(!pushed.status.success(), "push to the pushurl must be refused");
-    assert!(git(&["fetch", "-q", "origin"], Some(&guarded_env)).status.success());
-    assert!(git(&["push", "-q", "origin", "HEAD"], None).status.success());
+    assert!(
+        !pushed.status.success(),
+        "push to the pushurl must be refused"
+    );
+    assert!(git(&["fetch", "-q", "origin"], Some(&guarded_env))
+        .status
+        .success());
+    assert!(git(&["push", "-q", "origin", "HEAD"], None)
+        .status
+        .success());
 }
 
 #[test]
@@ -837,7 +993,9 @@ fn supervise_survives_a_locked_bus() {
                 retry_base_ms: Some(50),
                 fake_harness_path: Some("fake-harness".to_string()),
                 qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
-                log: Some(Box::new(move |line| logs.lock().unwrap().push(line.to_string()))),
+                log: Some(Box::new(move |line| {
+                    logs.lock().unwrap().push(line.to_string())
+                })),
             })
         })
     };
@@ -856,7 +1014,10 @@ fn supervise_survives_a_locked_bus() {
     blocker.busy_timeout(Duration::from_secs(5)).unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     wait_for(Duration::from_secs(20), "a failed round", || {
-        logs.lock().unwrap().iter().any(|l| l.contains("round failed"))
+        logs.lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("round failed"))
     });
     assert!(!handle.is_finished(), "supervisor exited on a locked bus");
     blocker.execute_batch("COMMIT").unwrap();
@@ -889,7 +1050,10 @@ fn supervisor_alive_checks_the_command_line() {
     // A live process that is not a supervisor (a reused pid after a reboot).
     #[cfg(unix)]
     {
-        let mut other = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let mut other = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
         let pid = other.id() as i32;
         assert!(!supervisor_alive(pid, "w1"));
         other.kill().unwrap();
@@ -924,10 +1088,19 @@ fn guard_drops_credentials_and_blocks_git_push_only() {
     guard_environment(&mut env, "claude", &std::env::temp_dir());
     assert!(!env.contains_key("GITHUB_TOKEN"));
     assert!(!env.contains_key("SSH_AUTH_SOCK"));
-    assert_eq!(env.get("ANTHROPIC_API_KEY").map(String::as_str), Some("kept"));
+    assert_eq!(
+        env.get("ANTHROPIC_API_KEY").map(String::as_str),
+        Some("kept")
+    );
     assert_eq!(env.get("GIT_CONFIG_COUNT").map(String::as_str), Some("2"));
-    assert_eq!(env.get("GIT_CONFIG_KEY_0").map(String::as_str), Some("user.name"));
-    assert_eq!(env.get("GIT_TERMINAL_PROMPT").map(String::as_str), Some("0"));
+    assert_eq!(
+        env.get("GIT_CONFIG_KEY_0").map(String::as_str),
+        Some("user.name")
+    );
+    assert_eq!(
+        env.get("GIT_TERMINAL_PROMPT").map(String::as_str),
+        Some("0")
+    );
 
     // A real repository: push is refused, fetch still works.
     let dir = fresh_dir("guard-git");
@@ -939,11 +1112,25 @@ fn guard_drops_credentials_and_blocks_git_push_only() {
         }
         c.output().unwrap()
     };
-    assert!(git(&["init", "-q", "--bare", "remote.git"], &dir, None).status.success());
-    assert!(git(&["clone", "-q", "remote.git", "work"], &dir, None).status.success());
+    assert!(git(&["init", "-q", "--bare", "remote.git"], &dir, None)
+        .status
+        .success());
+    assert!(git(&["clone", "-q", "remote.git", "work"], &dir, None)
+        .status
+        .success());
     let work = dir.join("work");
     assert!(git(
-        &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "x"],
+        &[
+            "-c",
+            "user.email=a@b",
+            "-c",
+            "user.name=a",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x"
+        ],
         &work,
         None
     )
@@ -952,9 +1139,13 @@ fn guard_drops_credentials_and_blocks_git_push_only() {
     let pushed = git(&["push", "-q", "origin", "HEAD"], &work, Some(&env));
     assert!(!pushed.status.success(), "push must be refused");
     assert!(String::from_utf8_lossy(&pushed.stderr).contains("aos-blocked-git-push"));
-    assert!(git(&["fetch", "-q", "origin"], &work, Some(&env)).status.success());
+    assert!(git(&["fetch", "-q", "origin"], &work, Some(&env))
+        .status
+        .success());
     // Unguarded, the same push goes through.
-    assert!(git(&["push", "-q", "origin", "HEAD"], &work, None).status.success());
+    assert!(git(&["push", "-q", "origin", "HEAD"], &work, None)
+        .status
+        .success());
 }
 
 #[test]
@@ -988,8 +1179,14 @@ fn guard_is_on_unless_the_agent_turns_it_off() {
     let config = load_config(&config_path).unwrap();
     let agent = fixture(&config, "c1");
     assert!(!guarded(&agent));
-    let context = acs::adapters::AdapterContext { agent: &agent, ..context };
-    assert!(!(claude.build)(&context).args.iter().any(|a| a == "--disallowedTools"));
+    let context = acs::adapters::AdapterContext {
+        agent: &agent,
+        ..context
+    };
+    assert!(!(claude.build)(&context)
+        .args
+        .iter()
+        .any(|a| a == "--disallowedTools"));
 }
 
 // ------------------------------------------------- backlog without fresh mail
@@ -998,7 +1195,10 @@ fn spawn_supervisor(
     e: &E2E,
     agent_id: &str,
     wait_ms: u64,
-) -> (Arc<AtomicBool>, std::thread::JoinHandle<acs::error::Result<()>>) {
+) -> (
+    Arc<AtomicBool>,
+    std::thread::JoinHandle<acs::error::Result<()>>,
+) {
     let stop = Arc::new(AtomicBool::new(false));
     let handle = {
         let stop = Arc::clone(&stop);
@@ -1065,12 +1265,16 @@ fn supervise_works_backlog_queued_while_paused_after_resume() {
     let id = unassigned_task(&e, "queued while paused");
     std::thread::sleep(Duration::from_millis(500));
     e.bus.resume_agent(&e.operator, "w1").unwrap();
-    wait_for(Duration::from_secs(15), "task queued while paused submitted", || {
-        e.bus
-            .get_task(id)
-            .map(|t| t.task.state == "submitted")
-            .unwrap_or(false)
-    });
+    wait_for(
+        Duration::from_secs(15),
+        "task queued while paused submitted",
+        || {
+            e.bus
+                .get_task(id)
+                .map(|t| t.task.state == "submitted")
+                .unwrap_or(false)
+        },
+    );
     stop.store(true, Ordering::SeqCst);
     handle.join().unwrap().unwrap();
 }
@@ -1098,7 +1302,9 @@ fn supervise_refuses_worktree_isolation_instead_of_using_the_shared_checkout() {
     stop.store(true, Ordering::SeqCst);
     let error = handle.join().unwrap().unwrap_err();
     assert!(
-        error.message.contains("worktree isolation is not available"),
+        error
+            .message
+            .contains("worktree isolation is not available"),
         "{}",
         error.message
     );
@@ -1111,13 +1317,21 @@ fn task_claim_with_worktree_fails_without_claiming() {
     let e = e2e("w1", "");
     let id = unassigned_task(&e, "asked for a worktree");
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_qagent"))
-        .args(["--db", &e.home.join("bus.db").display().to_string(), "--as", "w1"])
+        .args([
+            "--db",
+            &e.home.join("bus.db").display().to_string(),
+            "--as",
+            "w1",
+        ])
         .args(["task", "claim", "--worktree", &id.to_string()])
         .output()
         .unwrap();
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("worktree isolation is not available"), "{stderr}");
+    assert!(
+        stderr.contains("worktree isolation is not available"),
+        "{stderr}"
+    );
     assert_eq!(e.bus.get_task(id).unwrap().task.state, "open");
 }
 
@@ -1142,8 +1356,12 @@ fn simultaneous_supervisors_for_one_agent_leave_exactly_one_running() {
                 std::thread::spawn(move || {
                     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_qagent"));
                     command
-                        .arg("--db").arg(&db).args(["--as", "w1", "supervise", "w1"])
-                        .arg(&workdir).arg("--config").arg(&config)
+                        .arg("--db")
+                        .arg(&db)
+                        .args(["--as", "w1", "supervise", "w1"])
+                        .arg(&workdir)
+                        .arg("--config")
+                        .arg(&config)
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::piped());
                     barrier.wait();
@@ -1157,7 +1375,12 @@ fn simultaneous_supervisors_for_one_agent_leave_exactly_one_running() {
         // owners never exit, and fail the count below.
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline
-            && children.iter_mut().map(|c| c.try_wait().unwrap().is_none()).filter(|alive| *alive).count() > 1
+            && children
+                .iter_mut()
+                .map(|c| c.try_wait().unwrap().is_none())
+                .filter(|alive| *alive)
+                .count()
+                > 1
         {
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -1229,8 +1452,8 @@ fn failed_supervisor_start_preserves_an_existing_stop_request() {
     );
 }
 
-#[cfg(windows)]
 #[test]
+#[allow(clippy::zombie_processes)]
 fn harness_output_inheritor_helper() {
     match std::env::var("ACS_TEST_PIPE_MODE").as_deref() {
         Ok("parent") => {
@@ -1245,9 +1468,8 @@ fn harness_output_inheritor_helper() {
     }
 }
 
-#[cfg(windows)]
 #[test]
-fn harness_completion_terminates_descendants_holding_output_pipes() {
+fn harness_completion_does_not_wait_for_descendants_holding_output_pipes() {
     let executable = std::env::current_exe().unwrap();
     let args = vec![
         "--exact".to_string(),
@@ -1453,17 +1675,24 @@ fn supervise_stops_new_turns_once_the_configuration_token_budget_is_used() {
                 retry_base_ms: None,
                 fake_harness_path: Some("fake-harness".to_string()),
                 qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
-                log: Some(Box::new(move |line| logs.lock().unwrap().push(line.to_string()))),
+                log: Some(Box::new(move |line| {
+                    logs.lock().unwrap().push(line.to_string())
+                })),
             })
         })
     };
     let first = unassigned_task(&e, "first");
     wait_for(Duration::from_secs(15), "first task submitted", || {
-        e.bus.get_task(first).is_ok_and(|t| t.task.state == "submitted")
+        e.bus
+            .get_task(first)
+            .is_ok_and(|t| t.task.state == "submitted")
     });
     let second = unassigned_task(&e, "second");
     wait_for(Duration::from_secs(10), "the budget notice", || {
-        logs.lock().unwrap().iter().any(|l| l.contains("budget reached (") && l.contains("reported tokens used"))
+        logs.lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("budget reached (") && l.contains("reported tokens used"))
     });
     std::thread::sleep(Duration::from_millis(1_000));
     assert_eq!(e.bus.get_task(second).unwrap().task.state, "open");
@@ -1483,7 +1712,9 @@ fn supervise_refuses_a_dollar_budget_on_a_cli_that_reports_no_usage() {
     stop.store(true, Ordering::SeqCst);
     let error = handle.join().unwrap().unwrap_err();
     assert!(
-        error.message.contains("reports no usage, so the budget could never be counted"),
+        error
+            .message
+            .contains("reports no usage, so the budget could never be counted"),
         "{}",
         error.message
     );
@@ -1495,7 +1726,8 @@ fn supervise_offers_no_turn_to_an_agent_already_at_its_claim_limit() {
     set_constraint(&e, "maxConcurrentTasks", serde_json::json!(1));
     // A CLI with bus tools: the supervisor offers it open work instead of claiming for it.
     let path = e.workdir.join("agent-bus.config.json");
-    let mut config: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     config["harnesses"]["fake-harness"]["features"]["mcp"] = serde_json::json!(true);
     fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
     let held = e
@@ -1532,7 +1764,9 @@ fn supervise_offers_no_turn_to_an_agent_already_at_its_claim_limit() {
                 retry_base_ms: None,
                 fake_harness_path: Some("fake-harness".to_string()),
                 qagent_bin: Some(env!("CARGO_BIN_EXE_qagent").to_string()),
-                log: Some(Box::new(move |line| logs.lock().unwrap().push(line.to_string()))),
+                log: Some(Box::new(move |line| {
+                    logs.lock().unwrap().push(line.to_string())
+                })),
             })
         })
     };
@@ -1540,7 +1774,17 @@ fn supervise_offers_no_turn_to_an_agent_already_at_its_claim_limit() {
     std::thread::sleep(Duration::from_millis(2_500));
     stop.store(true, Ordering::SeqCst);
     handle.join().unwrap().unwrap();
-    let turns = logs.lock().unwrap().iter().filter(|l| l.contains("turn complete")).count();
-    assert_eq!(turns, 0, "turns started while at the claim limit: {:?}", logs.lock().unwrap());
+    let turns = logs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|l| l.contains("turn complete"))
+        .count();
+    assert_eq!(
+        turns,
+        0,
+        "turns started while at the claim limit: {:?}",
+        logs.lock().unwrap()
+    );
     assert_eq!(e.bus.get_task(other).unwrap().task.state, "open");
 }

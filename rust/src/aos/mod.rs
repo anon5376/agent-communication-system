@@ -2217,7 +2217,10 @@ pub fn main() -> i32 {
     }
     let demo = words.first().is_some_and(|a| a == "demo");
     let db_flag = flag(&argv, "--db");
-    if matches!(words.first().map(String::as_str), Some("watch") | Some("autostart")) {
+    if matches!(
+        words.first().map(String::as_str),
+        Some("watch") | Some("autostart")
+    ) {
         let db_path =
             crate::db::resolve_db_path_with(db_flag.as_deref(), |name| std::env::var(name).ok());
         if words[0] == "autostart" {
@@ -2226,7 +2229,8 @@ pub fn main() -> i32 {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
             let stop = std::sync::Arc::clone(&stop);
-            let _ = ctrlc::set_handler(move || stop.store(true, std::sync::atomic::Ordering::SeqCst));
+            let _ =
+                ctrlc::set_handler(move || stop.store(true, std::sync::atomic::Ordering::SeqCst));
         }
         return keeper::watch(&db_path, stop);
     }

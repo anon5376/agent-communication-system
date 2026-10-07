@@ -1045,7 +1045,10 @@ fn start_goal_rejects_malformed_crew_before_creating_a_task() {
     );
     assert_eq!(fail(&reply, code)["code"], "invalid");
     let bus = Bus::open(Some(&db)).unwrap();
-    assert!(bus.list_tasks(ListTasksInput::default()).unwrap().is_empty());
+    assert!(bus
+        .list_tasks(ListTasksInput::default())
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -1061,7 +1064,7 @@ fn start_goal_rejects_disabled_crew_target_but_allows_external_bus_agent() {
     let mut raw: Value =
         serde_json::from_str(&std::fs::read_to_string(paths.crew()).unwrap()).unwrap();
     raw["agents"]["builder"]["enabled"] = json!(false);
-    std::fs::write(&paths.crew(), serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+    std::fs::write(paths.crew(), serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
 
     let (reply, code) = call(
         &db,
@@ -1069,11 +1072,10 @@ fn start_goal_rejects_disabled_crew_target_but_allows_external_bus_agent() {
         json!({"mission": "fix", "goal": "ship safely", "to": "builder"}),
     );
     assert_eq!(fail(&reply, code)["code"], "invalid");
-    assert!(
-        bus.list_tasks(ListTasksInput::default())
-            .unwrap()
-            .is_empty()
-    );
+    assert!(bus
+        .list_tasks(ListTasksInput::default())
+        .unwrap()
+        .is_empty());
 
     let (reply, code) = call(
         &db,
@@ -1082,7 +1084,14 @@ fn start_goal_rejects_disabled_crew_target_but_allows_external_bus_agent() {
     );
     let data = ok(&reply, code);
     assert_eq!(data["taskState"], "open");
-    assert_eq!(bus.get_task(data["taskId"].as_i64().unwrap()).unwrap().task.assignee.as_deref(), Some("external-worker"));
+    assert_eq!(
+        bus.get_task(data["taskId"].as_i64().unwrap())
+            .unwrap()
+            .task
+            .assignee
+            .as_deref(),
+        Some("external-worker")
+    );
 }
 
 #[test]

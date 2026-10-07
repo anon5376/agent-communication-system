@@ -15,11 +15,19 @@ const V3: Migration = Migration {
 };
 
 fn baseline() -> Migration {
-    Migration { version: 1, name: "baseline", sql: BASELINE }
+    Migration {
+        version: 1,
+        name: "baseline",
+        sql: BASELINE,
+    }
 }
 
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("acs-schema-{tag}-{}-{}", std::process::id(), rand::random::<u32>()));
+    let dir = std::env::temp_dir().join(format!(
+        "acs-schema-{tag}-{}-{}",
+        std::process::id(),
+        rand::random::<u32>()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     dir.join("bus.db")
 }
@@ -37,7 +45,10 @@ fn populate(conn: &Connection) {
 fn counts(conn: &Connection) -> Vec<i64> {
     ["agents", "tasks", "messages", "events"]
         .iter()
-        .map(|t| conn.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0)).unwrap())
+        .map(|t| {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0))
+                .unwrap()
+        })
         .collect()
 }
 
@@ -45,7 +56,10 @@ fn schema_rows(conn: &Connection) -> Vec<String> {
     let mut stmt = conn
         .prepare("SELECT name || '|' || COALESCE(sql, '') FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name <> 'meta' ORDER BY name")
         .unwrap();
-    stmt.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+    stmt.query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
 }
 
 #[test]
@@ -57,13 +71,23 @@ fn migrations_match_the_schema_directory() {
         .filter(|f| f.ends_with(".sql"))
         .collect();
     files.sort();
-    assert_eq!(files.len(), MIGRATIONS.len(), "schema/ and MIGRATIONS drifted: {files:?}");
+    assert_eq!(
+        files.len(),
+        MIGRATIONS.len(),
+        "schema/ and MIGRATIONS drifted: {files:?}"
+    );
     for (index, migration) in MIGRATIONS.iter().enumerate() {
         assert_eq!(migration.version as usize, index + 1);
-        assert_eq!(files[index], format!("{:03}-{}.sql", migration.version, migration.name));
+        assert_eq!(
+            files[index],
+            format!("{:03}-{}.sql", migration.version, migration.name)
+        );
         if index > 0 {
             let sql = migration.sql.to_uppercase();
-            assert!(!sql.contains("DROP") && !sql.contains("RENAME"), "migrations must be additive");
+            assert!(
+                !sql.contains("DROP") && !sql.contains("RENAME"),
+                "migrations must be additive"
+            );
         }
     }
 }
@@ -72,7 +96,10 @@ fn migrations_match_the_schema_directory() {
 fn fresh_open_carries_latest_version() {
     let path = scratch("fresh");
     let conn = open_database(&path).unwrap();
-    assert_eq!(current_schema_version(&conn).unwrap(), MIGRATIONS.len() as u32);
+    assert_eq!(
+        current_schema_version(&conn).unwrap(),
+        MIGRATIONS.len() as u32
+    );
 }
 
 #[test]
@@ -80,7 +107,9 @@ fn legacy_v1_database_opens_unchanged() {
     let path = scratch("legacy");
     let legacy = Connection::open(&path).unwrap();
     legacy.execute_batch(BASELINE).unwrap();
-    legacy.execute_batch("INSERT INTO meta(key, value) VALUES('schema_version', '1')").unwrap();
+    legacy
+        .execute_batch("INSERT INTO meta(key, value) VALUES('schema_version', '1')")
+        .unwrap();
     populate(&legacy);
     let (before, schema) = (counts(&legacy), schema_rows(&legacy));
     drop(legacy);
@@ -99,7 +128,10 @@ fn markerless_database_is_adopted() {
     let before = counts(&legacy);
     drop(legacy);
     let conn = open_database(&path).unwrap();
-    assert_eq!(current_schema_version(&conn).unwrap(), MIGRATIONS.len() as u32);
+    assert_eq!(
+        current_schema_version(&conn).unwrap(),
+        MIGRATIONS.len() as u32
+    );
     assert_eq!(counts(&conn), before);
 }
 
@@ -118,7 +150,9 @@ fn every_prior_version_migrates_forward_keeping_rows() {
         migrate_with(&conn, "t", &chain).unwrap();
         assert_eq!(current_schema_version(&conn).unwrap(), 3);
         assert_eq!(counts(&conn), before);
-        let cost: f64 = conn.query_row("SELECT cost_usd FROM tasks", [], |r| r.get(0)).unwrap();
+        let cost: f64 = conn
+            .query_row("SELECT cost_usd FROM tasks", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(cost, 0.0);
         migrate_with(&conn, "t", &chain).unwrap();
         assert_eq!(current_schema_version(&conn).unwrap(), 3);
@@ -131,11 +165,19 @@ fn newer_database_is_refused_without_a_write() {
     let conn = Connection::open(&path).unwrap();
     migrate_with(&conn, "t", &[baseline(), V2, V3]).unwrap();
     populate(&conn);
-    conn.execute("UPDATE meta SET value = '999' WHERE key = 'schema_version'", []).unwrap();
+    conn.execute(
+        "UPDATE meta SET value = '999' WHERE key = 'schema_version'",
+        [],
+    )
+    .unwrap();
     let before = counts(&conn);
     drop(conn);
     let error = open_database(&path).unwrap_err();
-    assert!(error.message.contains("upgrade qagent"), "{}", error.message);
+    assert!(
+        error.message.contains("upgrade qagent"),
+        "{}",
+        error.message
+    );
     let after = Connection::open(&path).unwrap();
     assert_eq!(current_schema_version(&after).unwrap(), 999);
     assert_eq!(counts(&after), before);
@@ -148,11 +190,18 @@ fn unreadable_marker_is_refused_not_replaced() {
     let path = scratch("garbage");
     let conn = Connection::open(&path).unwrap();
     conn.execute_batch(BASELINE).unwrap();
-    conn.execute_batch("INSERT INTO meta(key, value) VALUES('schema_version', 'banana')").unwrap();
+    conn.execute_batch("INSERT INTO meta(key, value) VALUES('schema_version', 'banana')")
+        .unwrap();
     drop(conn);
     assert!(open_database(&path).is_err());
     let after = Connection::open(&path).unwrap();
-    let value: String = after.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap();
+    let value: String = after
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(value, "banana");
 }
 

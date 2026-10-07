@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import preact from "@preact/preset-vite";
 
 // Vite dev/build config for the Tauri frontend. The dev server is only used by

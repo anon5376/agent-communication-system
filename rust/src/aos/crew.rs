@@ -1753,7 +1753,7 @@ pub struct MemberInfo {
     pub cli: String,
     pub description: String,
     pub pid: Option<i32>,
-    /// When stopped: the last line its supervisor wrote, if any.
+    /// The last failure, or the final log line when stopped.
     pub last_words: Option<String>,
 }
 
@@ -1816,9 +1816,11 @@ pub fn gather(paths: &Paths, found: Vec<Found>) -> CrewInfo {
                 .map(|id| {
                     let a = &config.agents[id];
                     let pid = running_pid(paths, id);
-                    let last = (pid.is_none() && paths.out_file(id).exists())
-                        .then(|| last_words(paths, id))
-                        .filter(|l| l != "supervisor stopped");
+                    let last = crate::supervisor::runtime_note(&paths.home, id).or_else(|| {
+                        (pid.is_none() && paths.out_file(id).exists())
+                            .then(|| last_words(paths, id))
+                            .filter(|l| l != "supervisor stopped")
+                    });
                     MemberInfo {
                         id: id.clone(),
                         role: a.role.clone(),
@@ -2008,6 +2010,9 @@ pub fn doctor(db_path: &Path) -> Vec<Check> {
                         known.map(|c| c.install).unwrap_or("see its docs")
                     ),
                 )),
+            }
+            if let Some(note) = crate::supervisor::runtime_note(&paths.home, &id) {
+                out.push(check(Some(false), &id, format!("last turn failed: {note}")));
             }
             match running_pid(&paths, &id) {
                 Some(pid) => out.push(check(

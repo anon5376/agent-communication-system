@@ -356,6 +356,7 @@ struct AgentRecord {
     last_seen_ms: Option<i64>,
     running: bool,
     paused: bool,
+    runtime_note: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -435,6 +436,7 @@ fn agent_record(paths: &crew::Paths, agent: &Agent) -> AgentRecord {
         running: crew::running_pid(paths, &agent.id).is_some(),
         // The pause flag lives in agent meta; meta itself never leaves the bridge.
         paused: agent.meta.get("paused").is_some(),
+        runtime_note: crate::supervisor::runtime_note(&paths.home, &agent.id),
     }
 }
 

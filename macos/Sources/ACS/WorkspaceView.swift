@@ -16,16 +16,26 @@ struct WorkspaceView: View {
                 }.padding(20)
                 Picker("Workspace mode", selection: $store.mode) {
                     ForEach(WorkspaceMode.allCases) { Text($0.rawValue).tag($0) }
-                }.pickerStyle(.segmented).padding(.horizontal, 12).padding(.bottom, 16)
-                List(store.mode.destinations, selection: $store.destination) { destination in
-                    HStack {
-                        Label(destination.rawValue, systemImage: destination.symbol)
-                        Spacer()
-                        if destination == .reviews, store.reviewCount > 0 {
-                            Text("\(store.reviewCount)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }.pickerStyle(.segmented).labelsHidden().padding(.horizontal, 12).padding(.bottom, 16)
+                VStack(spacing: 4) {
+                    ForEach(store.mode.destinations) { destination in
+                        Button { store.destination = destination } label: {
+                            HStack {
+                                Label(destination.rawValue, systemImage: destination.symbol)
+                                Spacer()
+                                if destination == .reviews, store.reviewCount > 0 {
+                                    Text("\(store.reviewCount)").font(.caption.monospacedDigit())
+                                }
+                            }
+                            .padding(.horizontal, 10).padding(.vertical, 9)
+                            .foregroundStyle(store.destination == destination ? Color.white : Color.black)
+                            .background(store.destination == destination ? Color.black : Color.clear)
+                            .contentShape(Rectangle())
                         }
-                    }.tag(destination)
-                }.listStyle(.sidebar)
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(store.destination == destination ? .isSelected : [])
+                    }
+                }.padding(.horizontal, 12)
                 Spacer(minLength: 0)
                 VStack(alignment: .leading, spacing: 10) {
                     Divider()
@@ -44,6 +54,7 @@ struct WorkspaceView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }.padding(16)
             }
+            .background(Color.white)
             .navigationSplitViewColumnWidth(min: 260, ideal: 280, max: 320)
         } detail: {
             VStack(spacing: 0) {

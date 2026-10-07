@@ -38,7 +38,13 @@ impl Fixture {
         self.bus.identify(Some(id)).unwrap()
     }
 
-    fn task(&self, actor: &identity::Identity, title: &str, to: Option<&str>, parent: Option<i64>) -> acs::error::Result<acs::types::Task> {
+    fn task(
+        &self,
+        actor: &identity::Identity,
+        title: &str,
+        to: Option<&str>,
+        parent: Option<i64>,
+    ) -> acs::error::Result<acs::types::Task> {
         self.bus.create_task(
             actor,
             CreateTaskInput {
@@ -61,7 +67,9 @@ impl Fixture {
 }
 
 fn message(result: acs::error::Result<acs::types::Task>) -> String {
-    result.map(|t| format!("created #{}", t.id)).unwrap_or_else(|e| e.message)
+    result
+        .map(|t| format!("created #{}", t.id))
+        .unwrap_or_else(|e| e.message)
 }
 
 #[test]
@@ -72,7 +80,10 @@ fn a_worker_cannot_delegate_through_the_core_but_may_file_work_for_itself() {
     assert!(message(f.task(&worker, "for w2", Some("w2"), None)).contains("w1 may not delegate"));
     assert!(message(f.task(&worker, "for anyone", None, None)).contains("w1 may not delegate"));
     assert_eq!(
-        f.task(&worker, "my own follow-up", Some("w1"), None).unwrap().assignee.as_deref(),
+        f.task(&worker, "my own follow-up", Some("w1"), None)
+            .unwrap()
+            .assignee
+            .as_deref(),
         Some("w1")
     );
     let out = f.qagent(&["--as", "w1", "task", "add", "via cli", "--to", "w2"]);
@@ -86,14 +97,37 @@ fn a_policy_narrows_a_manager_children_and_depth_and_survives_rotation() {
     let lead = f.add("lead", "manager", "manager");
     f.add("a", "worker", "worker");
     f.add("b", "worker", "worker");
-    assert_eq!(f.task(&lead, "before any policy", Some("a"), None).unwrap().assignee.as_deref(), Some("a"));
+    assert_eq!(
+        f.task(&lead, "before any policy", Some("a"), None)
+            .unwrap()
+            .assignee
+            .as_deref(),
+        Some("a")
+    );
 
-    let no_delegation = AgentPolicy { can_delegate: Some(false), ..Default::default() };
-    f.bus.set_agent_policy(&lead, "lead", Some(&no_delegation)).unwrap();
-    assert!(message(f.task(&lead, "now forbidden", Some("a"), None)).contains("lead may not delegate"));
-    let widen = AgentPolicy { can_delegate: Some(true), ..Default::default() };
-    let refused = f.bus.set_agent_policy(&lead, "lead", Some(&widen)).unwrap_err();
-    assert!(refused.message.contains("may only narrow"), "{}", refused.message);
+    let no_delegation = AgentPolicy {
+        can_delegate: Some(false),
+        ..Default::default()
+    };
+    f.bus
+        .set_agent_policy(&lead, "lead", Some(&no_delegation))
+        .unwrap();
+    assert!(
+        message(f.task(&lead, "now forbidden", Some("a"), None)).contains("lead may not delegate")
+    );
+    let widen = AgentPolicy {
+        can_delegate: Some(true),
+        ..Default::default()
+    };
+    let refused = f
+        .bus
+        .set_agent_policy(&lead, "lead", Some(&widen))
+        .unwrap_err();
+    assert!(
+        refused.message.contains("may only narrow"),
+        "{}",
+        refused.message
+    );
 
     let policy = AgentPolicy {
         can_delegate: Some(true),
@@ -101,12 +135,26 @@ fn a_policy_narrows_a_manager_children_and_depth_and_survives_rotation() {
         max_delegation_depth: Some(1),
         ..Default::default()
     };
-    f.bus.set_agent_policy(&f.op, "lead", Some(&policy)).unwrap();
-    assert_eq!(f.task(&lead, "to a", Some("a"), None).unwrap().assignee.as_deref(), Some("a"));
-    assert!(message(f.task(&lead, "to b", Some("b"), None)).contains("may only assign work to a, not b"));
+    f.bus
+        .set_agent_policy(&f.op, "lead", Some(&policy))
+        .unwrap();
+    assert_eq!(
+        f.task(&lead, "to a", Some("a"), None)
+            .unwrap()
+            .assignee
+            .as_deref(),
+        Some("a")
+    );
+    assert!(message(f.task(&lead, "to b", Some("b"), None))
+        .contains("may only assign work to a, not b"));
     let root = f.task(&f.op, "goal", None, None).unwrap();
-    let child = f.task(&lead, "one level down", Some("a"), Some(root.id)).unwrap();
-    assert!(message(f.task(&lead, "two levels down", Some("a"), Some(child.id))).contains("at most 1 level"));
+    let child = f
+        .task(&lead, "one level down", Some("a"), Some(root.id))
+        .unwrap();
+    assert!(
+        message(f.task(&lead, "two levels down", Some("a"), Some(child.id)))
+            .contains("at most 1 level")
+    );
 
     f.bus.rotate_token(&f.op, "lead").unwrap();
     let rotated = f.bus.identify(Some("lead")).unwrap();
@@ -118,8 +166,13 @@ fn the_policy_is_read_inside_the_creating_transaction() {
     let f = fixture();
     let lead = f.add("lead", "manager", "manager");
     f.add("a", "worker", "worker");
-    let no_delegation = AgentPolicy { can_delegate: Some(false), ..Default::default() };
-    f.bus.set_agent_policy(&f.op, "lead", Some(&no_delegation)).unwrap();
+    let no_delegation = AgentPolicy {
+        can_delegate: Some(false),
+        ..Default::default()
+    };
+    f.bus
+        .set_agent_policy(&f.op, "lead", Some(&no_delegation))
+        .unwrap();
     // `lead` was resolved before the policy changed; the core must still refuse.
     assert!(lead.permissions.can_delegate);
     assert!(message(f.task(&lead, "stale identity", Some("a"), None)).contains("may not delegate"));
@@ -130,15 +183,26 @@ fn max_concurrent_tasks_is_enforced_at_claim_time_also_against_concurrent_claime
     let f = fixture();
     let w = f.add("w1", "worker", "worker");
     for index in 0..8 {
-        f.task(&f.op, &format!("t{index}"), Some("w1"), None).unwrap();
+        f.task(&f.op, &format!("t{index}"), Some("w1"), None)
+            .unwrap();
     }
-    let limit = AgentPolicy { max_concurrent_tasks: Some(2), ..Default::default() };
+    let limit = AgentPolicy {
+        max_concurrent_tasks: Some(2),
+        ..Default::default()
+    };
     f.bus.set_agent_policy(&f.op, "w1", Some(&limit)).unwrap();
     f.bus.claim_task(&w, None).unwrap();
     f.bus.claim_task(&w, None).unwrap();
     let refused = f.bus.claim_task(&w, None).unwrap_err();
-    assert!(refused.message.contains("already holds 2 claimed task"), "{}", refused.message);
-    assert!(!f.bus.has_claimable("w1", "worker").unwrap(), "no backlog is offered at the limit");
+    assert!(
+        refused.message.contains("already holds 2 claimed task"),
+        "{}",
+        refused.message
+    );
+    assert!(
+        !f.bus.has_claimable("w1", "worker").unwrap(),
+        "no backlog is offered at the limit"
+    );
 
     let claimed = |bus: &Bus| {
         bus.list_tasks(ListTasksInput {
@@ -176,7 +240,10 @@ fn max_concurrent_tasks_is_enforced_at_claim_time_also_against_concurrent_claime
 fn whoami_shows_the_policy_limits() {
     let f = fixture();
     f.add("w1", "worker", "worker");
-    let limit = AgentPolicy { max_concurrent_tasks: Some(3), ..Default::default() };
+    let limit = AgentPolicy {
+        max_concurrent_tasks: Some(3),
+        ..Default::default()
+    };
     f.bus.set_agent_policy(&f.op, "w1", Some(&limit)).unwrap();
     let me = f.bus.identify(Some("w1")).unwrap();
     assert!(!me.permissions.can_delegate);

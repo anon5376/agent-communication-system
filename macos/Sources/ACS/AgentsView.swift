@@ -40,6 +40,10 @@ struct AgentsView: View {
                                 VStack(alignment: .leading, spacing: 5) {
                                     Text(agent.id).font(.headline)
                                     Text("\(agent.role) · \(agent.harness) · \(agent.model)").font(.caption).foregroundStyle(.secondary)
+                                    if let note = agent.runtimeNote {
+                                        Text(note).font(.caption).foregroundStyle(.red)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
                                 }
                                 Spacer(minLength: 12)
                                 VStack(alignment: .leading, spacing: 3) {

@@ -84,7 +84,12 @@ CLIs), so it also works before `init` during onboarding.
 ```json
 { "id": "lead", "role": "manager", "model": "claude-opus-4",
   "harness": "claude", "status": "idle", "lastSeenMs": 1759650000000,
-  "running": true, "paused": false }
+  "running": true, "paused": false, "runtimeNote": null }
+
+`runtimeNote` is optional, additive diagnostic text for the last failed supervised turn:
+exit code, consecutive failure count, backoff and next eligible retry timestamp, or
+crashing/operator-action guidance. It clears after a successful turn. A retry timestamp
+does not promise execution if the agent is stopped, paused or blocked by its budget.
 ```
 
 `running` means a live supervisor owns the agent's pid file. `paused` is the

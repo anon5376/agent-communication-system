@@ -77,9 +77,14 @@ pub fn parse_policy(value: &serde_json::Value) -> AgentPolicy {
     };
     AgentPolicy {
         can_delegate: raw.get("canDelegate").and_then(|v| v.as_bool()),
-        allowed_child_agent_ids: raw.get("allowedChildAgentIds").and_then(|v| v.as_array()).map(|ids| {
-            ids.iter().filter_map(|id| id.as_str().map(str::to_string)).collect()
-        }),
+        allowed_child_agent_ids: raw
+            .get("allowedChildAgentIds")
+            .and_then(|v| v.as_array())
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| id.as_str().map(str::to_string))
+                    .collect()
+            }),
         max_delegation_depth: raw.get("maxDelegationDepth").and_then(whole_number),
         max_concurrent_tasks: raw
             .get("maxConcurrentTasks")
@@ -308,7 +313,10 @@ pub fn stored_permissions_json(
 
 /// The effective permissions stored for `agent_id` right now (read inside a write transaction).
 pub fn current_permissions(conn: &Connection, agent_id: &str) -> Result<Option<Permissions>> {
-    Ok(row_for(conn, agent_id)?.map(|row| parse_permissions(&row.permissions_json, &row.authority)))
+    Ok(
+        row_for(conn, agent_id)?
+            .map(|row| parse_permissions(&row.permissions_json, &row.authority)),
+    )
 }
 
 /// Resolve the identity for `agent_id` from its token file. The token's hash must

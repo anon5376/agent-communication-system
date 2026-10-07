@@ -117,7 +117,9 @@ pub fn current_schema_version(conn: &Connection) -> Result<u32> {
                 )));
             }
             text.parse::<u32>().map_err(|_| {
-                BusError::invalid(format!("bus database has an unreadable schema_version: {text:?}"))
+                BusError::invalid(format!(
+                    "bus database has an unreadable schema_version: {text:?}"
+                ))
             })
         }
     }

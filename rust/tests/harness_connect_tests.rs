@@ -785,7 +785,13 @@ fn a_connected_exe_cli_works_a_task_and_talks_on_the_bus() {
         &req(
             "echoer",
             None,
-            &[qagent, "send", "operator", "started as {agentId}", "{prompt}"],
+            &[
+                qagent,
+                "send",
+                "operator",
+                "started as {agentId}",
+                "{prompt}",
+            ],
             false,
         ),
     )

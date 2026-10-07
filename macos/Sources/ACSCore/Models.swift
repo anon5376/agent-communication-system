@@ -61,10 +61,11 @@ public struct AgentRecord: Decodable, Sendable, Identifiable {
     public let lastSeenMs: Int64?
     public let running: Bool
     public let paused: Bool
+    public let runtimeNote: String?
 
     public init(
         id: String, role: String, model: String, harness: String, status: String,
-        lastSeenMs: Int64? = nil, running: Bool = false, paused: Bool = false
+        lastSeenMs: Int64? = nil, running: Bool = false, paused: Bool = false, runtimeNote: String? = nil
     ) {
         self.id = id
         self.role = role
@@ -74,6 +75,7 @@ public struct AgentRecord: Decodable, Sendable, Identifiable {
         self.lastSeenMs = lastSeenMs
         self.running = running
         self.paused = paused
+        self.runtimeNote = runtimeNote
     }
 
     public init(from decoder: Decoder) throws {
@@ -86,10 +88,11 @@ public struct AgentRecord: Decodable, Sendable, Identifiable {
         lastSeenMs = try container.decodeIfPresent(Int64.self, forKey: .lastSeenMs)
         running = try container.decodeIfPresent(Bool.self, forKey: .running) ?? false
         paused = try container.decodeIfPresent(Bool.self, forKey: .paused) ?? false
+        runtimeNote = try container.decodeIfPresent(String.self, forKey: .runtimeNote)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, role, model, harness, status, lastSeenMs, running, paused
+        case id, role, model, harness, status, lastSeenMs, running, paused, runtimeNote
     }
 }
 

@@ -7,9 +7,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::error::Result;
 #[cfg(windows)]
 use crate::error::BusError;
+use crate::error::Result;
 
 // ------------------------------------------------------------- permissions
 
@@ -53,8 +53,7 @@ pub fn pid_alive(pid: i32) -> bool {
                 return false;
             }
             let mut code = 0u32;
-            let alive =
-                GetExitCodeProcess(process, &mut code) != 0 && code == 0x103; // STILL_ACTIVE
+            let alive = GetExitCodeProcess(process, &mut code) != 0 && code == 0x103; // STILL_ACTIVE
             CloseHandle(process);
             alive
         }
@@ -505,9 +504,7 @@ pub fn stdout_is_file(path: &Path, meta: &fs::Metadata) -> bool {
 }
 
 #[cfg(windows)]
-fn file_identity(
-    handle: windows_sys::Win32::Foundation::HANDLE,
-) -> Option<(u32, u64)> {
+fn file_identity(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<(u32, u64)> {
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
     };

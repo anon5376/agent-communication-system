@@ -71,10 +71,12 @@ else
     tar -xzf "$tmp/$asset" -C "$tmp/bin"
     binaries=$tmp/bin
 fi
+for name in $commands; do
+    [ -f "$binaries/$name" ] && [ ! -L "$binaries/$name" ] || fail "missing regular binary: $name"
+done
 mkdir -p "$dest" || fail "cannot create $dest"
 stage=$(mktemp -d "$dest/.acs-install.XXXXXX")
 for name in $commands; do
-    [ -f "$binaries/$name" ] && [ ! -L "$binaries/$name" ] || fail "missing regular binary: $name"
     cp "$binaries/$name" "$stage/$name"
     chmod 755 "$stage/$name"
 done

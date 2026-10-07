@@ -60,6 +60,7 @@ export interface AgentRecord {
   lastSeenMs?: Id | null;
   running: boolean;
   paused: boolean;
+  runtimeNote?: string | null;
 }
 
 export interface ValidationObservation {
@@ -217,6 +218,7 @@ export function parseAgent(value: unknown): AgentRecord {
     lastSeenMs: obj.lastSeenMs == null ? null : asId(obj.lastSeenMs),
     running: asBool(obj.running),
     paused: asBool(obj.paused),
+    runtimeNote: obj.runtimeNote == null ? null : asString(obj.runtimeNote),
   };
 }
 

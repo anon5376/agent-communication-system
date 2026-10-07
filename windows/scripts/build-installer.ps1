@@ -89,8 +89,12 @@ try {
     if (-not $SkipNpm) {
         Push-Location $Windows
         try {
-            if (-not (Test-Path "node_modules")) { npm ci }
+            if (-not (Test-Path "node_modules")) {
+                npm ci
+                if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+            }
             npm run build
+            if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
         } finally {
             Pop-Location
         }

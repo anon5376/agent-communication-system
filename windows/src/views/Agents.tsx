@@ -64,6 +64,7 @@ export function AgentsView() {
                   <div class="a-meta">
                     {agent.role} · {agent.harness} · {agent.model}
                   </div>
+                  {agent.runtimeNote && <p class="view-sub" role="status">{agent.runtimeNote}</p>}
                 </div>
                 <div class={`a-state ${agent.paused ? "paused" : agent.running ? "running" : "stopped"}`}>
                   <span class="a-dot" aria-hidden="true" />

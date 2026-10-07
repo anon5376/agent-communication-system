@@ -17,6 +17,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -26,6 +28,7 @@ jobs:
       - run: npm ci
       - run: npm audit --audit-level=high
       - run: npm run audit:public
+      - run: npm run audit:public:history
       - run: npm test
       # Cross-implementation smoke: the Rust and TypeScript qagent binaries must
       # share one bus.db — mail, task claims and wait wake-ups cross over.
@@ -40,6 +43,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --manifest-path rust/Cargo.toml --check
+      - run: cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path rust/Cargo.toml
 
   rust-test-windows:

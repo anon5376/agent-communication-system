@@ -20,7 +20,10 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell as TableCell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Cell as TableCell, Clear, List, ListItem, ListState, Paragraph, Row, Table,
+    TableState, Wrap,
+};
 use ratatui::Terminal;
 use std::cell::Cell;
 use std::io::stdout;
@@ -34,6 +37,7 @@ struct AgentRow {
     stored_status: String,
     wait_until_ms: Option<i64>,
     last_seen_ms: Option<i64>,
+    runtime_note: Option<String>,
 }
 
 struct State {
@@ -47,12 +51,16 @@ fn load_state(bus: &Bus) -> Result<State> {
         .list_agents()?
         .into_iter()
         .filter(|(a, _)| a.id != OPERATOR_ID)
-        .map(|(a, _unread)| AgentRow {
-            id: a.id,
-            role: a.role,
-            stored_status: a.stored_status,
-            wait_until_ms: a.wait_until_ms,
-            last_seen_ms: a.last_seen_ms,
+        .map(|(a, _unread)| {
+            let runtime_note = crate::supervisor::runtime_note(&bus.home, &a.id);
+            AgentRow {
+                id: a.id,
+                role: a.role,
+                stored_status: a.stored_status,
+                wait_until_ms: a.wait_until_ms,
+                last_seen_ms: a.last_seen_ms,
+                runtime_note,
+            }
         })
         .collect();
     let mut tasks = bus.list_tasks(ListTasksInput {
@@ -579,7 +587,7 @@ fn render_agents(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 "online" => ("●", Style::default().fg(Color::Green)),
                 _ => ("○", Style::default().fg(Color::DarkGray)),
             };
-            ListItem::new(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(dot, style),
                 Span::raw(format!(" {:<11.11}", a.id)),
                 Span::styled(
@@ -590,7 +598,11 @@ fn render_agents(f: &mut ratatui::Frame, app: &App, area: Rect) {
                     ago(a.last_seen_ms, now),
                     Style::default().fg(Color::DarkGray),
                 ),
-            ]))
+            ];
+            if a.runtime_note.is_some() {
+                spans.push(Span::styled(" ! failure", Style::default().fg(Color::Red)));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
     let list = List::new(items)
@@ -638,19 +650,22 @@ fn render_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
         })
         .collect();
     let width = area.width.saturating_sub(2);
-    let list = Table::new(items, [
-        Constraint::Length(7.min(width / 8)),
-        Constraint::Fill(1),
-        Constraint::Length(12.min(width / 4)),
-        Constraint::Length(17.min(width / 4)),
-    ])
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" Open tasks ({}) ", app.state.tasks.len()))
-                .border_style(focused(app, Pane::Tasks)),
-        )
-        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let list = Table::new(
+        items,
+        [
+            Constraint::Length(7.min(width / 8)),
+            Constraint::Fill(1),
+            Constraint::Length(12.min(width / 4)),
+            Constraint::Length(17.min(width / 4)),
+        ],
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Open tasks ({}) ", app.state.tasks.len()))
+            .border_style(focused(app, Pane::Tasks)),
+    )
+    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut list_state = TableState::default();
     list_state.select(if app.state.tasks.is_empty() {
         None
@@ -991,10 +1006,14 @@ fn open_detail(app: &mut App) {
                     ago(a.last_seen_ms, now_ms()),
                 );
                 app.detail_title = format!("Agent {}", row.0);
-                app.detail = format!(
+                let detail = format!(
                     "Name:      {}\nRole:      {}\nStatus:    {}\nLast seen: {}",
                     row.0, row.1, row.2, row.3,
                 );
+                app.detail = match &a.runtime_note {
+                    Some(note) => format!("{detail}\n\nFailure:\n{note}"),
+                    None => detail,
+                };
                 app.mode = Mode::Detail;
             }
         }
@@ -1314,5 +1333,64 @@ pub fn main() -> i32 {
             eprintln!("acs: {}", e.message);
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn load_state_includes_the_persisted_runtime_failure_note() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "acs-app-runtime-note-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("bus.db");
+        let bus = Bus::open(Some(&db_path)).unwrap();
+        bus.init().unwrap();
+        let operator = bus.identify(Some(OPERATOR_ID)).unwrap();
+        bus.add_agent(
+            &operator,
+            "builder",
+            Some("implementation"),
+            None,
+            None,
+            None,
+            Some("worker"),
+        )
+        .unwrap();
+        let sessions = bus.home.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(
+            sessions.join("builder.json"),
+            serde_json::json!({
+                "failure": {
+                    "exitCode": 23,
+                    "consecutiveFailures": 1,
+                    "reason": "harness exited 23",
+                    "backoffMs": 2000,
+                    "nextRetryMs": 2_000
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let state = load_state(&bus).unwrap();
+        assert_eq!(state.agents.len(), 1);
+        let note = state.agents[0].runtime_note.as_deref().unwrap();
+        assert!(note.contains("harness exited 23 (exit 23)"), "{note}");
+        assert!(note.contains("backoff 2s"), "{note}");
+
+        drop(bus);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
