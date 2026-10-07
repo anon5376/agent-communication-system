@@ -11,14 +11,17 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+static NEXT_HOME_ID: AtomicI64 = AtomicI64::new(0);
+
 fn fresh_home() -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "acs-rust-test-{}-{}",
+        "acs-rust-test-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        NEXT_HOME_ID.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -132,13 +135,13 @@ fn token_rotation_invalidates_the_old_token() {
     let raw = fs::read_to_string(identity::agent_token_path(&f.home, "alice").unwrap()).unwrap();
     assert_ne!(stored.0, raw.trim());
     assert_eq!(stored.0, identity::hash_token(raw.trim()));
-    // Token files are 0600.
-    let mode = fs::metadata(identity::agent_token_path(&f.home, "alice").unwrap())
-        .unwrap()
-        .permissions();
+    // Token files are 0600 (Unix modes only — Windows relies on profile ACLs).
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(identity::agent_token_path(&f.home, "alice").unwrap())
+            .unwrap()
+            .permissions();
         assert_eq!(mode.mode() & 0o777, 0o600);
     }
 }

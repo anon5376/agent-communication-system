@@ -229,6 +229,47 @@ Payload `{ "id": 12, "reason": "…" }`.
 Payload `{ "to": "lead", "subject": "…", "body": "…" }` — operator mail to an
 agent id, comma-separated ids, or `"*"` for broadcast.
 
+### `orchestration` → data object
+
+The aos side, read from `<bus home>/aos/` and the bus:
+
+```json
+{ "simulated": false, "configured": true, "crewError": null,
+  "crewDir": "~/…/aos", "workdir": "/repo", "goalOwner": "builder",
+  "missions": [{ "name": "fix", "summary": "…", "brief": "…{goal}…",
+                 "acceptance": "…", "text": "<file without its note>", "custom": false }],
+  "roles":    [{ "name": "builder", "text": "…", "custom": false }],
+  "crew":     [{ "id": "builder", "role": "implementation", "authority": "worker",
+                 "cli": "claude", "description": "…", "enabled": true,
+                 "instructions": "roles/builder.md", "running": false }],
+  "goals":    [{ "id": 12, "title": "fix …", "state": "open",
+                 "assignee": "builder", "reviewer": "operator", "updatedMs": 0 }] }
+```
+
+`custom` is true when the file differs from the built-in preset. `goals` are
+the newest 20 top-level tasks the operator created. Before any crew file,
+`configured` is false, `crew` is empty and the built-in presets are listed.
+
+### `startGoal` → `{ "message": "goal #N started / …" }`
+
+Payload `{ "mission": "fix", "goal": "…", "to": null, "project": null }`.
+Expands the mission like `aos` does (`{goal}` substitution, 120-char title),
+hands it to `to` or the crew's goal owner, reviewer per `aos` rules (the
+operator when there is no independent reviewer). Never starts an agent.
+
+### `saveMission` / `saveRole` → `{ "message": "… saved" }`
+
+Payload `{ "name": "ship", "text": "…" }`. `name` is 1-40 of `[a-z0-9_-]`
+and becomes `missions/<name>.md` or `roles/<name>.md`; text is non-empty and
+at most 64 KB. Missing presets are written first; no other file changes.
+
+### `setAgent` → `{ "message": "…" }`
+
+Payload `{ "id": "builder", "enabled": false, "description": "…" }` (either
+field). Edits that crew member in `crew.json`, keeping all other fields; the
+result is validated before it replaces the file. Errors when there is no crew
+or the id is not in it.
+
 ## Environment
 
 - `ACS_DESKTOP_QAGENT` — absolute path to the `qagent` supervisors run

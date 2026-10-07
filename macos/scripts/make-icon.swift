@@ -14,27 +14,21 @@ func render(pixels: Int, filename: String) throws {
     let context = NSGraphicsContext(bitmapImageRep: bitmap)!
     NSGraphicsContext.current = context
     context.cgContext.scaleBy(x: CGFloat(pixels) / 1024, y: CGFloat(pixels) / 1024)
-    NSColor(calibratedRed: 0.26, green: 0.28, blue: 0.67, alpha: 1).setFill()
+    // Orbit mark: three agents on one ring, white on black.
+    NSColor(calibratedWhite: 0.04, alpha: 1).setFill()
     NSBezierPath(roundedRect: NSRect(x: 48, y: 48, width: 928, height: 928), xRadius: 205, yRadius: 205).fill()
-    let top = NSPoint(x: 512, y: 756)
-    let left = NSPoint(x: 276, y: 306)
-    let right = NSPoint(x: 748, y: 306)
-    let center = NSPoint(x: 512, y: 468)
-    NSColor.white.withAlphaComponent(0.65).setStroke()
-    for (a, b) in [(top, left), (left, right), (right, top), (top, center), (left, center), (right, center)] {
-        let line = NSBezierPath()
-        line.move(to: a)
-        line.line(to: b)
-        line.lineWidth = 24
-        line.lineCapStyle = .round
-        line.stroke()
-    }
+    let center = NSPoint(x: 512, y: 512)
+    let radius: CGFloat = 181
+    NSColor.white.setStroke()
+    let ring = NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
+    ring.lineWidth = 50
+    ring.stroke()
     NSColor.white.setFill()
-    for point in [top, left, right] {
-        NSBezierPath(ovalIn: NSRect(x: point.x - 56, y: point.y - 56, width: 112, height: 112)).fill()
+    for angle in [90.0, 210.0, 330.0] {
+        let r = angle * .pi / 180
+        let p = NSPoint(x: center.x + radius * CGFloat(cos(r)), y: center.y + radius * CGFloat(sin(r)))
+        NSBezierPath(ovalIn: NSRect(x: p.x - 59, y: p.y - 59, width: 118, height: 118)).fill()
     }
-    NSColor(calibratedRed: 0.74, green: 0.79, blue: 1, alpha: 1).setFill()
-    NSBezierPath(ovalIn: NSRect(x: center.x - 38, y: center.y - 38, width: 76, height: 76)).fill()
     NSGraphicsContext.restoreGraphicsState()
     try bitmap.representation(using: .png, properties: [:])!.write(to: directory.appendingPathComponent(filename))
 }

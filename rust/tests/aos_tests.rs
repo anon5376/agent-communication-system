@@ -4,11 +4,15 @@ use acs::aos::view::{Route, Target};
 use acs::aos::{demo, ensure_operator, paint, App, Key, Tier, DEFAULT_STALL_MIN};
 use acs::bus::Bus;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static NEXT_DIR: AtomicUsize = AtomicUsize::new(0);
 
 fn demo_app(w: usize, h: usize) -> (App, PathBuf) {
     let dir = std::env::temp_dir().join(format!(
-        "aos-test-{}-{}",
+        "aos-test-{}-{}-{}",
         std::process::id(),
+        NEXT_DIR.fetch_add(1, Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

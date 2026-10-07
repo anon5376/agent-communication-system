@@ -464,6 +464,7 @@ fn detect_lists_providers_without_a_bus() {
 
 /// A fake `qagent` that does what a supervisor's first breath does: writes its
 /// pid file under <home>/supervisors/, then stays alive so `running` is true.
+#[cfg(unix)]
 fn fake_qagent(dir: &Path) -> PathBuf {
     let script = dir.join("qagent");
     std::fs::write(
@@ -485,12 +486,34 @@ fn fake_qagent(dir: &Path) -> PathBuf {
          wait\n",
     )
     .unwrap();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     script
+}
+
+/// Windows: the compiled `fake-qagent` example. An .exe is both the faithful
+/// shape (production always spawns qagent.exe — the .cmd shim path is covered
+/// by harness_connect_tests) and reliable on CI, where a .cmd -> powershell
+/// fake needs a cold powershell.exe start that can outlive the poll window.
+/// Plain `cargo test` builds every example; a filtered run may not, so fail
+/// loudly with the build command instead of a missing-file error.
+#[cfg(windows)]
+fn fake_qagent(_dir: &Path) -> PathBuf {
+    let exe = std::env::current_exe()
+        .unwrap()
+        .parent() // .../target/<profile>/deps
+        .and_then(Path::parent) // .../target/<profile>
+        .unwrap()
+        .join("examples")
+        .join("fake-qagent.exe");
+    assert!(
+        exe.is_file(),
+        "missing {}; build it with `cargo build --example fake-qagent`",
+        exe.display()
+    );
+    exe
 }
 
 fn crew_with(paths: &crew::Paths, bus: &Bus, cli_ids: &[&str]) {
@@ -559,15 +582,49 @@ fn start_then_stop_with_a_fake_qagent() {
     // The workdir was trusted by the confirmed start.
     assert!(crew::is_trusted(&paths, &workdir_canonical(&workdir)));
 
-    let (reply, code) = call(&db, "snapshot", json!({}));
-    let data = ok(&reply, code);
-    let builder = data["agents"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["id"] == "builder")
-        .unwrap();
-    assert_eq!(builder["running"], true, "{builder}");
+    // The fake writes its pid file on its own clock (past start's 1.2s wait):
+    // poll the snapshot rather than assuming one cold start is fast enough.
+    let mut builder = json!(null);
+    let poll_start = std::time::Instant::now();
+    let mut flipped_ms = None;
+    for _ in 0..150 {
+        let (reply, code) = call(&db, "snapshot", json!({}));
+        let data = ok(&reply, code);
+        let found = data["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == "builder")
+            .cloned()
+            .unwrap();
+        builder = found;
+        if builder["running"] == true {
+            flipped_ms = Some(poll_start.elapsed().as_millis());
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    // Diagnose a fake that never reports running: the supervisor's stdout and
+    // stderr go to builder.out, and `running` needs <home>/supervisors/*.pid.
+    let pid_file = paths.pid_file("builder");
+    let out_file = paths.out_file("builder");
+    let supervisors = paths.home.join("supervisors");
+    let why = format!(
+        "{builder}\nrunning flipped after {:?}\nout_file({}) exists={} contents:\n{}\npid_file({}) exists={} contents={:?}\nsupervisors dir: {:?}",
+        flipped_ms,
+        out_file.display(),
+        out_file.exists(),
+        std::fs::read_to_string(&out_file).unwrap_or_else(|e| format!("<{e}>")),
+        pid_file.display(),
+        pid_file.exists(),
+        std::fs::read_to_string(&pid_file),
+        std::fs::read_dir(&supervisors).map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        })
+    );
+    assert_eq!(builder["running"], true, "{why}");
 
     let (reply, code) = call(&db, "stop", json!({"ids": ["builder"]}));
     let data = ok(&reply, code);
@@ -821,4 +878,135 @@ fn snapshot_returns_the_latest_100_messages() {
     let mut sorted = seqs.clone();
     sorted.sort_unstable();
     assert_eq!(seqs, sorted, "ascending seq within the latest window");
+}
+
+// ------------------------------------------------------------ orchestration
+
+#[test]
+fn orchestration_lists_presets_before_any_crew() {
+    let db = temp_db("orch-presets");
+    init_bus(&db);
+    let (reply, code) = call(&db, "orchestration", json!({}));
+    let data = ok(&reply, code);
+    assert_eq!(data["configured"], false);
+    let missions: Vec<&str> = data["missions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    for name in [
+        "run", "build", "fix", "research", "review", "explain", "docs",
+    ] {
+        assert!(missions.contains(&name), "{name} missing from {missions:?}");
+    }
+    assert_eq!(data["roles"].as_array().unwrap().len(), 4);
+    assert!(data["missions"][0]["custom"] == false);
+    assert_eq!(data["goals"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn start_goal_expands_the_mission_and_lists_the_goal() {
+    let db = temp_db("orch-goal");
+    init_bus(&db);
+    let (reply, code) = call(
+        &db,
+        "startGoal",
+        json!({"mission": "fix", "goal": "login button does nothing"}),
+    );
+    let data = ok(&reply, code);
+    assert!(
+        data["message"].as_str().unwrap().starts_with("goal #"),
+        "{data}"
+    );
+    let bus = Bus::open(Some(&db)).unwrap();
+    let tasks = bus.list_tasks(ListTasksInput::default()).unwrap();
+    let t = &tasks[0];
+    assert_eq!(t.title, "fix login button does nothing");
+    assert!(t.brief.contains("login button does nothing"));
+    assert!(t.acceptance.contains("reproduction"));
+    assert_eq!(t.reviewer.as_deref(), Some(OPERATOR_ID));
+    let (reply, code) = call(&db, "orchestration", json!({}));
+    let data = ok(&reply, code);
+    assert_eq!(data["goals"][0]["state"], "open");
+
+    let (reply, code) = call(&db, "startGoal", json!({"mission": "nope", "goal": "x"}));
+    fail(&reply, code);
+    let (reply, code) = call(&db, "startGoal", json!({"goal": "   "}));
+    fail(&reply, code);
+}
+
+#[test]
+fn save_mission_writes_one_file_and_keeps_presets() {
+    let db = temp_db("orch-save");
+    init_bus(&db);
+    let text = "# ship\nShip a release.\n\n## brief\nShip {goal}.\n\n## acceptance\n- Tagged.\n";
+    let (reply, code) = call(&db, "saveMission", json!({"name": "ship", "text": text}));
+    ok(&reply, code);
+    let (reply, code) = call(&db, "orchestration", json!({}));
+    let data = ok(&reply, code);
+    let ship = data["missions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "ship")
+        .expect("ship listed")
+        .clone();
+    assert_eq!(ship["custom"], true);
+    assert_eq!(ship["summary"], "Ship a release.");
+    assert!(data["missions"].as_array().unwrap().len() >= 8);
+
+    let (reply, code) = call(&db, "saveRole", json!({"name": "../evil", "text": "x"}));
+    fail(&reply, code);
+    let (reply, code) = call(&db, "saveRole", json!({"name": "builder", "text": "  "}));
+    fail(&reply, code);
+    let (reply, code) = call(
+        &db,
+        "saveRole",
+        json!({"name": "builder", "text": "You build."}),
+    );
+    ok(&reply, code);
+    let (reply, code) = call(&db, "orchestration", json!({}));
+    let data = ok(&reply, code);
+    let builder = data["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "builder")
+        .unwrap()
+        .clone();
+    assert_eq!(builder["custom"], true);
+    assert_eq!(builder["text"], "You build.\n");
+}
+
+#[test]
+fn set_agent_needs_a_crew_and_a_known_member() {
+    let db = temp_db("orch-agent");
+    init_bus(&db);
+    let (reply, code) = call(&db, "setAgent", json!({"id": "builder", "enabled": false}));
+    fail(&reply, code);
+    let paths = crew::Paths::for_db(&db);
+    std::fs::create_dir_all(&paths.dir).unwrap();
+    std::fs::write(
+        paths.crew(),
+        r#"{"version":1,
+  "providers":{"p":{"id":"p","displayName":"P","enabled":true,"authKind":"subscription"}},
+  "harnesses":{"h":{"id":"h","adapter":"claude","command":"claude","providers":["p"],"enabled":true,"features":{"headless":true}}},
+  "models":{"m":{"id":"m","provider":"p","harness":"h","family":"f","enabled":true,"capabilities":{"coding":0.8,"reasoning":0.8,"planning":0.8,"debugging":0.8,"research":0.7,"toolUse":0.8,"speed":0.5,"tokenEfficiency":0.6,"reliability":0.8,"autonomy":0.8,"contextTokens":200000,"costClass":"subscription"}}},
+  "agents":{"builder":{"id":"builder","model":"m","role":"implementation","enabled":true,"keep":"me"}},
+  "roles":{"implementation":{"id":"implementation","description":"x","capabilityWeights":{"coding":1}}},"routing":{},"constraints":{}}"#,
+    )
+    .unwrap();
+    let (reply, code) = call(&db, "setAgent", json!({"id": "ghost", "enabled": false}));
+    fail(&reply, code);
+    let (reply, code) = call(
+        &db,
+        "setAgent",
+        json!({"id": "builder", "enabled": false, "description": "writes code"}),
+    );
+    ok(&reply, code);
+    let raw: Value = serde_json::from_str(&std::fs::read_to_string(paths.crew()).unwrap()).unwrap();
+    assert_eq!(raw["agents"]["builder"]["enabled"], false);
+    assert_eq!(raw["agents"]["builder"]["description"], "writes code");
+    assert_eq!(raw["agents"]["builder"]["keep"], "me");
 }

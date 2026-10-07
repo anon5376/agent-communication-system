@@ -82,10 +82,19 @@ fn wait_for(what: &str, check: impl Fn() -> bool) {
 }
 
 fn kill9(pid: i32) {
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
-    }
-    wait_for("pid gone", || unsafe { libc::kill(pid, 0) } != 0);
+    acs::platform::kill_group(pid as u32, acs::platform::SIGKILL);
+    wait_for("pid gone", || !acs::platform::pid_alive(pid));
+}
+
+/// A process that exits at once, for a pid file whose owner is gone.
+fn instant_exit() -> std::process::Child {
+    #[cfg(unix)]
+    return std::process::Command::new("true").spawn().unwrap();
+    #[cfg(windows)]
+    return std::process::Command::new("cmd")
+        .args(["/c", "exit"])
+        .spawn()
+        .unwrap();
 }
 
 #[test]
@@ -97,7 +106,7 @@ fn a_crashed_supervisor_is_restarted_and_a_stopped_one_is_not() {
     assert_eq!(w.check(), 0);
 
     // A pid file left by a crash (or a reboot): its pid is no longer a supervisor.
-    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let mut gone = instant_exit();
     gone.wait().unwrap();
     fs::create_dir_all(paths.pid_file("w1").parent().unwrap()).unwrap();
     fs::write(paths.pid_file("w1"), format!("{}\n", gone.id())).unwrap();
@@ -126,7 +135,7 @@ fn a_crashed_supervisor_is_restarted_and_a_stopped_one_is_not() {
 fn the_watcher_gives_up_on_an_agent_that_keeps_dying() {
     let (db, paths, _work) = crew_on("giveup");
     let mut w = watcher(&db);
-    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let mut gone = instant_exit();
     gone.wait().unwrap();
     fs::create_dir_all(paths.pid_file("w1").parent().unwrap()).unwrap();
     fs::write(paths.pid_file("w1"), format!("{}\n", gone.id())).unwrap();
@@ -152,7 +161,7 @@ fn the_watcher_gives_up_on_an_agent_that_keeps_dying() {
 fn the_watcher_never_restarts_into_an_untrusted_folder() {
     let (db, paths, _work) = crew_on("untrusted");
     fs::write(paths.trusted_file(), "").unwrap();
-    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let mut gone = instant_exit();
     gone.wait().unwrap();
     fs::create_dir_all(paths.pid_file("w1").parent().unwrap()).unwrap();
     fs::write(paths.pid_file("w1"), format!("{}\n", gone.id())).unwrap();

@@ -117,6 +117,31 @@ Supervisor ownership remains different on this branch: Rust has the atomic
 lock protocol; the TypeScript supervisor here still has its older pid-file lock.
 Do not run both supervisors for the same agent.
 
+## Platform notes
+
+- **Windows (`x86_64-pc-windows-msvc`)**: the crate builds and the full test
+  suite passes. The OS seams live in `src/platform.rs`.
+- File privacy (`0600`/`0700` on tokens, db and directories) is Unix-only.
+  `platform::chmod_private` is a no-op on Windows; token and bus files rely on
+  the per-user profile ACLs of `%USERPROFILE%`/`%LOCALAPPDATA%` — the same
+  limitation the security doc spells out.
+- Process liveness is `OpenProcess` + `GetExitCodeProcess` (`STILL_ACTIVE`);
+  a foreign command line cannot be read, so a live pid counts as "the
+  supervisor".
+- Supervisor-spawned agent trees run detached
+  (`CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`, the `setsid` equivalent) and
+  are registered in a Job Object — stop terminates the whole tree via
+  `TerminateJobObject`. `KILL_ON_JOB_CLOSE` is deliberately not set: the tree
+  must outlive the launcher.
+- A detached supervisor has no console to receive a Ctrl event, so graceful
+  stop is a `<agent>.stop` file it polls next to its pid file.
+- `aos autostart` (launchd/systemd) returns "not supported on Windows" rather
+  than faking it.
+- Provider CLIs resolve through PATH + PATHEXT (`.exe`/`.cmd`/`.bat`), so
+  npm-installed shims are found. `.cmd`/`.bat` run through
+  `cmd.exe /d /s /c` with every argument quoted; an argument cmd.exe cannot
+  represent (`%`, `"`, a newline) is refused rather than interpolated.
+
 ## Layout notes vs the TS source
 
 - `Bus::write` = the `write()` transaction wrapper: BEGIN IMMEDIATE on the

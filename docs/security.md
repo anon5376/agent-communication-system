@@ -4,7 +4,7 @@ Qagent's tokens stop an agent from accidentally, or because a prompt told it to,
 
 ## Identity
 
-- `qagent init` creates the operator identity and writes a random token to `~/.agent-bus/operator.token` (mode 0600; the directory is 0700).
+- `qagent init` creates the operator identity and writes a random token to `~/.agent-bus/operator.token` (mode 0600; the directory is 0700). On Windows the 0600/0700 modes do not apply: token and bus files rely on the per-user profile ACLs of `%USERPROFILE%`/`%LOCALAPPDATA%`, which already keep them private to your account.
 - `qagent agent add <id>` (operator only) creates an agent and writes its token to `~/.agent-bus/tokens/<id>.token`.
 - The database stores only the SHA-256 hash of each token, with the identity's authority: `operator`, `manager` or `worker`.
 - A process names itself with `QAGENT_AGENT_ID` (old name `AGENT_ID`) or `--as <id>`. The library reads that identity's token file and checks it against the stored hash. A missing or mismatched token is refused.
