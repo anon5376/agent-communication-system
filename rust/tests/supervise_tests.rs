@@ -479,6 +479,82 @@ fn supervise_stop_kills_hung_process_group() {
     std::env::remove_var("FAKE_HARNESS_STATE");
 }
 
+#[cfg(unix)]
+#[test]
+fn supervise_cli_sigterm_stops_harness_and_releases_lock() {
+    let e = e2e("sigterm-worker", "hang");
+    let state_file = e.workdir.join("sigterm-state.json");
+    e.bus
+        .create_task(
+            &e.operator,
+            CreateTaskInput {
+                title: "stop a running provider".into(),
+                to: Some("sigterm-worker".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_qagent"))
+        .arg("--db")
+        .arg(e.home.join("bus.db"))
+        .args(["supervise", "sigterm-worker"])
+        .arg(&e.workdir)
+        .arg("--config")
+        .arg(e.workdir.join("agent-bus.config.json"))
+        .env("FAKE_HARNESS_STATE", &state_file)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let state = loop {
+        if let Some(state) = fs::read_to_string(&state_file)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        {
+            break state;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("provider did not start");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let pid = state["pid"].as_i64().unwrap() as i32;
+    let grandchild = state["grandchild"].as_i64().unwrap() as i32;
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        let status = child.try_wait().unwrap();
+        if status.is_some() || Instant::now() >= deadline {
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let stopped = loop {
+        let stopped = !acs::platform::pid_alive(pid) && !acs::platform::pid_alive(grandchild);
+        if stopped || Instant::now() >= deadline {
+            break stopped;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let released = !e.home.join("supervisors/sigterm-worker.pid").exists();
+    acs::platform::kill_group(pid as u32, libc::SIGKILL);
+    if status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "supervisor did not exit cleanly"
+    );
+    assert!(stopped, "SIGTERM left the provider process group running");
+    assert!(released, "SIGTERM left supervisor ownership behind");
+}
+
 #[test]
 fn supervise_fails_task_on_malformed_output() {
     let e = e2e("w3", "malformed");
