@@ -113,9 +113,12 @@ Correct the config to retain the stored restriction, or have the operator
 explicitly authorise the wider policy, then restart. A rejected mixed update
 does not partially apply its tighter fields.
 
-Supervisor ownership remains different on this branch: Rust has the atomic
-lock protocol; the TypeScript supervisor here still has its older pid-file lock.
-Do not run both supervisors for the same agent.
+Both supervisors use the same atomic hard-link ownership protocol. Only one
+supervisor can run an agent at a time, including across Rust and TypeScript.
+An empty/corrupt ownership file or an abandoned `.pid.reap` cleanup lock fails
+closed rather than risking removal of a new owner's lock. Stop all starters
+for that agent and confirm no supervisor is running before removing the named
+stale file and retrying. Ordinary dead-supervisor PID files recover automatically.
 
 ## Platform notes
 

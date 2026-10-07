@@ -373,13 +373,16 @@ export function acquireSupervisorLock(dir, agentId) {
                 throw new BusError("conflict", `a supervisor for ${agentId} is already running (pid ${holder})`);
             reapStaleLock(path, holder);
         }
-        throw new BusError("conflict", `could not take the supervisor lock for ${agentId}; another supervisor keeps starting`);
+        throw new BusError("conflict", `could not take the supervisor lock for ${agentId}; stop competing starters, confirm no supervisor is running, remove the stale ownership file ${path} if present, then retry`);
     }
     finally {
         rmSync(mine, { force: true });
     }
 }
 function reapStaleLock(path, stalePid) {
+    // PID zero means ownership is unknown; retry without unlinking the file.
+    if (!stalePid)
+        return;
     const reap = `${path}.reap`;
     const mine = `${reap}.${process.pid}.tmp`;
     writeFileSync(mine, `${process.pid}\n`, { mode: 0o600 });
@@ -390,7 +393,7 @@ function reapStaleLock(path, stalePid) {
         catch (error) {
             if (error.code !== "EEXIST")
                 throw error;
-            // Another starter is reaping. A reaper that died mid-way leaves its file behind; clear it once it is clearly abandoned.
+            // Concurrent reclaimers could unlink a replacement reap lock, so fail closed.
             const reaper = readPid(reap);
             let age = 0;
             try {
@@ -399,8 +402,9 @@ function reapStaleLock(path, stalePid) {
             catch {
                 return;
             }
-            if (!reaper || (!pidAlive(reaper) && age > 2_000))
-                rmSync(reap, { force: true });
+            if ((!reaper || !pidAlive(reaper)) && age > 2_000) {
+                throw new BusError("conflict", `stale supervisor cleanup lock: ${reap}; stop competing starters, remove this cleanup lock, then retry`);
+            }
             return;
         }
         try {
@@ -662,6 +666,7 @@ export async function supervise(options) {
                     let focus = null;
                     let claimedNow = false;
                     let capacityBlocked = false;
+                    const capacityBlockedTaskIds = new Set();
                     for (const id of new Set(order)) {
                         try {
                             const before = bus.getTask(id);
@@ -676,6 +681,7 @@ export async function supervise(options) {
                         catch (error) {
                             if (isTaskCapacityConflict(error, me.agentId)) {
                                 capacityBlocked = true;
+                                capacityBlockedTaskIds.add(id);
                                 if (!retryClaimAtCapacity)
                                     log("at concurrent task limit; waiting for capacity");
                                 retryClaimAtCapacity = true;
@@ -688,11 +694,10 @@ export async function supervise(options) {
                     if (capacityBlocked) {
                         for (const task of candidates)
                             offered.delete(task.id);
-                        const blockedTaskIds = new Set(taskIds);
-                        const blockedMessages = messages.filter((message) => message.taskId && blockedTaskIds.has(message.taskId));
+                        const blockedMessages = messages.filter((message) => message.taskId && capacityBlockedTaskIds.has(message.taskId));
                         if (blockedMessages.length) {
                             deferMessages(blockedMessages);
-                            messages = messages.filter((message) => !message.taskId || !blockedTaskIds.has(message.taskId));
+                            messages = messages.filter((message) => !message.taskId || !capacityBlockedTaskIds.has(message.taskId));
                         }
                     }
                     if (focus) {

@@ -203,7 +203,10 @@ struct CrewConfiguration: View {
                 Divider()
             }
             if store.orchestration?.configured == false {
-                Text("No crew configured. Use Set Up Local Crew below to connect installed CLIs.").foregroundStyle(.secondary)
+                Text(store.snapshot?.simulated == true
+                    ? "Sample agents can't be configured. Open a project to connect your own crew."
+                    : "No crew configured. Use Set Up Local Crew below to connect installed CLIs.")
+                    .foregroundStyle(.secondary)
             }
         }
     }

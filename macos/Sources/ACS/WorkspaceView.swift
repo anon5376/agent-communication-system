@@ -139,7 +139,7 @@ struct WelcomeView: View {
             Text("The sample is free and simulated. No account, API key, or model call.")
                 .font(.caption).foregroundStyle(.secondary)
             Button("Already use ACS? Connect an existing bus…", action: store.chooseDatabase)
-                .buttonStyle(.link).disabled(store.busy)
+                .buttonStyle(.plain).foregroundStyle(.primary).underline().disabled(store.busy)
         }
         .frame(maxWidth: 560, alignment: .leading).padding(48)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

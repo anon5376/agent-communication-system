@@ -899,10 +899,8 @@ fn link_pid_file(path: &Path, suffix: &str) -> std::io::Result<()> {
 /// Taking it is atomic: the pid is hard-linked into place, which fails if any
 /// supervisor holds it, so two starters cannot both win. A stale file (its pid is
 /// gone) is removed only while holding `<agent>.pid.reap`, so a supervisor that just
-/// took the lock is never removed by a slower starter. acquireSupervisorLock in
-/// src/supervisor.ts on main (#29) uses the same protocol, so those two contend safely
-/// on one file; the TypeScript copy on rust-port still checks then writes, and can
-/// overwrite a lock held here.
+/// took the lock is never removed by a slower starter. The TypeScript supervisor uses
+/// the same protocol, so starters in either implementation contend safely on one file.
 fn acquire_lock(dir: &Path, agent_id: &str) -> Result<impl FnOnce()> {
     fs::create_dir_all(dir)?;
     let path = dir.join(format!("{agent_id}.pid"));
@@ -933,11 +931,16 @@ fn acquire_lock(dir: &Path, agent_id: &str) -> Result<impl FnOnce()> {
         reap_stale_lock(&path, holder)?;
     }
     Err(BusError::conflict(format!(
-        "could not take the supervisor lock for {agent_id}; another supervisor keeps starting"
+        "could not take the supervisor lock for {agent_id}; stop competing starters, confirm no supervisor is running, remove the stale ownership file {} if present, then retry",
+        path.display()
     )))
 }
 
 fn reap_stale_lock(path: &Path, stale_pid: i32) -> Result<()> {
+    // PID zero means ownership is unknown; retry without unlinking the file.
+    if stale_pid == 0 {
+        return Ok(());
+    }
     let reap = path.with_file_name(format!(
         "{}.reap",
         path.file_name().unwrap_or_default().to_string_lossy()
@@ -945,10 +948,8 @@ fn reap_stale_lock(path: &Path, stale_pid: i32) -> Result<()> {
     match link_pid_file(&reap, "reap") {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Another starter is reaping. A reaper that died midway leaves its file
-            // behind; clear it once it is clearly abandoned. A pid of 0 means the file
-            // is already gone (it is only ever linked in whole), and removing the path
-            // then could delete a newer reaper's file and let two reap at once.
+            // Concurrent reclaimers cannot safely unlink an abandoned reap lock:
+            // another starter may replace it between the liveness check and unlink.
             let reaper = read_pid(&reap);
             let age = fs::metadata(&reap)
                 .and_then(|m| m.modified())
@@ -965,8 +966,11 @@ fn reap_stale_lock(path: &Path, stale_pid: i32) -> Result<()> {
                     crate::platform::pid_alive(reaper)
                 }
             };
-            if reaper != 0 && !reaper_alive && age > Duration::from_secs(2) {
-                let _ = fs::remove_file(&reap);
+            if !reaper_alive && age > Duration::from_secs(2) {
+                return Err(BusError::conflict(format!(
+                    "stale supervisor cleanup lock: {}; stop competing starters, remove this cleanup lock, then retry",
+                    reap.display()
+                )));
             }
             std::thread::sleep(Duration::from_millis(5));
             return Ok(());
@@ -1786,4 +1790,53 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
     }
     log("supervisor stopped");
     result
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn supervisor_cleanup_never_reaps_unknown_ownership() {
+        for abandoned_reaper in [false, true] {
+            let dir = std::env::temp_dir().join(format!(
+                "acs-lock-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir(&dir).unwrap();
+            let path = dir.join("worker.pid");
+            let reap = dir.join("worker.pid.reap");
+            let contents = if abandoned_reaper { "999999\n" } else { "" };
+            fs::write(&path, contents).unwrap();
+            if abandoned_reaper {
+                fs::write(&reap, "999999\n").unwrap();
+                fs::File::options()
+                    .write(true)
+                    .open(&reap)
+                    .unwrap()
+                    .set_modified(std::time::SystemTime::now() - Duration::from_secs(10))
+                    .unwrap();
+            }
+            let result = acquire_lock(&dir, "worker");
+            let error = result.as_ref().err().map(|error| error.message.clone());
+            let retained = fs::read_to_string(&path).unwrap();
+            let retained_reaper = reap.exists();
+            if let Ok(release) = result {
+                release();
+            }
+            fs::remove_dir_all(&dir).unwrap();
+            let expected = if abandoned_reaper {
+                "stale supervisor cleanup lock"
+            } else {
+                "could not take the supervisor lock"
+            };
+            assert!(error.is_some_and(|error| error.contains(expected)));
+            assert_eq!(retained, contents);
+            assert_eq!(retained_reaper, abandoned_reaper);
+        }
+    }
 }

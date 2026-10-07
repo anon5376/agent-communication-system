@@ -20,6 +20,22 @@ fn workspace(label: &str) -> PathBuf {
     dir
 }
 
+fn retry_busy<T>(mut operation: impl FnMut() -> acs::error::Result<T>) -> acs::error::Result<T> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        match operation() {
+            Err(error)
+                if error.code == acs::error::Code::Conflict
+                    && error.message == "database is busy"
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+
 #[test]
 fn fifty_agents_complete_five_hundred_tasks_without_duplicate_claims() {
     let home = workspace("race");
@@ -62,14 +78,14 @@ fn fifty_agents_complete_five_hundred_tasks_without_duplicate_claims() {
                 let actor = bus.identify(Some(&format!("worker-{index}"))).unwrap();
                 let mut claimed = Vec::new();
                 loop {
-                    let task = match bus.claim_task(&actor, None) {
+                    let task = match retry_busy(|| bus.claim_task(&actor, None)) {
                         Ok(task) => task,
                         Err(error) if error.code.as_str() == "not_found" => break,
                         Err(error) => panic!("unexpected claim failure: {error}"),
                     };
                     assert_eq!(task.assignee.as_deref(), Some(actor.agent_id.as_str()));
                     assert_eq!(
-                        bus.submit_task(
+                        retry_busy(|| bus.submit_task(
                             &actor,
                             task.id,
                             SubmitInput {
@@ -77,7 +93,7 @@ fn fifty_agents_complete_five_hundred_tasks_without_duplicate_claims() {
                                     .into(),
                                 ..Default::default()
                             }
-                        )
+                        ))
                         .unwrap()
                         .state,
                         "submitted"

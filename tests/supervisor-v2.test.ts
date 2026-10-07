@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { ChildProcess, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,11 +9,31 @@ import { fileURLToPath } from "node:url";
 import { resolveAgent } from "../src/config.js";
 import { Bus } from "../src/core/bus.js";
 import { DatabaseSync } from "node:sqlite";
-import { MAX_FAILED_TURNS, buildBrief, mcpCommandFor, runHarnessProcess, sanitizedEnvironment, supervise } from "../src/supervisor.js";
+import { MAX_FAILED_TURNS, acquireSupervisorLock, buildBrief, mcpCommandFor, runHarnessProcess, sanitizedEnvironment, supervise } from "../src/supervisor.js";
 import { testConfig } from "./helpers.js";
 
 const QAGENT = fileURLToPath(new URL("../src/qagent.js", import.meta.url));
 const FAKE_HARNESS = fileURLToPath(new URL("../src/fake-harness.js", import.meta.url));
+
+test("supervisor cleanup never reaps unknown ownership", (t) => {
+  for (const abandonedReaper of [false, true]) {
+    const home = mkdtempSync(join(tmpdir(), "qagent-lock-"));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const path = join(home, "worker.pid");
+    const contents = abandonedReaper ? "999999\n" : "";
+    writeFileSync(path, contents);
+    if (abandonedReaper) {
+      writeFileSync(`${path}.reap`, "999999\n");
+      const old = new Date(Date.now() - 10_000);
+      utimesSync(`${path}.reap`, old, old);
+    }
+    assert.throws(() => acquireSupervisorLock(home, "worker"), abandonedReaper
+      ? /stale supervisor cleanup lock/
+      : /could not take the supervisor lock/);
+    assert.equal(readFileSync(path, "utf8"), contents);
+    assert.equal(existsSync(`${path}.reap`), abandonedReaper);
+  }
+});
 
 interface Fixture {
   home: string;

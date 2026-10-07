@@ -1339,7 +1339,7 @@ fn task_claim_with_worktree_fails_without_claiming() {
 
 #[test]
 fn simultaneous_supervisors_for_one_agent_leave_exactly_one_running() {
-    // Check-then-write ownership lets several starters win only now and then, so race a few rounds.
+    // Race stale-owner recovery repeatedly while keeping ownership exclusive.
     const STARTERS: usize = 16;
     let e = e2e("w1", "");
     let config_path = e.workdir.join("agent-bus.config.json");
@@ -1385,13 +1385,16 @@ fn simultaneous_supervisors_for_one_agent_leave_exactly_one_running() {
             std::thread::sleep(Duration::from_millis(50));
         }
         std::thread::sleep(Duration::from_millis(300));
-        let mut running = 0;
+        let mut running_pids = Vec::new();
         for child in &mut children {
             if child.try_wait().unwrap().is_none() {
-                running += 1;
+                running_pids.push(child.id());
             }
         }
+        let running = running_pids.len();
+        let lock_owner = fs::read_to_string(e.home.join("supervisors/w1.pid")).ok();
         let mut refusals = 0;
+        let mut stderr_by_pid = Vec::with_capacity(children.len());
         for child in &mut children {
             if child.try_wait().unwrap().is_none() {
                 #[cfg(unix)]
@@ -1407,12 +1410,25 @@ fn simultaneous_supervisors_for_one_agent_leave_exactly_one_running() {
                     );
                 }
             }
-            if child.wait_with_output_ref().contains("is already running") {
+            let pid = child.id();
+            let stderr = child.wait_with_output_ref();
+            if stderr.contains("is already running") {
                 refusals += 1;
             }
+            stderr_by_pid.push(format!("{pid}: {stderr:?}"));
         }
-        assert_eq!(running, 1, "round {round}: supervisors left running");
-        assert_eq!(refusals, STARTERS - 1, "round {round}");
+        assert_eq!(
+            running,
+            1,
+            "round {round}: supervisors left running; active pids {running_pids:?}; lock owner {lock_owner:?}; stderr by pid: {}",
+            stderr_by_pid.join("; ")
+        );
+        assert_eq!(
+            refusals,
+            STARTERS - 1,
+            "round {round}; active pids {running_pids:?}; lock owner {lock_owner:?}; stderr by pid: {}",
+            stderr_by_pid.join("; ")
+        );
     }
 }
 

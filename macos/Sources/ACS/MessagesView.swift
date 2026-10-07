@@ -72,7 +72,7 @@ struct MessageRow: View {
                             store.destination = .tasks
                             store.selectedTask = tag.taskID
                         }
-                        .buttonStyle(.link).font(.callout)
+                        .buttonStyle(.plain).font(.callout).foregroundStyle(.primary).underline()
                     } else {
                         Text("#\(tag.taskID)").font(.caption).foregroundStyle(.tertiary).monospacedDigit()
                     }
@@ -83,7 +83,7 @@ struct MessageRow: View {
                 .fixedSize(horizontal: false, vertical: true)
             if isLong {
                 Button(expanded ? "Show less" : "Show more") { expanded.toggle() }
-                    .buttonStyle(.link).font(.callout)
+                    .buttonStyle(.plain).font(.callout).foregroundStyle(.primary).underline()
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
