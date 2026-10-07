@@ -1,5 +1,7 @@
 use acs::bus::{Bus, CreateTaskInput, SubmitInput};
 use acs::types::OPERATOR_ID;
+use proptest::prelude::*;
+use proptest::test_runner::{Config, TestRunner};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Barrier};
@@ -264,6 +266,85 @@ fn deterministic_json_and_cli_mutations_return_errors_without_panicking() {
         .query_row("SELECT count(*) FROM tasks", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 0, "read-only malformed requests created work");
+    drop(bus);
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn property_based_protocol_and_cli_inputs_preserve_read_only_state() {
+    let home = workspace("properties");
+    let db = home.join("bus.db");
+    let bus = Bus::open(Some(&db)).unwrap();
+    bus.init().unwrap();
+    let text = proptest::collection::vec(any::<char>(), 0..128)
+        .prop_map(|chars| chars.into_iter().collect::<String>());
+    let leaf = prop_oneof![
+        Just(serde_json::Value::Null),
+        any::<bool>().prop_map(serde_json::Value::from),
+        any::<i64>().prop_map(serde_json::Value::from),
+        text.clone().prop_map(serde_json::Value::from),
+    ];
+    let payload = leaf.prop_recursive(3, 32, 8, |inner| {
+        prop_oneof![
+            proptest::collection::vec(inner.clone(), 0..8).prop_map(serde_json::Value::Array),
+            proptest::collection::btree_map("[a-z_]{0,12}", inner, 0..8)
+                .prop_map(|map| serde_json::Value::Object(map.into_iter().collect())),
+        ]
+    });
+    let args = proptest::collection::vec(
+        prop_oneof![
+            text.clone(),
+            text.clone().prop_map(|value| format!("--scope={value}")),
+            Just("--".to_string()),
+            Just("--json".to_string()),
+        ],
+        0..24,
+    );
+    let mut runner = TestRunner::new(Config {
+        cases: 2048,
+        ..Config::default()
+    });
+    runner
+        .run(
+            &(text, payload, args, any::<bool>()),
+            |(raw, value, args, snapshot)| {
+                if serde_json::from_str::<serde_json::Value>(&raw).is_err() {
+                    let (body, code) = acs::desktop::respond(&raw);
+                    let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    prop_assert_ne!(code, 0);
+                    prop_assert_eq!(reply["ok"].as_bool(), Some(false));
+                    prop_assert!(reply["error"]["message"].is_string());
+                }
+                let input = serde_json::json!({
+                    "version": 1, "dbPath": db,
+                    "action": if snapshot { "snapshot" } else { "task" },
+                    "payload": { "id": value },
+                });
+                let (body, code) = acs::desktop::respond(&input.to_string());
+                let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
+                prop_assert!(reply["ok"].is_boolean());
+                prop_assert_eq!(code == 0, reply["ok"] == true);
+                let _ = acs::cli::parse_args(&args);
+                let escaped = std::iter::once("--".to_string())
+                    .chain(args.clone())
+                    .collect::<Vec<_>>();
+                let parsed = acs::cli::parse_args(&escaped).unwrap();
+                prop_assert_eq!(parsed.positionals, args);
+                prop_assert!(parsed.flags.is_empty());
+                Ok(())
+            },
+        )
+        .unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    let count: i64 = connection
+        .query_row("SELECT count(*) FROM tasks", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+    drop(connection);
     drop(bus);
     std::fs::remove_dir_all(home).unwrap();
 }

@@ -25,6 +25,9 @@ ureq = { version = "3.4", features = ["json"] }
 ratatui = "0.29"
 crossterm = "0.28"
 
+[dev-dependencies]
+proptest = "=1.6.0"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

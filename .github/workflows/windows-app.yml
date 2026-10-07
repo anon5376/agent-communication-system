@@ -47,15 +47,29 @@ jobs:
             rust/target
           key: ${{ runner.os }}-cargo-windows-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Frontend checks
+      - name: Install frontend dependencies
         working-directory: windows
-        run: |
-          npm ci
-          npm audit --audit-level=high
-          npm run typecheck
-          npm run lint
-          npm run test
-          npm run build
+        run: npm ci
+
+      - name: Audit frontend dependencies
+        working-directory: windows
+        run: npm audit --audit-level=high
+
+      - name: Frontend typecheck
+        working-directory: windows
+        run: npm run typecheck
+
+      - name: Frontend lint
+        working-directory: windows
+        run: npm run lint
+
+      - name: Frontend tests
+        working-directory: windows
+        run: npm run test
+
+      - name: Frontend build
+        working-directory: windows
+        run: npm run build
 
       - name: Build installer
         shell: powershell
