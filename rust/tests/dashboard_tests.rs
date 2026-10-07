@@ -4,6 +4,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 fn qagent() -> &'static str {
@@ -11,17 +12,21 @@ fn qagent() -> &'static str {
 }
 
 struct TempDir(std::path::PathBuf);
+static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
 fn fresh_dir() -> TempDir {
-    let dir = std::env::temp_dir().join(format!(
-        "acs-dash-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    TempDir(dir)
+    loop {
+        let dir = std::env::temp_dir().join(format!(
+            "acs-dash-test-{}-{}",
+            std::process::id(),
+            NEXT_TEMP_DIR_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return TempDir(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("create dashboard test directory {}: {error}", dir.display()),
+        }
+    }
 }
 impl std::ops::Deref for TempDir {
     type Target = std::path::Path;
