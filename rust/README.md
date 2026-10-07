@@ -140,10 +140,15 @@ stale file and retrying. Ordinary dead-supervisor PID files recover automaticall
   stop is a `<agent>.stop` file it polls next to its pid file.
 - `aos autostart` (launchd/systemd) returns "not supported on Windows" rather
   than faking it.
-- Provider CLIs resolve through PATH + PATHEXT (`.exe`/`.cmd`/`.bat`), so
-  npm-installed shims are found. `.cmd`/`.bat` run through
-  `cmd.exe /d /s /c` with every argument quoted; an argument cmd.exe cannot
-  represent (`%`, `"`, a newline) is refused rather than interpolated.
+- Provider CLIs resolve through PATH + PATHEXT (`.exe`/`.cmd`/`.bat`). Standard
+  npm Node shims (the unmodified `cmd-shim` template without shebang options or
+  environment assignments) run directly through `node.exe`, so multiline prompts
+  and shell metacharacters remain literal arguments. Other `.cmd`/`.bat` files
+  use `cmd.exe /d /v:off /s /c`; arguments containing `%`, `!`, `"` or newlines
+  are refused rather than interpolated. For custom batch providers, configure
+  the underlying executable instead, e.g. `aos connect my-cli -- node.exe
+  C:\\tools\\cli.js {prompt}`. Launch refusals appear in runtime diagnostics without
+  including the rejected prompt.
 
 ## Layout notes vs the TS source
 

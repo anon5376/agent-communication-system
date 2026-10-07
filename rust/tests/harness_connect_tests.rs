@@ -973,5 +973,61 @@ fn cmd_shims_run_through_cmd_and_unsafe_args_are_refused() {
     for bad in ["a%PATH%b", "!VAR!", "say \"hi\"", "two\nlines"] {
         let err = acs::platform::program_command(&tool, &[bad.to_string()]).unwrap_err();
         assert!(err.message.contains("cannot be quoted"), "{bad}: {err}");
+        assert!(err.message.contains("underlying executable"));
+        assert!(!err.message.contains(bad));
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn npm_node_shim_preserves_multiline_prompt_arguments_without_a_shell() {
+    let dir = fresh_dir("npm shim with spaces");
+    let package = dir.join("node_modules/fake-cli");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("cli.js"),
+        "console.log(JSON.stringify(process.argv.slice(2)))",
+    )
+    .unwrap();
+    let shim = dir.join("fake-cli.cmd");
+    // npm/cmd-shim's standard output for a bare #!/usr/bin/env node entrypoint.
+    let source = r#"@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+
+IF EXIST "%dp0%\node.exe" (
+  SET "_prog=%dp0%\node.exe"
+) ELSE (
+  SET "_prog=node"
+)
+
+endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & set PATHEXT=%PATHEXT:;.JS;=;% & "%_prog%"  "%dp0%\node_modules\fake-cli\cli.js" %*
+"#;
+    fs::write(&shim, source.replace('\n', "\r\n")).unwrap();
+    let args = [
+        "line one\r\nline two \"quoted\" %PATH% !VAR! & echo injected>marker.txt | < > ^ ( ) Ω",
+        "",
+        "ends\\",
+    ];
+    let output = acs::platform::program_command(&shim, &args)
+        .unwrap()
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(actual, args);
+    assert!(!dir.join("marker.txt").exists());
+    fs::write(&shim, format!("{source}echo customized\n")).unwrap();
+    assert!(acs::platform::program_command(&shim, &args).is_err());
+    fs::remove_dir_all(dir).unwrap();
 }

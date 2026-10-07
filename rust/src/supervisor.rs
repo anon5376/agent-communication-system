@@ -197,6 +197,7 @@ pub struct ProcessResult {
     pub output: String,
     pub duration_ms: u64,
     pub timed_out: bool,
+    pub spawn_error: Option<String>,
 }
 
 use crate::platform::{kill_group, SIGKILL, SIGTERM};
@@ -309,6 +310,7 @@ pub fn run_harness_process(
             return ProcessResult {
                 code: -1,
                 output: format!("\nspawn error: {error}"),
+                spawn_error: Some(error.message),
                 duration_ms: started.elapsed().as_millis() as u64,
                 timed_out: false,
             };
@@ -342,6 +344,7 @@ pub fn run_harness_process(
             return ProcessResult {
                 code: -1,
                 output: format!("\nspawn error: {error}"),
+                spawn_error: Some(error.to_string()),
                 duration_ms: started.elapsed().as_millis() as u64,
                 timed_out: false,
             };
@@ -469,6 +472,7 @@ pub fn run_harness_process(
         output: String::from_utf8_lossy(&captured.into_bytes()).to_string(),
         duration_ms: started.elapsed().as_millis() as u64,
         timed_out: timed_out.load(Ordering::SeqCst),
+        spawn_error: None,
     }
 }
 
@@ -1563,6 +1567,8 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                             "harness timed out after {} ms",
                             process_result.duration_ms
                         ))
+                    } else if let Some(error) = &process_result.spawn_error {
+                        Some(format!("cannot launch provider: {error}"))
                     } else if session_mismatch {
                         Some(format!(
                             "harness resumed unexpected session {}; expected {}",

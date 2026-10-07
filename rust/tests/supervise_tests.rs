@@ -35,6 +35,25 @@ fn capabilities() -> serde_json::Value {
     })
 }
 
+#[test]
+fn missing_provider_retains_a_safe_spawn_diagnostic() {
+    let dir = fresh_dir("missing-provider");
+    let result = run_harness_process(
+        dir.join("does-not-exist.exe").to_str().unwrap(),
+        &["private prompt content".into()],
+        &HashMap::new(),
+        dir.to_str().unwrap(),
+        1000,
+        &Arc::new(std::sync::Mutex::new(None)),
+    );
+    assert_eq!(result.code, -1);
+    let error = result.spawn_error.unwrap();
+    assert!(!error.is_empty());
+    assert!(!error.contains("private prompt content"));
+    assert!(!result.output.contains("private prompt content"));
+    fs::remove_dir_all(dir).unwrap();
+}
+
 /// A fixture config with a fake provider/harness/model and one worker agent,
 /// plus an optional anthropic subscription-backed agent for env tests.
 fn write_config(dir: &std::path::Path, agents: &[(&str, &str)], harness_mode: &str) -> PathBuf {
@@ -651,9 +670,21 @@ fn supervise_pauses_after_repeated_failures_and_keeps_the_mail() {
             .unwrap()
             .and_then(|a| acs::control::paused(&a.meta))
     };
-    wait_for(Duration::from_secs(30), "failure pause", || {
-        paused().is_some()
-    });
+    wait_for(
+        Duration::from_secs(30),
+        "failure pause and operator mail",
+        || {
+            paused().is_some()
+                && e.bus
+                    .inbox(&e.operator, true, None)
+                    .unwrap()
+                    .messages
+                    .iter()
+                    .any(|m| {
+                        m.subject == format!("w4 paused: {MAX_FAILED_TURNS} turns failed in a row")
+                    })
+        },
+    );
     let reason = paused().unwrap().reason;
     assert!(
         reason.starts_with(&format!("{MAX_FAILED_TURNS} turns failed in a row")),

@@ -430,17 +430,66 @@ fn cmd_quote(arg: &str) -> Result<String> {
         .chars()
         .any(|c| matches!(c, '"' | '%' | '!' | '\r' | '\n'))
     {
-        return Err(BusError::invalid(format!(
-            "cannot run a .cmd/.bat provider safely: {arg:?} cannot be quoted for cmd.exe"
-        )));
+        return Err(BusError::invalid(
+            "cannot run a .cmd/.bat provider safely: an argument cannot be quoted for cmd.exe; use the underlying executable (for Node CLIs: node.exe path/to/cli.js) instead",
+        ));
     }
     Ok(format!("\"{arg}\""))
+}
+
+// Only bypass the unmodified npm cmd-shim template with a bare Node shebang.
+#[cfg(any(windows, test))]
+const NPM_NODE_PREFIX: &str = concat!(
+    "@ECHO off\nGOTO start\n:find_dp0\nSET dp0=%~dp0\nEXIT /b\n:start\n",
+    "SETLOCAL\nCALL :find_dp0\n\nIF EXIST \"%dp0%\\node.exe\" (\n",
+    "  SET \"_prog=%dp0%\\node.exe\"\n) ELSE (\n  SET \"_prog=node\"\n)\n\n",
+    "endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & ",
+    "set PATHEXT=%PATHEXT:;.JS;=;% & \"%_prog%\"  \"%dp0%\\",
+);
+
+#[cfg(any(windows, test))]
+fn npm_node_target(source: &str) -> Option<String> {
+    let normalized = source.replace("\r\n", "\n");
+    let target = normalized
+        .strip_prefix(NPM_NODE_PREFIX)?
+        .strip_suffix("\" %*\n")?;
+    if target.is_empty()
+        || target
+            .chars()
+            .any(|c| matches!(c, '"' | '%' | '!' | '\r' | '\n' | '\0' | ':'))
+        || target.starts_with(['\\', '/'])
+    {
+        return None;
+    }
+    Some(target.replace('\\', "/"))
+}
+
+#[cfg(windows)]
+fn npm_node_command<S: AsRef<std::ffi::OsStr>>(program: &Path, args: &[S]) -> Option<Command> {
+    let source = fs::read_to_string(program).ok()?;
+    let target = npm_node_target(&source)?;
+    let base = program.parent()?;
+    let script = base.join(target).canonicalize().ok()?;
+    if !script.is_file() {
+        return None;
+    }
+    let local_node = base.join("node.exe");
+    let node = if local_node.is_file() {
+        local_node
+    } else {
+        resolve_program(Path::new("node.exe"))
+    };
+    let mut command = Command::new(node);
+    command.arg(script).args(args);
+    Some(command)
 }
 
 /// Build a Command for `program` + `args`.
 ///
 /// Windows: a bare name resolves through PATH/PATHEXT first. A resolved
-/// .cmd/.bat shim then runs as `cmd.exe /d /v:off /s /c " "<prog>" "<arg>" ..."` —
+/// Standard npm Node shims run directly through node.exe, preserving arbitrary
+/// prompt arguments without a shell. Other .cmd/.bat shims run as
+/// `cmd.exe /d /v:off /s /c " "<prog>" "<arg>" ..."` —
 /// the whole line goes on the command line verbatim (raw_arg), so cmd strips
 /// the outer pair of quotes and reads each inner quoted piece as-is: no shell
 /// interpolation, and any piece that cannot be quoted safely is refused with
@@ -457,6 +506,9 @@ pub fn program_command<S: AsRef<std::ffi::OsStr>>(program: &Path, args: &[S]) ->
     {
         let program = resolve_program(program);
         if needs_cmd_shim(&program) {
+            if let Some(command) = npm_node_command(&program, args) {
+                return Ok(command);
+            }
             let mut line = cmd_quote(&program.to_string_lossy())?;
             for arg in args {
                 line.push(' ');
@@ -552,5 +604,29 @@ pub fn truncate_stdout(path: &Path) {
 pub fn truncate_stdout(path: &Path) {
     if let Ok(file) = fs::OpenOptions::new().write(true).open(path) {
         let _ = file.set_len(0);
+    }
+}
+
+#[cfg(test)]
+mod npm_shim_tests {
+    use super::*;
+
+    #[test]
+    fn npm_node_shim_requires_the_complete_unmodified_template() {
+        let source = format!("{NPM_NODE_PREFIX}node_modules\\fake-cli\\cli.js\" %*\n");
+        for source in [source.clone(), source.replace('\n', "\r\n")] {
+            assert_eq!(
+                npm_node_target(&source).as_deref(),
+                Some("node_modules/fake-cli/cli.js")
+            );
+        }
+        for changed in [
+            format!("echo custom-hook\n{source}"),
+            format!("{source}echo custom-hook\n"),
+            source.replace("\"%_prog%\"  ", "\"%_prog%\" --inspect "),
+            source.replace("node_modules", "%OTHER%"),
+        ] {
+            assert!(npm_node_target(&changed).is_none());
+        }
     }
 }
