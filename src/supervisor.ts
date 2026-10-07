@@ -569,6 +569,10 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
     // Worktree mode shows only mail about the turn's task; the rest is kept here for later turns,
     // since reading the inbox has already moved the cursor past it.
     let deferred: Message[] = session.pendingMail ?? [];
+    const deferMessages = (incoming: Message[]) => {
+      const bySeq = new Map([...deferred, ...incoming].map((message) => [message.seq, message]));
+      deferred = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+    };
     delete session.pendingMail;
     // Tasks claimed in this round before its turn ran: released again if the round fails.
     let claimedThisRound: number[] = [];
@@ -681,7 +685,7 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
             const blockedTaskIds = new Set(taskIds);
             const blockedMessages = messages.filter((message) => message.taskId && blockedTaskIds.has(message.taskId));
             if (blockedMessages.length) {
-              deferred = [...blockedMessages, ...deferred];
+              deferMessages(blockedMessages);
               messages = messages.filter((message) => !message.taskId || !blockedTaskIds.has(message.taskId));
             }
           }
@@ -700,12 +704,12 @@ export async function supervise(options: SuperviseOptions): Promise<void> {
               markOffered(bus.getTask(focus.id));
               // Mail about the refused task is answered by its note; all other mail waits for a later turn.
               const refused = focus.id;
-              deferred = messages.filter((message) => message.taskId !== refused);
+              deferMessages(messages.filter((message) => message.taskId !== refused));
               continue;
             }
             tasks.push(focus);
             // Mail about tasks this turn does not hold would invite work outside the checkout.
-            deferred = messages.filter((message) => message.taskId && message.taskId !== focus!.id);
+            deferMessages(messages.filter((message) => message.taskId && message.taskId !== focus!.id));
             messages = messages.filter((message) => !message.taskId || message.taskId === focus!.id);
             taskIds.clear();
             taskIds.add(focus.id);

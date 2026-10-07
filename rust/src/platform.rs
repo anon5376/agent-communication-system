@@ -225,6 +225,24 @@ pub mod jobs {
         }
     }
 
+    /// Terminate a completed harness's remaining descendants through its
+    /// registered Job Object, then close the handle. Never reopen the pid:
+    /// the root process may have exited and its id may already be reused.
+    pub fn finish_tree(pid: u32) {
+        let job = JOBS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+            .and_then(|jobs| jobs.remove(&pid));
+        if let Some(job) = job {
+            unsafe {
+                let job = job as windows_sys::Win32::Foundation::HANDLE;
+                TerminateJobObject(job, 1);
+                CloseHandle(job);
+            }
+        }
+    }
+
     /// Release the Job Object when the supervised child exits on its own.
     /// Closing the handle kills nothing (no KILL_ON_JOB_CLOSE was set).
     pub fn forget(pid: u32) {
@@ -404,12 +422,15 @@ fn needs_cmd_shim(program: &Path) -> bool {
 
 /// Quote one piece of a `cmd /c` command line: always wrapped in double
 /// quotes, which makes cmd metacharacters (& | < > ^ ( )) inert. Anything that
-/// could still let cmd.exe expand or split the line — % (env expansion), a
-/// quote (breaks out), a newline — is refused: a clear error is safer than
-/// command injection.
+/// could still let cmd.exe expand or split the line — % (env expansion), ! (delayed
+/// expansion), a quote (breaks out), or a newline — is refused: a clear error
+/// is safer than command injection.
 #[cfg(windows)]
 fn cmd_quote(arg: &str) -> Result<String> {
-    if arg.chars().any(|c| matches!(c, '"' | '%' | '\r' | '\n')) {
+    if arg
+        .chars()
+        .any(|c| matches!(c, '"' | '%' | '!' | '\r' | '\n'))
+    {
         return Err(BusError::invalid(format!(
             "cannot run a .cmd/.bat provider safely: {arg:?} cannot be quoted for cmd.exe"
         )));
@@ -420,11 +441,12 @@ fn cmd_quote(arg: &str) -> Result<String> {
 /// Build a Command for `program` + `args`.
 ///
 /// Windows: a bare name resolves through PATH/PATHEXT first. A resolved
-/// .cmd/.bat shim then runs as `cmd.exe /d /s /c " "<prog>" "<arg>" ..."` —
+/// .cmd/.bat shim then runs as `cmd.exe /d /v:off /s /c " "<prog>" "<arg>" ..."` —
 /// the whole line goes on the command line verbatim (raw_arg), so cmd strips
 /// the outer pair of quotes and reads each inner quoted piece as-is: no shell
 /// interpolation, and any piece that cannot be quoted safely is refused with
-/// a clear error. /d keeps AutoRun registry commands out of the line.
+/// a clear error. /d keeps AutoRun registry commands out of the line; /v:off
+/// disables delayed environment-variable expansion.
 ///
 /// Unix and non-shim programs: a plain Command::new + args, unchanged.
 ///
@@ -442,7 +464,7 @@ pub fn program_command<S: AsRef<std::ffi::OsStr>>(program: &Path, args: &[S]) ->
                 line.push_str(&cmd_quote(&arg.as_ref().to_string_lossy())?);
             }
             let mut cmd = Command::new("cmd.exe");
-            cmd.args(["/d", "/s", "/c"]);
+            cmd.args(["/d", "/v:off", "/s", "/c"]);
             use std::os::windows::process::CommandExt;
             // Verbatim on the command line — the quoting above already did the
             // escaping cmd understands; std's own quoting would double-escape it.

@@ -152,8 +152,8 @@ export class WorkspaceStore {
     });
     if (typeof folder !== "string" || !folder) return;
     const db = await workspaceDbPath(folder);
-    const isNew = true; // init is idempotent on an existing bus, like macOS
-    await this.connect(db, folder, { initialize: isNew });
+    const initialize = true; // desktop init creates new buses without rotating existing operator tokens
+    await this.connect(db, folder, { initialize });
   }
 
   async chooseDatabase(): Promise<void> {
@@ -184,8 +184,7 @@ export class WorkspaceStore {
     this.error.value = null;
     try {
       if (opts.initialize || opts.demo) {
-        // macOS passes initialize only when the db is new; init is
-        // idempotent, so running it unconditionally is safe.
+        // Desktop init creates a new bus or connects to an existing one without changing its operator token.
         await acsRequest<Acknowledgement>(db, opts.demo ? "demo" : "init");
       }
       const raw = await acsRequest<unknown>(db, "snapshot");

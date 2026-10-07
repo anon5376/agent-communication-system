@@ -1193,6 +1193,88 @@ fn simultaneous_supervisors_for_one_agent_leave_exactly_one_running() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn failed_supervisor_start_preserves_an_existing_stop_request() {
+    let e = e2e("w1", "");
+    let pid_file = e.home.join("supervisors/w1.pid");
+    fs::create_dir_all(pid_file.parent().unwrap()).unwrap();
+    let mut holder = std::process::Command::new("ping")
+        .args(["-n", "30", "127.0.0.1"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    fs::write(&pid_file, format!("{}\n", holder.id())).unwrap();
+    let stop_file = acs::platform::stop_file_for(&pid_file);
+    fs::write(&stop_file, "stop\n").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_qagent"))
+        .arg("--db")
+        .arg(e.home.join("bus.db"))
+        .args(["--as", "w1", "supervise", "w1"])
+        .arg(&e.workdir)
+        .arg("--config")
+        .arg(e.workdir.join("agent-bus.config.json"))
+        .output();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    let output = output.unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("is already running"), "{stderr}");
+    assert!(
+        stop_file.exists(),
+        "failed startup removed the active stop request"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn harness_output_inheritor_helper() {
+    match std::env::var("ACS_TEST_PIPE_MODE").as_deref() {
+        Ok("parent") => {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "harness_output_inheritor_helper", "--nocapture"])
+                .env("ACS_TEST_PIPE_MODE", "child")
+                .spawn()
+                .unwrap();
+        }
+        Ok("child") => std::thread::sleep(Duration::from_secs(12)),
+        _ => {}
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn harness_completion_terminates_descendants_holding_output_pipes() {
+    let executable = std::env::current_exe().unwrap();
+    let args = vec![
+        "--exact".to_string(),
+        "harness_output_inheritor_helper".to_string(),
+        "--nocapture".to_string(),
+    ];
+    let environment = HashMap::from([("ACS_TEST_PIPE_MODE".to_string(), "parent".to_string())]);
+    let workdir = std::env::current_dir().unwrap().display().to_string();
+    let child_pid = Arc::new(std::sync::Mutex::new(None));
+    let started = Instant::now();
+    let result = run_harness_process(
+        executable.to_str().unwrap(),
+        &args,
+        &environment,
+        &workdir,
+        15_000,
+        &child_pid,
+    );
+    assert_eq!(result.code, 0, "{}", result.output);
+    assert!(!result.timed_out, "{}", result.output);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "harness completion waited for an output-pipe inheritor: {:?}",
+        started.elapsed()
+    );
+}
+
 trait WaitOutput {
     fn wait_with_output_ref(&mut self) -> String;
 }

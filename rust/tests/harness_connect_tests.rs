@@ -964,9 +964,8 @@ fn cmd_shims_run_through_cmd_and_unsafe_args_are_refused() {
     );
 
     // Arguments cmd.exe cannot safely represent are refused.
-    for bad in ["a%PATH%b", "say \"hi\"", "two\nlines"] {
-        let err =
-            acs::platform::program_command(&tool, &[bad.to_string()]).unwrap_err();
+    for bad in ["a%PATH%b", "!VAR!", "say \"hi\"", "two\nlines"] {
+        let err = acs::platform::program_command(&tool, &[bad.to_string()]).unwrap_err();
         assert!(err.message.contains("cannot be quoted"), "{bad}: {err}");
     }
 }

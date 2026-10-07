@@ -714,7 +714,11 @@ impl App {
             }
             "pause" if !rest.is_empty() && self.is_target(rest[0]) => {
                 let reason = rest[1..].join(" ");
-                for id in self.targets(rest[0]) {
+                let targets = self.targets(rest[0]);
+                if targets.is_empty() {
+                    self.say(dim_line("no agents configured / run aos setup"));
+                }
+                for id in targets {
                     let r = self.operator().and_then(|op| {
                         self.bus
                             .pause_agent(&op, &id, Some(reason.as_str()).filter(|r| !r.is_empty()))
@@ -725,7 +729,11 @@ impl App {
                 }
             }
             "resume" | "continue" if rest.len() == 1 && self.is_target(rest[0]) => {
-                for id in self.targets(rest[0]) {
+                let targets = self.targets(rest[0]);
+                if targets.is_empty() {
+                    self.say(dim_line("no agents configured / run aos setup"));
+                }
+                for id in targets {
                     let r = self
                         .operator()
                         .and_then(|op| self.bus.resume_agent(&op, &id));
@@ -1444,6 +1452,9 @@ impl App {
         } else {
             only.to_vec()
         };
+        if ids.is_empty() {
+            self.say(dim_line("no crew configured / run aos setup"));
+        }
         for (id, r) in crew::stop(&self.paths, &ids) {
             match r {
                 Ok(true) => self.say(ok_line(format!("{id} stopped"))),
@@ -1590,14 +1601,14 @@ impl App {
             });
             self.outcome(r, |t| {
                 format!(
-                    "goal #{} started / {}{}",
+                    "goal #{} queued / {}{} / awaiting an agent claim",
                     t.id,
                     t.state,
                     t.assignee.map(|a| format!(" for {a}")).unwrap_or_default()
                 )
             });
             if self.frame.agents.is_empty() {
-                self.say(dim_line("no agents yet, so it waits / setup makes a crew"));
+                self.say(dim_line("no agent can take it yet / run aos setup"));
             }
             return self.refresh();
         }
@@ -1643,7 +1654,7 @@ impl App {
         match r {
             Ok(t) => {
                 self.say(ok_line(format!(
-                    "goal #{} started / {} is on it",
+                    "goal #{} queued / awaiting a claim by {}",
                     t.id,
                     lead.unwrap_or_else(|| "the first free agent".into())
                 )));

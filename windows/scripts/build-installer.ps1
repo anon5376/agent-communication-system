@@ -54,9 +54,12 @@ try {
     if ($FakeHelper) {
         Write-Warning "-FakeHelper: building a PREVIEW installer with the fake backend."
         Push-Location $Tauri
-        cargo build --release --example fake-acs-desktop
-        if ($LASTEXITCODE -ne 0) { throw "fake-acs-desktop build failed" }
-        Pop-Location
+        try {
+            cargo build --release --example fake-acs-desktop
+            if ($LASTEXITCODE -ne 0) { throw "fake-acs-desktop build failed" }
+        } finally {
+            Pop-Location
+        }
         Copy-Item (Join-Path $Tauri "target\release\examples\fake-acs-desktop.exe") `
                   (Join-Path $BinDir "acs-desktop-$Triple.exe") -Force
         $staged["acs-desktop"] = "fake"
@@ -64,9 +67,12 @@ try {
     } else {
         Write-Host "Building acs-desktop/qagent/aos from rust/ (release, locked)..."
         Push-Location $Rust
-        cargo build --locked --release --bin acs-desktop --bin qagent --bin aos
-        $coreOk = $LASTEXITCODE -eq 0
-        Pop-Location
+        try {
+            cargo build --locked --release --bin acs-desktop --bin qagent --bin aos
+            $coreOk = $LASTEXITCODE -eq 0
+        } finally {
+            Pop-Location
+        }
         if (-not $coreOk) {
             throw "rust/ did not build on Windows. Fail closed by design: rerun with -FakeHelper only if you intend a PREVIEW build."
         }
@@ -82,9 +88,12 @@ try {
     # --- frontend -----------------------------------------------------------
     if (-not $SkipNpm) {
         Push-Location $Windows
-        if (-not (Test-Path "node_modules")) { npm ci }
-        npm run build
-        Pop-Location
+        try {
+            if (-not (Test-Path "node_modules")) { npm ci }
+            npm run build
+        } finally {
+            Pop-Location
+        }
     }
 
     # --- tauri bundle -------------------------------------------------------
@@ -94,14 +103,25 @@ try {
     # the fake acs-desktop alone. (Config-file overlays don't reliably merge
     # externalBin.)
     $confPath = Join-Path $Tauri "tauri.conf.json"
-    $confOrig = Get-Content $confPath -Raw
-    $binList = ($staged.Keys | Sort-Object | ForEach-Object { "`"binaries/$_`"" }) -join ", "
-    $confOrig -replace '"externalBin"\s*:\s*\[[^\]]*\]', "`"externalBin`": [$binList]" | Set-Content $confPath -NoNewline
-    Push-Location $Windows
-    npm run tauri -- build
-    $tauriExit = $LASTEXITCODE
-    Pop-Location
-    $confOrig | Set-Content $confPath -NoNewline
+    $confOrig = [System.IO.File]::ReadAllBytes($confPath)
+    $tauriExit = 1
+    try {
+        $confText = [System.IO.File]::ReadAllText($confPath)
+        $binList = ($staged.Keys | Sort-Object | ForEach-Object { "`"binaries/$_`"" }) -join ", "
+        $patchedConfig = $confText -replace '"externalBin"\s*:\s*\[[^\]]*\]', "`"externalBin`": [$binList]"
+        [System.IO.File]::WriteAllText($confPath, $patchedConfig, [System.Text.UTF8Encoding]::new($false))
+        $pushedWindowsLocation = $false
+        try {
+            Push-Location $Windows
+            $pushedWindowsLocation = $true
+            npm run tauri -- build
+            $tauriExit = $LASTEXITCODE
+        } finally {
+            if ($pushedWindowsLocation) { Pop-Location }
+        }
+    } finally {
+        [System.IO.File]::WriteAllBytes($confPath, $confOrig)
+    }
     if ($tauriExit -ne 0) { throw "tauri build failed" }
 
     # --- name + checksum ----------------------------------------------------

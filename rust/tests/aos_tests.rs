@@ -408,7 +408,7 @@ fn run_and_task_add_take_assignee_parent_and_review() {
     let (mut app, db) = demo_app(80, 24);
     let all = home(&mut app, "run document the budget api --to lead");
     assert!(
-        all.contains("[ ok ] goal #8 started / open for lead"),
+        all.contains("[ ok ] goal #8 queued / open for lead"),
         "{all}"
     );
     let all = home(
@@ -424,6 +424,31 @@ fn run_and_task_add_take_assignee_parent_and_review() {
     assert_eq!(t.parent_id, Some(8));
     assert_eq!(t.assignee.as_deref(), Some("scout"));
     assert_eq!(t.reviewer.as_deref(), Some("operator"));
+}
+
+#[test]
+fn empty_bus_commands_explain_setup_and_goals_are_queued() {
+    let dir = std::env::temp_dir().join(format!(
+        "aos-empty-{}-{}",
+        std::process::id(),
+        NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+    ));
+    let db = dir.join("bus.db");
+    let bus = Bus::open(Some(&db)).unwrap();
+    ensure_operator(&bus).unwrap();
+    let mut app = App::new(bus, DEFAULT_STALL_MIN * 60_000).unwrap();
+    app.ui.width = 160;
+    app.ui.height = 40;
+    for command in ["pause all", "resume all", "stop all"] {
+        let all = home(&mut app, command);
+        assert!(all.contains("run aos setup"), "{command}: {all}");
+    }
+    let all = home(&mut app, "run fix the empty state");
+    assert!(all.contains("goal #1 queued"), "{all}");
+    assert!(all.contains("no agent can take it yet"), "{all}");
+    assert!(!all.contains("goal #1 started"), "{all}");
+    drop(app);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

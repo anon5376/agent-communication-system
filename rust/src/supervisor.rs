@@ -346,7 +346,7 @@ pub fn run_harness_process(
     let status = child.wait();
     settled.store(true, Ordering::SeqCst);
     #[cfg(windows)]
-    crate::platform::jobs::forget(pid);
+    crate::platform::jobs::finish_tree(pid);
     *child_pid.lock().unwrap() = None;
     let _ = out_thread.join();
     let _ = err_thread.join();
@@ -1013,19 +1013,6 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
             .join("supervisors")
             .join(format!("{}.pid", options.agent_id)),
     );
-    #[cfg(windows)]
-    {
-        let _ = fs::remove_file(&stop_file);
-        let stop = options.stop.clone();
-        let stop_file = stop_file.clone();
-        std::thread::spawn(move || loop {
-            if stop.load(Ordering::SeqCst) || stop_file.exists() {
-                stop.store(true, Ordering::SeqCst);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        });
-    }
 
     // Abort listener: stop -> SIGTERM the running CLI's process group (SIGKILL after 3s).
     {
@@ -1075,6 +1062,19 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
             &home.join("supervisors"),
             &agent.agent.id,
         )?));
+        #[cfg(windows)]
+        {
+            let _ = fs::remove_file(&stop_file);
+            let stop = options.stop.clone();
+            let stop_file = stop_file.clone();
+            std::thread::spawn(move || loop {
+                if stop.load(Ordering::SeqCst) || stop_file.exists() {
+                    stop.store(true, Ordering::SeqCst);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            });
+        }
 
         let adapter = get_harness_adapter(&agent.harness.adapter)?;
         let managed = supervisor_managed(&agent);
@@ -1529,7 +1529,7 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
                                 if let Err(error) = bus.submit_task(&me, *id, SubmitInput {
                                     summary: normalized.text.chars().take(20_000).collect(),
                                     details: Some(
-                                        "auto-submitted by the supervisor for a harness without bus tool calls".to_string(),
+                                        "Unverified CLI output, needs independent review. Auto-submitted by the supervisor; a successful exit does not verify the requested work.".to_string(),
                                     ),
                                     changed_files: structured_array(&structured["changedFiles"])
                                         .iter()
@@ -1592,11 +1592,16 @@ pub fn supervise(options: SuperviseOptions) -> Result<()> {
             }
         });
     }
+    #[cfg(windows)]
+    let acquired_lock = release.is_some();
+    options.stop.store(true, Ordering::SeqCst);
     if let Some(release) = release.take() {
         release();
     }
     #[cfg(windows)]
-    let _ = fs::remove_file(&stop_file);
+    if acquired_lock {
+        let _ = fs::remove_file(&stop_file);
+    }
     log("supervisor stopped");
     result
 }

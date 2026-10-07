@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { ChildProcess, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -361,6 +361,85 @@ test("worktree backlog retries after a concurrent-task limit releases capacity",
   assert.equal(submitted.assignee, worker.agentId);
   const worktree = f.json(undefined, ["task", "worktree", String(available.id)]);
   assert.equal(realpathSync(submitted.result?.summary?.replace(/^cwd=/, "") ?? ""), realpathSync(worktree.workdir));
+  controller.abort();
+  await running;
+});
+
+test("worktree backlog preserves queued task mail while a held task runs at capacity", { timeout: 60_000 }, async (t) => {
+  const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
+  const gitIn = (args: string[]) => {
+    const result = spawnSync("git", ["-c", "user.email=test@example.com", "-c", "user.name=test", ...args], { cwd: f.project, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  gitIn(["init", "-q"]);
+  writeFileSync(join(f.project, "README"), "x\n");
+  gitIn(["add", "."]);
+  gitIn(["commit", "-q", "-m", "init"]);
+
+  const operator = f.bus.identify("operator");
+  const worker = f.bus.identify("fake-small");
+  const queued = f.bus.createTask(operator, { title: "queued runner", to: worker.agentId, project: f.project });
+  const held = f.bus.createTask(operator, { title: "held runner", to: worker.agentId, project: f.project });
+  f.bus.claimTask(worker, held.id);
+  f.bus.inbox(worker, { limit: 50 });
+  f.bus.send(operator, {
+    to: worker.agentId,
+    subject: "queued task details",
+    body: "UNIQUE_QUEUED_TASK_MAIL",
+    type: "task",
+    taskId: queued.id,
+  });
+  f.bus.send(operator, {
+    to: worker.agentId,
+    subject: "held task details",
+    body: "held task mail",
+    type: "task",
+    taskId: held.id,
+  });
+
+  const orderPath = join(f.home, "worktree-turn-order");
+  const probe = "const fs=require('node:fs');const prompt=process.argv[1]||'';const label=prompt.includes('held runner')?'held':prompt.includes('queued runner')?'queued':'unknown';fs.appendFileSync(process.argv[2],label+'\\n');process.stdout.write(JSON.stringify({result:prompt})+'\\n')";
+  const config = testConfig();
+  config.harnesses.fake.adapter = "command";
+  config.harnesses.fake.command = process.execPath;
+  config.harnesses.fake.features.mcp = false;
+  config.constraints.isolation = "worktree";
+  config.constraints.maxConcurrentTasks = 1;
+  config.agents["fake-small"].harnessOptions = { args: ["-e", probe, "{prompt}", orderPath] };
+  const controller = new AbortController();
+  const logLines: string[] = [];
+  const running = supervise({
+    agentId: "fake-small",
+    workdir: f.project,
+    dbPath: f.dbPath,
+    config,
+    waitMs: 50,
+    retryBaseMs: 50,
+    signal: controller.signal,
+    qagentBin: QAGENT,
+    fakeHarnessPath: FAKE_HARNESS,
+    log: (line) => { logLines.push(line); },
+  });
+  t.after(async () => { controller.abort(); await running; });
+
+  await until("the worktree supervisor to wait at capacity", 15_000, () =>
+    logLines.some((line) => line.includes("at concurrent task limit; waiting for capacity")),
+  () => logLines.join("\n"));
+  assert.equal(f.bus.getTask(queued.id).state, "open");
+  assert.equal(f.bus.getTask(held.id).state, "claimed");
+
+  const heldResult = await until("the held task to run first", 20_000, () => {
+    const task = f.bus.getTask(held.id);
+    return task.state === "submitted" ? task : null;
+  }, () => logLines.join("\n"));
+  assert.doesNotMatch(heldResult.result?.summary ?? "", /UNIQUE_QUEUED_TASK_MAIL/);
+
+  const queuedResult = await until("the queued task and its deferred mail to run", 20_000, () => {
+    const task = f.bus.getTask(queued.id);
+    return task.state === "submitted" ? task : null;
+  }, () => logLines.join("\n"));
+  assert.match(queuedResult.result?.summary ?? "", /UNIQUE_QUEUED_TASK_MAIL/);
+  assert.deepEqual(readFileSync(orderPath, "utf8").trim().split("\n"), ["held", "queued"]);
   controller.abort();
   await running;
 });

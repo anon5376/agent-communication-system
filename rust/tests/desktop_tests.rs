@@ -178,6 +178,48 @@ fn init_then_snapshot_reports_operable() {
 }
 
 #[test]
+fn desktop_init_does_not_change_a_missing_or_mismatched_operator_token() {
+    for (label, mismatched) in [("missing", false), ("mismatched", true)] {
+        let db = temp_db(&format!("init-{label}-token"));
+        init_bus(&db);
+        let paths = crew::Paths::for_db(&db);
+        let token_path = acs::identity::operator_token_path(&paths.home);
+        let stored_hash = || {
+            rusqlite::Connection::open(&db)
+                .unwrap()
+                .query_row(
+                    "SELECT token_hash FROM identities WHERE agent_id = ?1",
+                    [OPERATOR_ID],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+        let original_hash = stored_hash();
+        if mismatched {
+            std::fs::write(&token_path, "not-the-operator-token").unwrap();
+        } else {
+            std::fs::remove_file(&token_path).unwrap();
+        }
+
+        let (reply, code) = call(&db, "init", json!({}));
+        let data = ok(&reply, code);
+        assert!(data["message"].as_str().unwrap().contains("read-only"));
+        assert_eq!(stored_hash(), original_hash);
+        if mismatched {
+            assert_eq!(
+                std::fs::read_to_string(&token_path).unwrap(),
+                "not-the-operator-token"
+            );
+        } else {
+            assert!(!token_path.exists());
+        }
+
+        let (reply, code) = call(&db, "snapshot", json!({}));
+        assert_eq!(ok(&reply, code)["canOperate"], false);
+    }
+}
+
+#[test]
 fn a_bus_without_operator_reports_cannot_operate() {
     let dir = temp_dir("no-operator");
     std::fs::create_dir_all(&dir).unwrap();
@@ -626,6 +668,54 @@ fn start_then_stop_with_a_fake_qagent() {
     );
     assert_eq!(builder["running"], true, "{why}");
 
+    let bus = Bus::open(Some(&db)).unwrap();
+    let budget_before = bus
+        .get_agent("builder")
+        .unwrap()
+        .unwrap()
+        .meta
+        .get("budget")
+        .cloned();
+    let (reply, code) = call(&db, "setAgent", json!({"id": "builder", "enabled": false}));
+    ok(&reply, code);
+    let (reply, code) = call(&db, "snapshot", json!({}));
+    assert_eq!(
+        ok(&reply, code)["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|agent| agent["id"] == "builder")
+            .unwrap()["running"],
+        false
+    );
+    let (reply, code) = call(&db, "setAgent", json!({"id": "builder", "enabled": true}));
+    ok(&reply, code);
+    let (reply, code) = call(&db, "snapshot", json!({}));
+    assert_eq!(
+        ok(&reply, code)["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|agent| agent["id"] == "builder")
+            .unwrap()["running"],
+        false
+    );
+    assert_eq!(
+        bus.get_agent("builder")
+            .unwrap()
+            .unwrap()
+            .meta
+            .get("budget")
+            .cloned(),
+        budget_before
+    );
+    let (reply, code) = call(
+        &db,
+        "start",
+        json!({"ids": ["builder"], "workdir": workdir, "confirmed": true}),
+    );
+    ok(&reply, code);
+
     let (reply, code) = call(&db, "stop", json!({"ids": ["builder"]}));
     let data = ok(&reply, code);
     assert!(
@@ -915,13 +1005,17 @@ fn start_goal_expands_the_mission_and_lists_the_goal() {
         json!({"mission": "fix", "goal": "login button does nothing"}),
     );
     let data = ok(&reply, code);
+    assert_eq!(data["state"], "queued");
+    assert_eq!(data["taskState"], "open");
+    assert!(data["nextAction"].as_str().unwrap().contains("aos setup"));
     assert!(
-        data["message"].as_str().unwrap().starts_with("goal #"),
+        data["message"].as_str().unwrap().contains("queued"),
         "{data}"
     );
     let bus = Bus::open(Some(&db)).unwrap();
     let tasks = bus.list_tasks(ListTasksInput::default()).unwrap();
     let t = &tasks[0];
+    assert_eq!(data["taskId"], t.id);
     assert_eq!(t.title, "fix login button does nothing");
     assert!(t.brief.contains("login button does nothing"));
     assert!(t.acceptance.contains("reproduction"));
@@ -934,6 +1028,61 @@ fn start_goal_expands_the_mission_and_lists_the_goal() {
     fail(&reply, code);
     let (reply, code) = call(&db, "startGoal", json!({"goal": "   "}));
     fail(&reply, code);
+}
+
+#[test]
+fn start_goal_rejects_malformed_crew_before_creating_a_task() {
+    let db = temp_db("orch-malformed-crew");
+    init_bus(&db);
+    let paths = crew::Paths::for_db(&db);
+    std::fs::create_dir_all(&paths.dir).unwrap();
+    std::fs::write(paths.crew(), "{").unwrap();
+
+    let (reply, code) = call(
+        &db,
+        "startGoal",
+        json!({"mission": "fix", "goal": "ship safely"}),
+    );
+    assert_eq!(fail(&reply, code)["code"], "invalid");
+    let bus = Bus::open(Some(&db)).unwrap();
+    assert!(bus.list_tasks(ListTasksInput::default()).unwrap().is_empty());
+}
+
+#[test]
+fn start_goal_rejects_disabled_crew_target_but_allows_external_bus_agent() {
+    let db = temp_db("orch-disabled-target");
+    init_bus(&db);
+    let paths = crew::Paths::for_db(&db);
+    let bus = Bus::open(Some(&db)).unwrap();
+    let operator = bus.identify(Some(OPERATOR_ID)).unwrap();
+    bus.add_agent(&operator, "external-worker", None, None, None, None, None)
+        .unwrap();
+    crew_with(&paths, &bus, &["claude"]);
+    let mut raw: Value =
+        serde_json::from_str(&std::fs::read_to_string(paths.crew()).unwrap()).unwrap();
+    raw["agents"]["builder"]["enabled"] = json!(false);
+    std::fs::write(&paths.crew(), serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+
+    let (reply, code) = call(
+        &db,
+        "startGoal",
+        json!({"mission": "fix", "goal": "ship safely", "to": "builder"}),
+    );
+    assert_eq!(fail(&reply, code)["code"], "invalid");
+    assert!(
+        bus.list_tasks(ListTasksInput::default())
+            .unwrap()
+            .is_empty()
+    );
+
+    let (reply, code) = call(
+        &db,
+        "startGoal",
+        json!({"mission": "fix", "goal": "ship safely", "to": "external-worker"}),
+    );
+    let data = ok(&reply, code);
+    assert_eq!(data["taskState"], "open");
+    assert_eq!(bus.get_task(data["taskId"].as_i64().unwrap()).unwrap().task.assignee.as_deref(), Some("external-worker"));
 }
 
 #[test]

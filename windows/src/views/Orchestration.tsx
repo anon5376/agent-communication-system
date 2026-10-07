@@ -47,9 +47,12 @@ export function GoalsView() {
   const [to, setTo] = useState("");
   const [showPlan, setShowPlan] = useState(false);
   const missions = orch?.missions ?? [];
-  const picked = missions.find((m) => m.name === mission) ?? missions[0];
+  const picked = missions.find((m) => m.name === mission);
   const plan = picked && goal.trim() ? expandMission(picked, goal.trim()) : null;
-  const agents = store.agents.value;
+  const agents = store.agents.value.filter((a) => !orch?.crew.some((m) => m.id === a.id && !m.enabled));
+  useEffect(() => {
+    if (to && orch?.crew.some((m) => m.id === to && !m.enabled)) setTo("");
+  }, [orch, to]);
   const owner = to || orch?.goalOwner || null;
 
   const start = async () => {
@@ -108,7 +111,7 @@ export function GoalsView() {
               <select value={to} onChange={(e) => setTo((e.target as HTMLSelectElement).value)} aria-label="Hand to">
                 <option value="">{orch?.goalOwner ? `${orch.goalOwner} (crew lead)` : "First free agent"}</option>
                 {agents.map((a) => (
-                  <option value={a.id}>{a.id}</option>
+                  <option key={a.id} value={a.id}>{a.id}</option>
                 ))}
               </select>
             </label>
@@ -118,7 +121,7 @@ export function GoalsView() {
             <span style={{ flex: 1 }} />
             <span class="kbd-hint">Ctrl+Enter</span>
             <button class="btn primary big" disabled={!plan || !store.canWrite.value} onClick={() => void start()}>
-              <Icon name="bolt" size={15} hidden /> Start goal
+              <Icon name="bolt" size={15} hidden /> Queue goal
             </button>
           </div>
           {plan && showPlan && (
@@ -183,7 +186,7 @@ export function PresetsView() {
   }, [focus]);
 
   const items: (MissionRecord | RolePrompt)[] = kind === "mission" ? orch?.missions ?? [] : orch?.roles ?? [];
-  const current = creating ? null : items.find((i) => i.name === name) ?? items[0] ?? null;
+  const current = creating ? null : name === null ? items[0] ?? null : items.find((i) => i.name === name) ?? null;
 
   return (
     <div class="presets">
@@ -359,7 +362,8 @@ function CrewCard(props: { member: CrewMember; lead: boolean }) {
   const [editing, setEditing] = useState(false);
   const [desc, setDesc] = useState(m.description);
   const canWrite = store.canWrite.value;
-  const roleFile = m.instructions?.replace(/^roles\//, "").replace(/\.md$/, "") ?? m.id;
+  const roleFile = m.instructions?.match(/^roles\/([a-zA-Z0-9_-]+)\.md$/)?.[1];
+  const editableRole = roleFile && store.orchestration.value?.roles.some((role) => role.name === roleFile);
   const save = async () => {
     if (await store.mutate("setAgent", { id: m.id, description: desc })) {
       setEditing(false);
@@ -403,7 +407,10 @@ function CrewCard(props: { member: CrewMember; lead: boolean }) {
         </button>
         <button
           class="link-btn"
+          disabled={!editableRole}
+          title={editableRole ? undefined : `Edit the configured instructions file directly: ${m.instructions ?? "none configured"}`}
           onClick={() => {
+            if (!roleFile || !editableRole) return;
             store.presetFocus.value = { kind: "role", name: roleFile };
             store.go("presets");
           }}

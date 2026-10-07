@@ -525,20 +525,28 @@ fn action_task(bus: &Bus, payload: &Value) -> Result<Value> {
     Ok(record)
 }
 
-/// `init` — first-run only, called explicitly by the app. `Bus::init` creates
-/// or adopts the operator token and never wipes existing state.
+/// `init` creates a new bus, but only connects to an existing bus.
 fn action_init(db_path: &Path) -> Result<Value> {
-    if db_path.is_file() && !looks_like_a_bus(db_path)? {
-        return Err(BusError::conflict(format!(
-            "{} exists but is not an agent bus / init never writes over an unrelated file",
-            db_path.display()
-        )));
+    if db_path.exists() {
+        if db_path.is_file() && !looks_like_a_bus(db_path)? {
+            return Err(BusError::conflict(format!(
+                "{} exists but is not an agent bus / init never writes over an unrelated file",
+                db_path.display()
+            )));
+        }
+        let bus = open_existing(db_path)?;
+        let access = if bus.identify(Some(OPERATOR_ID)).is_ok() {
+            "connected to existing bus"
+        } else {
+            "connected read-only to existing bus / operator token is missing or invalid"
+        };
+        return Ok(message(format!("{access} at {}", db_path.display())));
     }
     let bus = Bus::open(Some(db_path))?;
     let result = bus.init()?;
     Ok(message(format!(
-        "operator ready (token {}) / bus at {}",
-        result.operator, result.db_path
+        "operator ready / bus at {}",
+        result.db_path
     )))
 }
 
@@ -944,7 +952,18 @@ fn action_start_goal(bus: &Bus, payload: &Value) -> Result<Value> {
         .ok_or_else(|| BusError::not_found(format!("no mission called {name}")))?;
     let (title, brief, acceptance) = crew::expand(&mission, &goal);
     let to = opt_str(payload, "to").filter(|t| !t.trim().is_empty());
-    let config = crew::load_crew(&paths).ok().flatten();
+    let config = crew::load_crew(&paths)?;
+    if let Some(target) = to.as_deref() {
+        if config
+            .as_ref()
+            .and_then(|crew| crew.agents.get(target))
+            .is_some_and(|agent| !agent.enabled)
+        {
+            return Err(BusError::invalid(format!(
+                "{target} is disabled in crew.json / enable the crew member before assigning a goal"
+            )));
+        }
+    }
     let owner = to
         .clone()
         .or_else(|| config.as_ref().and_then(crew::goal_owner));
@@ -971,16 +990,24 @@ fn action_start_goal(bus: &Bus, payload: &Value) -> Result<Value> {
             ..Default::default()
         },
     )?;
-    let who = owner.unwrap_or_else(|| "the first free agent".to_string());
+    let who = owner.as_deref().unwrap_or("an eligible agent");
+    let next_action = if config.is_none() {
+        "No AOS crew configured; run aos setup or start an external worker."
+    } else {
+        "Start or resume the assigned agent if the goal stays queued."
+    };
     let review = if reviewer == OPERATOR_ID {
         "you review the result".to_string()
     } else {
         format!("{reviewer} reviews it")
     };
-    Ok(message(format!(
-        "goal #{} started / {who} takes it / {review}",
-        task.id
-    )))
+    Ok(json!({
+        "message": format!("goal #{} queued / awaiting a claim by {who} / {review}. {next_action}", task.id),
+        "taskId": task.id,
+        "state": "queued",
+        "taskState": task.state,
+        "nextAction": next_action,
+    }))
 }
 
 /// `saveMission` / `saveRole` — write one prompt file. The presets are written
@@ -1049,5 +1076,15 @@ fn action_set_agent(bus: &Bus, payload: &Value) -> Result<Value> {
         return Err(e);
     }
     std::fs::rename(&tmp, &file)?;
+    if payload.get("enabled").and_then(Value::as_bool) == Some(false) {
+        for (stopped_id, result) in crew::stop(&paths, &[id.to_string()]) {
+            if let Err(error) = result {
+                return Err(BusError::invalid(format!(
+                    "{stopped_id} was disabled in crew.json, but its supervisor could not be stopped: {}",
+                    error.message
+                )));
+            }
+        }
+    }
     Ok(message(format!("{id}: {}", changed.join(", "))))
 }

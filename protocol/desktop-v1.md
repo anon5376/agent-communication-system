@@ -250,7 +250,12 @@ The aos side, read from `<bus home>/aos/` and the bus:
 the newest 20 top-level tasks the operator created. Before any crew file,
 `configured` is false, `crew` is empty and the built-in presets are listed.
 
-### `startGoal` → `{ "message": "goal #N started / …" }`
+### `startGoal` → `{ "message": "goal #N queued / …", "taskId": N, "state": "queued", "taskState": "open", "nextAction": "…" }`
+
+Creating a goal queues a task; it does not prove that an agent has claimed it.
+`state` describes this receipt, while `taskState` is the persisted task state.
+Clients display `message` and use subsequent snapshots to observe actual progress.
+With no AOS crew, `nextAction` points to `aos setup` or an external worker.
 
 Payload `{ "mission": "fix", "goal": "…", "to": null, "project": null }`.
 Expands the mission like `aos` does (`{goal}` substitution, 120-char title),
