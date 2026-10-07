@@ -20,7 +20,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Cell as TableCell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Terminal;
 use std::cell::Cell;
 use std::io::stdout;
@@ -612,13 +612,13 @@ fn render_agents(f: &mut ratatui::Frame, app: &App, area: Rect) {
         empty_note(
             f,
             area,
-            "No agents yet.\n\nPress a to add your first agent.",
+            "No agents yet.\n\nPress a to add an agent.\nTry a safe sample: aos demo\nSet up real tools: aos setup\nHelp: github.com/anon5376/agent-communication-system",
         );
     }
 }
 
 fn render_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let items: Vec<ListItem> = app
+    let items: Vec<Row> = app
         .state
         .tasks
         .iter()
@@ -628,29 +628,30 @@ fn render_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 .and_then(|v| v.as_str().map(str::to_string))
                 .unwrap_or_default()
                 .replace('_', " ");
-            ListItem::new(Line::from(vec![
-                Span::raw(format!("#{:<4}", t.id)),
-                Span::raw(format!("{:<20.20}", t.title)),
-                Span::styled(
-                    format!(
-                        "{:<12.12}",
-                        t.assignee.clone().unwrap_or_else(|| "anyone".into())
-                    ),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::raw(state),
-            ]))
+            Row::new(vec![
+                TableCell::from(format!("#{}", t.id)),
+                TableCell::from(t.title.clone()),
+                TableCell::from(t.assignee.clone().unwrap_or_else(|| "anyone".into()))
+                    .style(Style::default().fg(Color::DarkGray)),
+                TableCell::from(state),
+            ])
         })
         .collect();
-    let list = List::new(items)
+    let width = area.width.saturating_sub(2);
+    let list = Table::new(items, [
+        Constraint::Length(7.min(width / 8)),
+        Constraint::Fill(1),
+        Constraint::Length(12.min(width / 4)),
+        Constraint::Length(17.min(width / 4)),
+    ])
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(format!(" Open tasks ({}) ", app.state.tasks.len()))
                 .border_style(focused(app, Pane::Tasks)),
         )
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    let mut list_state = ListState::default();
+        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut list_state = TableState::default();
     list_state.select(if app.state.tasks.is_empty() {
         None
     } else {

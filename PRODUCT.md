@@ -4,7 +4,7 @@
 
 ## Platform
 
-web
+Desktop (native SwiftUI macOS, Tauri Windows), terminal (ACS/AOS), and an optional compatibility web dashboard.
 
 ## Users
 
@@ -12,7 +12,7 @@ Primary user is a human operator of a local multi-agent coding setup. Other peop
 
 ## Product Purpose
 
-Qagent is a local-first control plane for heterogeneous autonomous agents. Success is: a fresh install has no demo roster; the operator can autodetect installed CLIs, name agents, set who a manager may create, and hand tasks to named agents from the CLI or an operator MCP client.
+ACS coordinates existing coding-agent CLIs through durable local tasks, messages and independent review gates. Success is a clear install path, an explicitly simulated first workflow, honest queued/running/failed states, scoped work, and reviewable recovery. A fresh real workspace has no fake roster; the operator explicitly detects/configures and starts providers.
 
 ## Positioning
 
@@ -24,7 +24,7 @@ Desk use on the operator's machine. Commands: `qagent init`, `qagent status`, `q
 
 ## Brand Commitments
 
-Name: Qagent. Mark: "Q". The dashboard look is set in DESIGN.md: flat dark page, hairline rules, status as plain words, one blue accent. It has no settings page.
+Name: ACS. Mark: Orbit — three agents on one ring. Desktop apps use flat black on white, thin rules, inverted black selection and red only for errors. No pastel fills, drop shadows or pixel logo. Communication covers messages/tasks/reviews; Orchestration covers goals, prompt presets and agent configuration. These are explicit modes, with Agents discoverable in Orchestration. The existing optional compatibility browser dashboard is a separate surface, not the desktop visual reference.
 
 ## Product Principles
 

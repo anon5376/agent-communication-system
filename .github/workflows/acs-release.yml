@@ -1,0 +1,111 @@
+name: ACS release assets
+
+on:
+  pull_request:
+    paths:
+      - 'rust/**'
+      - 'install.sh'
+      - '.github/workflows/acs-release.yml'
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cli:
+    name: CLI ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, musl: true, run: true }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, musl: true, run: true }
+          - { os: macos-14, target: aarch64-apple-darwin, run: true }
+          - { os: macos-14, target: x86_64-apple-darwin, run: false }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build all product commands
+        run: cargo build --release --locked --bin acs --bin aos --bin qagent --bin acs-desktop --target ${{ matrix.target }} --manifest-path rust/Cargo.toml
+      - name: Check versions and safe demo
+        if: matrix.run
+        run: |
+          bin=rust/target/${{ matrix.target }}/release
+          for command in acs aos qagent acs-desktop; do "$bin/$command" --version; done
+          "$bin/aos" demo --print 80x24 swarm
+      - name: Package
+        run: |
+          mkdir -p out
+          asset=acs-${{ matrix.target }}.tar.gz
+          tar -czf "out/$asset" -C rust/target/${{ matrix.target }}/release acs aos qagent acs-desktop
+          cd out
+          if command -v sha256sum >/dev/null; then sha256sum "$asset" > "$asset.sha256"
+          else shasum -a 256 "$asset" > "$asset.sha256"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: out/*
+          if-no-files-found: error
+
+  macos:
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/swiftui-macos.yml
+
+  windows:
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/windows-app.yml
+
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source dependency SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: acs-source-sbom.spdx.json
+          upload-release-assets: false
+          artifact-name: acs-source-sbom
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [cli, macos, windows, sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Validate complete assets and checksum manifest
+        run: |
+          test -f out/acs-source-sbom.spdx.json
+          test "$(find out -name 'acs-*.tar.gz' | wc -l)" -eq 4
+          test "$(find out -name 'ACS-*.dmg' | wc -l)" -eq 1
+          test "$(find out -name '*-setup.exe' | wc -l)" -eq 1
+          cd out
+          find . -type f ! -name '*.sha256' ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+      - name: Publish tagged assets
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: out/*
+          body: |
+            ACS terminal commands, native Apple Silicon macOS app, and Windows x64 app.
+
+            Desktop apps are unsigned/ad-hoc signed and not notarized. Verify SHA256SUMS before opening. On macOS use System Settings → Privacy & Security → Open Anyway after the first blocked launch, if macOS offers it. On Windows use More info → Run anyway if SmartScreen offers it. Managed-device policies may prevent either override; do not disable system security.
+
+            CLI archives contain acs, aos, qagent and acs-desktop. Installation and limitations: https://github.com/anon5376/agent-communication-system#install
+
+            The SPDX SBOM inventories source dependencies; it is not a signing certificate or proof that dependencies are vulnerability-free.

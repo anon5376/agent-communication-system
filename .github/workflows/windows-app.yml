@@ -2,17 +2,24 @@ name: windows-app
 
 on:
   push:
-    branches: [swiftui]
+    branches: [main]
     paths:
       - "windows/**"
+      - "rust/**"
       - "protocol/desktop-v1.md"
       - ".github/workflows/windows-app.yml"
   pull_request:
-    branches: [swiftui]
+    branches: [main]
     paths:
       - "windows/**"
+      - "rust/**"
       - "protocol/desktop-v1.md"
       - ".github/workflows/windows-app.yml"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -22,7 +29,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: windows/package-lock.json
 
@@ -44,6 +51,7 @@ jobs:
         working-directory: windows
         run: |
           npm ci
+          npm audit --audit-level=high
           npm run typecheck
           npm run lint
           npm run test
