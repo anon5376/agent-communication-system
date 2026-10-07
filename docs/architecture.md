@@ -10,13 +10,14 @@ Qagent is a library over one SQLite file, wrapped by a CLI and a stdio MCP serve
 | `src/cli/`, `src/qagent.ts` | The `qagent` command. Supervisor, dashboard and MCP commands are loaded lazily, so plain commands never load them. |
 | `src/mcp/` | `qagent mcp` (stdio MCP server with 14 `bus_*` tools, plus `bus_agent_add` with `--operator`) and `qagent mcp-config`. |
 | `src/notify/wait.ts` | The shared wait used by `qagent wait` and `bus_wait`. |
+| `src/hook/claude-code.ts` | `qagent hook claude-code`: a Claude Code `Stop` hook (`asyncRewake`) that wakes an idle session on new mail. |
 | `src/supervisor.ts`, `src/supervisor/entry.ts` | Optional `qagent supervise` and `qagent doctor`. |
 | `src/adapters.ts`, `config.ts`, `router.ts`, `discover.ts`, `provider-catalog.ts`, `instance-processes.ts`, `fake-harness.ts`, `openai-compatible-harness.ts`, `security.ts`, `supervisor-launch.ts` | Supervisor-side code kept from the previous version: harness adapters, harness configuration, and helpers. Core does not import them. |
 | `src/dashboard/` | Optional `qagent dashboard`: one server-rendered page with live updates. |
 
 ## The database
 
-`~/.agent-bus/bus.db` in WAL mode with a 5 s busy timeout. Tables: `agents`, `identities` (token hashes), `messages`, `cursors` and `acks`, `tasks`, `task_deps`, `task_notes`, `leases`, `events`, `usage` (reserved for the supervisor, not yet written) and `meta`. The full schema is in `src/core/db.ts`.
+`~/.agent-bus/bus.db` in WAL mode with a 5 s busy timeout. Tables: `agents`, `identities` (token hashes), `messages`, `cursors` and `acks`, `tasks`, `task_deps`, `task_notes`, `leases`, `events`, `usage` (reserved for the supervisor, not yet written) and `meta`. The schema is the ordered, additive-only files in `schema/` (applied by `src/core/db.ts`; `meta.schema_version` is the highest applied number).
 
 Every write is one `BEGIN IMMEDIATE` transaction that also appends a row to `events`. `events.seq` is the change counter every reader uses, and the `events` table is the only history; there is no separate audit file. Opening an existing database performs no write.
 
@@ -36,7 +37,7 @@ States: `open`, `blocked`, `claimed`, `submitted`, `changes_requested`, `accepte
 
 ## Waiting without a daemon
 
-`core/changes.ts` watches for commits by other processes. It polls `PRAGMA data_version`, which costs no disk write, backing off from 10 ms to 100 ms, and an `fs.watch` on the database directory wakes it early. Only when the version moves does it read `max(events.seq)`. The wait adds a watch on the agent's signal file, so a delivery wakes it at once.
+`core/changes.ts` watches for commits by other processes. It polls `PRAGMA data_version`, which costs no disk write, backing off from 10 ms to 100 ms, and an `fs.watch` on the database directory wakes it early. Only when the version moves does it read `max(events.seq)`. The wait adds a watch on the agent's signal file, so a delivery wakes it at once; long-lived waiters raise the poll ceiling to 1 s, since polling is only their missed-event fallback.
 
 A waiter writes `status = 'waiting'` and a deadline once, blocks, and writes `idle` once when it returns. A waiter that is killed leaves `waiting` behind; readers show it as offline once the deadline passes, and the agent's next action resets it.
 

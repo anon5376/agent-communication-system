@@ -5,10 +5,11 @@
  */
 import { accessSync, constants, existsSync } from "node:fs";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
-import { configPathFromProject, loadConfig, resolveAgent } from "../config.js";
+import { configPathFromProject, enabledAgents, loadConfig, resolveAgent } from "../config.js";
 import { Bus } from "../core/bus.js";
 import { operatorTokenPath, readTokenFile } from "../core/identity.js";
-import { BusError } from "../core/types.js";
+import { BusError, STALE_AGENT_MS } from "../core/types.js";
+import { agentViews, ATTENTION_TIERS, attentionList, taskViews } from "../attention.js";
 import { supervise } from "../supervisor.js";
 
 export interface EntryContext {
@@ -18,25 +19,34 @@ export interface EntryContext {
   stderr?: (text: string) => void;
 }
 
-const USAGE = `usage: qagent supervise <agent> [project-dir] [--config PATH]
+const USAGE = `usage: qagent supervise <agent> [project-dir] [--config PATH] [--auto-requeue-min M]
+       qagent supervise --roster [project-dir] [--config PATH] [--auto-requeue-min M]   every enabled agent
        qagent doctor [agent] [project-dir] [--config PATH]
 `;
 
-function split(argv: string[]): { positionals: string[]; config?: string; help: boolean } {
+function split(argv: string[]): { positionals: string[]; config?: string; autoRequeueMin?: number; roster: boolean; help: boolean } {
   const positionals: string[] = [];
   let config: string | undefined;
+  let autoRequeueMin: number | undefined;
+  let roster = false;
   let help = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "-h" || arg === "--help") help = true;
+    else if (arg === "--roster") roster = true;
     else if (arg === "--config") config = argv[index += 1];
     else if (arg.startsWith("--config=")) config = arg.slice("--config=".length);
+    else if (arg === "--auto-requeue-min") autoRequeueMin = Number(argv[index += 1]);
+    else if (arg.startsWith("--auto-requeue-min=")) autoRequeueMin = Number(arg.slice("--auto-requeue-min=".length));
     else if (arg === "--db") index += 1; // already resolved by the CLI into context.dbPath
     else if (arg.startsWith("--db=")) continue;
     else if (arg.startsWith("--")) throw new BusError("invalid", `unknown flag ${arg}\n${USAGE}`);
     else positionals.push(arg);
   }
-  return { positionals, config, help };
+  if (autoRequeueMin !== undefined && (!Number.isFinite(autoRequeueMin) || autoRequeueMin <= 0)) {
+    throw new BusError("invalid", "--auto-requeue-min must be a positive number of minutes");
+  }
+  return { positionals, config, autoRequeueMin, roster, help };
 }
 
 function commandName(context: EntryContext): string {
@@ -62,6 +72,13 @@ function doctor(positionals: string[], configPath: string | undefined, context: 
     const operatorToken = readTokenFile(operatorTokenPath(bus.home));
     if (!operatorToken) problems.push(`no operator token at ${operatorTokenPath(bus.home)}`);
     out(`agents ${bus.listAgents().map((agent) => agent.id).join(", ") || "(none)"}\n`);
+    // What needs the operator, most urgent first. Informational: it does not change the exit code.
+    const now = bus.now();
+    const attention = attentionList(taskViews(bus, now), agentViews(bus), now, STALE_AGENT_MS).filter((item) => item.attention.tier < ATTENTION_TIERS);
+    out(attention.length ? `attention ${attention.length} task(s) need you\n` : "attention nothing needs you\n");
+    for (const { task, attention: item } of attention) {
+      out(`  #${task.id} ${item.label}: ${item.reason}\n    evidence: ${item.evidence}\n    next: ${item.next}\n`);
+    }
     const [agentId, dir] = positionals;
     if (agentId) {
       try { bus.identify(agentId); out(`identity ${agentId} ok\n`); } catch (error) { problems.push(`identity ${agentId}: ${(error as Error).message}`); }
@@ -87,17 +104,36 @@ export async function main(argv: string[], context: EntryContext): Promise<numbe
   const out = context.stdout ?? ((text: string) => { process.stdout.write(text); });
   const err = context.stderr ?? ((text: string) => { process.stderr.write(text); });
   try {
-    const { positionals, config, help } = split(argv);
+    const { positionals, config, autoRequeueMin, roster, help } = split(argv);
     if (help) { out(USAGE); return 0; }
     if (commandName(context) === "doctor") return doctor(positionals, config, context, out);
-    const [agentId, dir] = positionals;
-    if (!agentId) { err(USAGE); return 1; }
+    const agentId = roster ? undefined : positionals[0];
+    const dir = roster ? positionals[0] : positionals[1];
+    if (!roster && !agentId) { err(USAGE); return 1; }
     const controller = new AbortController();
     const stop = () => controller.abort();
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
     try {
-      await supervise({ agentId, workdir: resolve(dir ?? process.cwd()), dbPath: context.dbPath, configPath: config, signal: controller.signal });
+      const workdir = resolve(dir ?? process.cwd());
+      const shared = { workdir, dbPath: context.dbPath, configPath: config, autoRequeueMs: autoRequeueMin !== undefined ? autoRequeueMin * 60_000 : undefined, signal: controller.signal };
+      if (roster) {
+        const loaded = loadConfig(config ?? configPathFromProject(workdir));
+        const agents = enabledAgents(loaded);
+        if (!agents.length) { err("qagent supervise --roster: no enabled agents in config\n"); return 1; }
+        out(`supervising roster: ${agents.map((agent) => agent.id).join(", ")}\n`);
+        let failures = 0;
+        await Promise.all(agents.map(async (agent) => {
+          try {
+            await supervise({ ...shared, agentId: agent.id });
+          } catch (error) {
+            failures += 1;
+            err(`supervisor for ${agent.id} exited with error: ${error instanceof Error ? error.message : String(error)}\n`);
+          }
+        }));
+        return failures ? 1 : 0;
+      }
+      if (agentId) await supervise({ ...shared, agentId });
     } finally {
       process.off("SIGINT", stop);
       process.off("SIGTERM", stop);

@@ -4,23 +4,26 @@
  * each module exports
  *   main(argv: string[], context: { dbPath: string; command: string }): Promise<number>.
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { Bus } from "../core/bus.js";
 import { ChangeWatcher } from "../core/changes.js";
 import { homeFor, resolveDbPath } from "../core/db.js";
-import { agentIdFromEnv } from "../core/identity.js";
+import { agentIdFromEnv, tokenPathFor } from "../core/identity.js";
 import { defaultImportSources, runImport } from "../core/import.js";
 import { waitForMail, waitSeconds } from "../notify/wait.js";
 import { budgetLine, budgetOf, budgetOver, limitsEmpty, usageJson } from "../core/control.js";
-import { BusError, OPERATOR_ID } from "../core/types.js";
-import { renderAgents, renderEvent, renderImport, renderMessages, renderStatus, renderTask, renderTasks } from "./format.js";
+import { BusError, MAX_WAIT_SEC, OPERATOR_ID, STALE_AGENT_MS } from "../core/types.js";
+import { claudeCodeSettings, renderWake, waitForWake } from "../hook/claude-code.js";
+import { taskAttention } from "../attention.js";
+import { ensureTaskWorktree, pruneTaskWorktrees, removeTaskWorktree, repoRootFor } from "../worktree.js";
+import { renderAgents, renderEvent, renderImport, renderMessages, renderStatus, renderTask, renderTasks, renderTrace, renderTraceHtml } from "./format.js";
 const defaultIo = {
     stdout: (text) => { process.stdout.write(text); },
     stderr: (text) => { process.stderr.write(text); },
     readStdin: () => readFileSync(0, "utf8"),
     env: process.env,
 };
-const BOOLEAN_FLAGS = new Set(["json", "peek", "all", "mine", "ack", "accept", "revise", "dry-run", "force", "follow", "operator", "open", "help", "clear"]);
+const BOOLEAN_FLAGS = new Set(["json", "peek", "all", "mine", "ack", "accept", "revise", "dry-run", "force", "follow", "operator", "open", "help", "clear", "worktree", "remove", "settings"]);
 const REPEATED_FLAGS = new Set(["dep", "scope", "state", "file"]);
 export function parseArgs(argv) {
     const positionals = [];
@@ -76,12 +79,16 @@ Global: --db PATH (or QAGENT_BUS_DB; default ~/.agent-bus/bus.db)  --as ID|opera
   qagent inbox [--peek] [--limit N]
   qagent ack <seq>
   qagent wait [--timeout SEC]                     exit 0 = mail or task event, 2 = timeout
+  qagent hook claude-code [--timeout SEC] [--settings]   Claude Code Stop hook: exit 2 wakes the session on new mail
   qagent task add <title> [--brief B|-] [--to ID] [--reviewer ID] [--role R] [--priority P]
                   [--acceptance A] [--parent N] [--dep N]... [--scope PATH]... [--project DIR]
   qagent task list [--mine] [--state S]... [--all] [--limit N] | task show <N>
-  qagent task claim [<N>] | task note <N> <text> | task submit <N> --summary S [--details D] [--file F]...
+  qagent task claim [<N>] [--worktree] | task note <N> <text> | task submit <N> --summary S [--details D] [--file F]...
   qagent task review <N> --accept|--revise --feedback F | task cancel <N> [--reason R]
+  qagent task stalled [--stall-min M] | task requeue <N> [--reason R]
+  qagent task worktree <N> [--remove [--force]] | task worktree prune [--force]   per-task git checkout
   qagent log [--follow] [--since SEQ] [--limit N]
+  qagent trace <task-N> [--format text|json|html] [--out FILE]   the task's causal chain
   qagent import [--jsonl P] [--qagent-state P] [--prototype P] [--dry-run] [--force]
   qagent mcp [--operator] | mcp-config | supervise <agent> [dir] | doctor | dashboard
 `;
@@ -132,7 +139,7 @@ class Context {
         return value;
     }
     taskId(index) {
-        const raw = this.position(index, "task number").replace(/^#/, "");
+        const raw = this.position(index, "task number").replace(/^(#|task-)/, "");
         const id = Number(raw);
         if (!Number.isInteger(id) || id <= 0)
             throw new BusError("invalid", `invalid task number: ${raw}`);
@@ -223,6 +230,41 @@ async function waitCommand(ctx) {
         process.off("SIGTERM", stop);
     }
 }
+/** `qagent hook claude-code` (see src/hook/claude-code.ts): exit 2 with headers on stderr wakes the session; 0 otherwise. */
+async function hookCommand(ctx) {
+    const name = ctx.position(1, "hook name (claude-code)");
+    if (name !== "claude-code")
+        throw new BusError("invalid", `unknown hook: ${name} (expected claude-code)`);
+    const seconds = waitSeconds(ctx.int("timeout") ?? MAX_WAIT_SEC, ctx.io.env);
+    if (ctx.flag("settings") === true) {
+        const agentId = ctx.str("as") ?? agentIdFromEnv(ctx.io.env);
+        if (!agentId)
+            throw new BusError("invalid", "pass --as <id> (or set QAGENT_AGENT_ID)");
+        const settings = claudeCodeSettings(agentId, ctx.dbPath, seconds);
+        const tokenPath = tokenPathFor(homeFor(ctx.dbPath), agentId);
+        if (!existsSync(tokenPath))
+            ctx.io.stderr(`qagent: warning: no token file at ${tokenPath}; run \`qagent agent add ${agentId} --role ...\` first.\n`);
+        ctx.io.stderr("# merge into .claude/settings.json (this project) or ~/.claude/settings.json (every project)\n");
+        ctx.io.stdout(`${JSON.stringify(settings, null, 2)}\n`);
+        return 0;
+    }
+    const me = ctx.identity();
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    try {
+        const result = await waitForWake(ctx.bus, me, { timeoutMs: seconds * 1000, signal: controller.signal });
+        if (result.status !== "mail")
+            return 0;
+        ctx.io.stderr(renderWake(me.agentId, result));
+        return 2;
+    }
+    finally {
+        process.off("SIGINT", stop);
+        process.off("SIGTERM", stop);
+    }
+}
 async function logCommand(ctx) {
     const bus = ctx.bus;
     let since = ctx.int("since") ?? (ctx.flag("follow") ? bus.latestSeq() : 0);
@@ -240,7 +282,8 @@ async function logCommand(ctx) {
             ctx.io.stdout("(no events)\n");
         return 0;
     }
-    const watcher = new ChangeWatcher(bus.db, bus.dbPath, { maxPollMs: 250 });
+    // fs.watch wakes promptly; the data_version poll is a missed-event fallback at ~1 read/s idle.
+    const watcher = new ChangeWatcher(bus.db, bus.dbPath, { maxPollMs: 1000 });
     const controller = new AbortController();
     const stop = () => controller.abort();
     process.once("SIGINT", stop);
@@ -377,12 +420,35 @@ async function dispatch(ctx) {
             ctx.out(result, `acknowledged #${result.seq}`);
             return 0;
         }
+        case "hook":
+            return hookCommand(ctx);
         case "wait":
             return waitCommand(ctx);
         case "log":
             return logCommand(ctx);
         case "task":
             return taskCommand(ctx, sub);
+        case "trace": {
+            const trace = ctx.bus.traceTask(ctx.taskId(1));
+            const now = taskAttention(ctx.bus, trace.task, STALE_AGENT_MS);
+            const format = ctx.str("format") ?? (ctx.str("out")?.endsWith(".html") ? "html" : "text");
+            if (format === "html") {
+                const out = ctx.str("out");
+                if (!out)
+                    throw new BusError("invalid", "--format html requires --out FILE");
+                writeFileSync(out, renderTraceHtml(trace, now), { mode: 0o600 });
+                ctx.out({ out }, `wrote ${out}`);
+                return 0;
+            }
+            if (format === "json") {
+                console.log(JSON.stringify({ ...trace, now }, null, 2));
+                return 0;
+            }
+            if (format !== "text")
+                throw new BusError("invalid", "--format must be text, json, or html");
+            ctx.out({ ...trace, now }, renderTrace(trace, now));
+            return 0;
+        }
         case "import": {
             const explicit = ["jsonl", "qagent-state", "prototype"].some((name) => ctx.str(name) !== undefined);
             const sources = explicit
@@ -433,8 +499,25 @@ async function taskCommand(ctx, sub) {
         case "claim": {
             const me = ctx.identity();
             const id = ctx.parsed.positionals[2] === undefined ? null : ctx.taskId(2);
+            const wantTree = ctx.flag("worktree") === true || process.env.QAGENT_REQUIRE_WORKTREE === "1";
+            // With an explicit task the repository check runs before the claim, so a bad project leaves it unclaimed.
+            if (wantTree && id !== null)
+                await repoRootFor(bus.getTask(id));
             const task = bus.claimTask(me, id);
-            ctx.out(task, `claimed task #${task.id}: ${task.title}`);
+            if (!wantTree) {
+                ctx.out(task, `claimed task #${task.id}: ${task.title}`);
+                return 0;
+            }
+            // Same as the MCP tool: a claim that asked for a worktree and cannot get one is given back.
+            let worktree;
+            try {
+                worktree = await ensureTaskWorktree(task, bus.home);
+            }
+            catch (error) {
+                bus.releaseTask(me, task.id, "worktree isolation unavailable");
+                throw new BusError("conflict", `task ${task.id} needs its own worktree and none could be made, so the claim was released: ${error.message}`);
+            }
+            ctx.out({ ...task, worktree }, `claimed task #${task.id}: ${task.title}\nworktree ${worktree.workdir} (branch ${worktree.branch})`);
             return 0;
         }
         case "note": {
@@ -467,8 +550,48 @@ async function taskCommand(ctx, sub) {
             ctx.out(task, `cancelled task #${task.id}`);
             return 0;
         }
+        case "stalled": {
+            const minutes = Number(ctx.str("stall-min") ?? "60");
+            if (!Number.isFinite(minutes) || minutes <= 0)
+                throw new BusError("invalid", "--stall-min must be a positive number of minutes");
+            const tasks = bus.stalledTasks(minutes * 60_000);
+            ctx.out(tasks, renderTasks(tasks));
+            return 0;
+        }
+        case "requeue": {
+            const task = bus.requeueTask(ctx.identity(), ctx.taskId(2), ctx.str("reason"));
+            ctx.out(task, `requeued task #${task.id}`);
+            return 0;
+        }
+        case "worktree": {
+            const me = ctx.identity(true);
+            const force = ctx.flag("force") === true;
+            if (ctx.parsed.positionals[2] === "prune") {
+                if (force && me.authority !== "operator")
+                    throw new BusError("forbidden", "only the operator may prune worktrees with --force");
+                const results = await pruneTaskWorktrees(bus, { force });
+                const text = results.map((r) => `#${r.taskId} ${r.removed ? "removed" : "kept"}: ${r.reason}`).join("\n");
+                ctx.out(results, text || "(no task worktrees)");
+                return 0;
+            }
+            const task = bus.getTask(ctx.taskId(2));
+            if (ctx.flag("remove") === true) {
+                if (me.authority !== "operator" && me.agentId !== task.assignee)
+                    throw new BusError("forbidden", `only ${task.assignee ?? "the assignee"} or the operator may remove the worktree of task ${task.id}`);
+                if (force && me.authority !== "operator")
+                    throw new BusError("forbidden", "only the operator may remove a worktree with --force");
+                const result = await removeTaskWorktree(task, bus.home, { force });
+                ctx.out(result, result.removed ? `removed worktree ${result.path} (branch ${result.branch} kept)` : `no worktree for task #${task.id}`);
+                return 0;
+            }
+            if (me.authority !== "operator" && me.agentId !== task.assignee)
+                throw new BusError("forbidden", `only ${task.assignee ?? "the assignee"} or the operator may open a worktree for task ${task.id}`);
+            const worktree = await ensureTaskWorktree(task, bus.home);
+            ctx.out(worktree, `${worktree.workdir} (branch ${worktree.branch}${worktree.created ? ", created" : ""})`);
+            return 0;
+        }
         default:
-            throw new BusError("invalid", "usage: qagent task add|list|show|claim|note|submit|review|cancel");
+            throw new BusError("invalid", "usage: qagent task add|list|show|claim|note|submit|review|cancel|stalled|requeue|worktree");
     }
 }
 export async function main(argv, io = defaultIo) {

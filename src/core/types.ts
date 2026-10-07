@@ -130,6 +130,24 @@ export interface TaskSummary {
   updatedMs: number;
 }
 
+/** The columns a status view needs, without role, authority or meta. */
+export interface AgentSummary {
+  id: string;
+  storedStatus: string;
+  waitUntilMs: number | null;
+  lastSeenMs: number | null;
+}
+
+/** The columns a message-line view needs, without refs, thread or ack flags. */
+export interface MessageSummary {
+  seq: number;
+  tsMs: number;
+  sender: string;
+  recipient: string | null;
+  subject: string;
+  body: string;
+}
+
 export interface Task {
   id: number;
   legacyId: string | null;
@@ -170,6 +188,29 @@ export interface TaskDetail extends Task {
   dependents: number[];
   messages: Message[];
   leases: string[];
+}
+
+/** One line in a task's causal timeline: an event, a note, or task-bound mail, ordered by time. */
+export interface TraceItem {
+  seq: number;
+  tsMs: number;
+  /** Event kind, 'note', or 'mail'. */
+  kind: string;
+  actor: string;
+  /** One-line description for text output. */
+  summary: string;
+  /** Note/mail body, omitted when empty. */
+  body?: string;
+  /** For mail: the recipient (null = broadcast). */
+  to?: string | null;
+  data?: Record<string, unknown>;
+}
+
+export interface TaskTrace {
+  task: TaskDetail;
+  dependencies: number[];
+  dependents: number[];
+  timeline: TraceItem[];
 }
 
 export interface BusEvent {

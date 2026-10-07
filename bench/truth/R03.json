@@ -1,0 +1,19 @@
+{
+  "id": "R03",
+  "reconciled": false,
+  "derivedBy": "TS commit 4d4cf5a9f4ca0e819dfc9b97d6610cc05fbf1893; Rust origin/rust-port = c6df26b3ec0235e38404b33b382c1fa824ba12a5. git worktree add --detach <scratch>/rustwt-A origin/rust-port; (cd rust && cargo build) -> Finished dev profile in 47.50s, exit 0. Then node derive-R03.mjs <ts-root> <rustwt>/rust/target/debug: parses USAGE in src/cli/main.ts and registerTool(...) in src/mcp/server.ts; runs Rust qagent --help, probes every group subcommand at runtime against a temp bus, and sends initialize + tools/list to `qagent --as operator mcp --operator`. Also ran by hand: acs --help, acs-app --help (both print the TUI usage `usage: acs [--db PATH]`, no subcommands), and each Rust qagent CLI form against a temp bus (all dispatch except task worktree / task worktree prune).",
+  "question": "Per qagent CLI command (unit: command, or command subcommand for the agent/token/task groups) listed in the usage text of src/cli/main.ts, and per MCP tool registered in src/mcp/server.ts: which exist in the TypeScript build but are missing from the Rust port (binaries qagent, acs, acs-app at origin/rust-port)?",
+  "items": [
+    {
+      "id": "cli:task worktree",
+      "aliases": [
+        "cli:task-worktree",
+        "task worktree",
+        "cli:task worktree prune",
+        "qagent task worktree"
+      ],
+      "evidence": "src/cli/main.ts:89"
+    }
+  ],
+  "notes": "Only one unit is missing. TS evidence: usage src/cli/main.ts:89, dispatch case \"worktree\" src/cli/main.ts:461 (with prune at 464). Rust evidence: rust/src/cli.rs task_command has no worktree arm and falls through to the usage error at rust/src/cli.rs:611; running `qagent task worktree 1` and `qagent task worktree prune` on the built Rust binary printed `qagent: usage: qagent task add|list|show|claim|note|submit|review|cancel|stalled|requeue` and exited 1. `task worktree prune` is treated as a form of the `task worktree` unit, not a separate item; an answer listing `cli:task worktree prune` separately in addition should be accepted as the same item. MCP: the Rust port HAS an MCP server (`qagent mcp`, rust/src/mcp.rs); tools/list under --operator returned all 15 TS tool names (bus_whoami bus_agents bus_send bus_inbox bus_wait bus_ack bus_task_create bus_task_list bus_task_get bus_task_claim bus_task_note bus_task_submit bus_task_review bus_task_cancel bus_agent_add), so NO mcp:* item is missing. Without --operator and without QAGENT_AGENT_ID the Rust server refuses to start (`set QAGENT_AGENT_ID`), as does TS; bus_agent_add is operator-only in both (TS server.ts:251-252, Rust mcp.rs:416). The 28 other CLI units all dispatch in Rust (verified by running them). Flag-level gaps deliberately NOT items under the unit definition: (a) `task claim --worktree` (TS main.ts:86, BOOLEAN_FLAGS main.ts:33 includes worktree/remove; Rust BOOLEAN_FLAGS rust/src/cli.rs:44-47 lacks them and `qagent task claim --worktree` fails with `--worktree needs a value`); (b) `supervise --roster` (TS src/supervisor/entry.ts:22,35; Rust supervise_command rust/src/cli.rs:953 requires an <agent> positional and has no roster flag); (c) MCP bus_task_claim parameter `worktree` (TS server.ts:202) absent from the Rust schema (rust/src/mcp.rs claim handler 345-353, 0 occurrences of worktree in mcp.rs). An answer that lists these as missing commands/tools is over-inclusive; a grader may give partial credit if they are clearly labelled as flag/parameter gaps. Binaries acs and acs-app are the same TUI entry (src/bin/acs.rs and src/bin/app.rs both call acs::app::main) and add no qagent commands. Rust usage text (rust/src/cli.rs:137) also drops [--worktree] from task claim."
+}

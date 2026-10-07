@@ -2,8 +2,9 @@
  * Plain-text rendering for the v2 CLI. fmtAgo is ported from cli-view.ts:1-49;
  * everything else is a text table with no colour, so output pipes cleanly.
  */
+import type { Attention } from "../attention.js";
 import type { ImportReport } from "../core/import.js";
-import type { Agent, BusEvent, Message, Task, TaskDetail } from "../core/types.js";
+import type { Agent, BusEvent, Message, Task, TaskDetail, TaskTrace } from "../core/types.js";
 
 export function fmtAgo(ts: number | null | undefined, now = Date.now()): string {
   if (!ts) return "-";
@@ -88,6 +89,63 @@ export function renderTask(task: TaskDetail): string {
     for (const message of task.messages) lines.push(`  #${message.seq} ${message.sender} -> ${message.recipient ?? "*"}: ${clip(message.subject || message.body, 100)}`);
   }
   return lines.join("\n");
+}
+
+/** "now:" lines for a trace: where the task stands, why, and the next command. */
+export function renderAttention(attention: Attention, indent = "  "): string[] {
+  const lines = [`${indent}now: ${attention.label}. ${attention.reason}`, `${indent}evidence: ${attention.evidence}`];
+  if (attention.next) lines.push(`${indent}next: ${attention.next}`);
+  return lines;
+}
+
+export function renderTrace(trace: TaskTrace, attention?: Attention): string {
+  const task = trace.task;
+  const lines = [
+    `Trace #${task.id}: ${task.title}`,
+    `  state ${task.state}  assignee ${task.assignee ?? "-"}  creator ${task.creator}  round ${task.round}`,
+  ];
+  if (attention) lines.push(...renderAttention(attention));
+  if (task.parentId !== null) lines.push(`  parent #${task.parentId}`);
+  if (trace.dependencies.length) lines.push(`  depends on ${trace.dependencies.map((id) => `#${id}`).join(", ")}`);
+  if (trace.dependents.length) lines.push(`  unblocks ${trace.dependents.map((id) => `#${id}`).join(", ")}`);
+  lines.push("");
+  for (const item of trace.timeline) {
+    const time = new Date(item.tsMs).toISOString().slice(5, 19).replace("T", " ");
+    const route = item.to !== undefined ? ` -> ${item.to ?? "*"}` : "";
+    lines.push(`  ${time} ${item.actor}${route} ${item.kind}${item.summary ? ` — ${clip(item.summary, 100)}` : ""}`);
+  }
+  if (!trace.timeline.length) lines.push("  (empty: the task exists but no events, notes, or mail yet)");
+  return lines.join("\n");
+}
+
+function esc(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+export function renderTraceHtml(trace: TaskTrace, attention?: Attention): string {
+  const task = trace.task;
+  const items = trace.timeline.map((item) => {
+    const time = new Date(item.tsMs).toISOString();
+    const route = item.to !== undefined ? ` → ${esc(item.to ?? "broadcast")}` : "";
+    const body = item.body ? `<pre>${esc(item.body)}</pre>` : "";
+    return `    <li class="${esc(item.kind)}"><time>${time}</time><b>${esc(item.actor)}${route}</b> <span class="kind">${esc(item.kind)}</span><p>${esc(item.summary)}</p>${body}</li>`;
+  }).join("\n");
+  return `<!doctype html><html><head><meta charset="utf-8"><title>ACS trace #${task.id} — ${esc(task.title)}</title>
+<style>body{font:14px/1.5 system-ui,sans-serif;max-width:860px;margin:32px auto;padding:0 16px;color:#1a1a1a}
+h1{font-size:20px}.meta{color:#555;margin-bottom:20px}code{background:#f0f0f0;padding:1px 4px}
+ol{list-style:none;padding:0;border-left:3px solid #ddd}li{position:relative;padding:8px 0 8px 20px;border-bottom:1px solid #eee}
+li::before{content:"";position:absolute;left:-6.5px;top:14px;width:10px;height:10px;border-radius:50%;background:#999}
+li.task_claimed::before,li.note::before{background:#2563eb}li.mail::before{background:#059669}li.task_accepted::before{background:#16a34a}li.task_failed::before,li.task_cancelled::before{background:#dc2626}
+time{color:#888;font-size:12px;display:block}.kind{font-size:12px;color:#555;background:#f0f0f0;padding:1px 6px;border-radius:8px}p{margin:4px 0 0}pre{background:#f7f7f7;padding:8px;overflow-x:auto;font-size:12px;white-space:pre-wrap}</style>
+</head><body>
+<h1>Trace #${task.id}: ${esc(task.title)}</h1>
+<div class="meta">state <code>${esc(task.state)}</code> · assignee <code>${esc(task.assignee ?? "-")}</code> · creator <code>${esc(task.creator)}</code> · round ${task.round}
+${task.parentId !== null ? ` · parent #${task.parentId}` : ""}${trace.dependencies.length ? ` · depends on ${trace.dependencies.map((id) => `#${id}`).join(", ")}` : ""}${trace.dependents.length ? ` · unblocks ${trace.dependents.map((id) => `#${id}`).join(", ")}` : ""}
+${attention ? `<p class="now"><b>now: ${esc(attention.label)}.</b> ${esc(attention.reason)}<br>evidence: ${esc(attention.evidence)}${attention.next ? `<br>next: <code>${esc(attention.next)}</code>` : ""}</p>` : "<br>"}${trace.timeline.length} items · exported ${new Date().toISOString()}</div>
+<ol>
+${items}
+</ol>
+</body></html>`;
 }
 
 export function renderEvent(event: BusEvent): string {

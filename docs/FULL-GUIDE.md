@@ -239,6 +239,27 @@ A claim normally expires after two hours. Adding a note renews it. When tasks de
 
 Path leases coordinate cooperative agents. They do not enforce filesystem permissions. Use separate worktrees or the harness sandbox when you need a stronger boundary.
 
+### Isolate a task in its own git worktree
+
+When the task's project is inside a git repository, an agent can work in a private checkout instead of the shared one:
+
+```bash
+qagent --as coder task claim 12 --worktree      # claims, then prints the worktree path
+qagent task worktree 12                         # find or create it later
+qagent task worktree 12 --remove [--force]      # delete the checkout; the branch stays
+qagent task worktree prune [--force]            # remove checkouts of accepted, failed and cancelled tasks
+```
+
+Each task gets its own branch, `qagent/task-<N>-<id>` (the suffix comes from the task's creation time, so a second bus whose ids restart at 1 never collides), created from the repository's current `HEAD`, in a checkout under `~/.agent-bus/worktrees/`. Agents commit there; the reviewer or manager merges the branch. Releasing and re-claiming a task reuses the same branch. Through MCP, call `bus_task_claim` with `worktree: true`.
+
+Things to know:
+
+- The project directory must be tracked in git (committed), or the checkout would not contain it; otherwise the command fails with a clear error. With an explicit task number, `claim --worktree` checks the repository before claiming. If the checkout cannot be made after a claim (a bare `claim --worktree`, or the MCP tool with `worktree: true`), the claim is released and the command fails: work that asked for isolation never continues in the shared checkout.
+- Only the task's assignee or the operator may open or remove its worktree; `--force` and `prune --force` are operator-only.
+- Removal refuses uncommitted or untracked changes unless `--force`. Cleanup still works if the task's project directory has since been deleted; if the whole repository is gone, the leftover checkout cannot be inspected, so deleting it takes `--force`. Gitignored files (build output, `.env`) are deleted with the directory either way.
+- Files harness adapters write into the working directory (`.cursor/mcp.json`, `opencode.json`, `.agent-bus/`, `.qagent/`) are added to the repository's `.git/info/exclude`, so they do not make a checkout dirty. That file is local and shared by all worktrees of the repository.
+- The Rust port does not implement worktrees: it ignores `"isolation": "worktree"` and has no `--worktree` flag or `task worktree` command. The bus database is unchanged, so the two builds still share one bus.
+
 ### Submit real evidence
 
 ```bash
@@ -303,6 +324,23 @@ The generated configuration uses absolute paths for Node and `dist/qagent.js`. I
 
 The Codex configuration includes a long tool timeout because `bus_wait` can block for up to one hour.
 
+### Wake an idle Claude Code session
+
+An interactive Claude Code session only sees new mail when it calls `bus_inbox` or `bus_wait`. `qagent hook claude-code` closes that gap without a supervisor: Claude Code runs it as a background `Stop` hook with `asyncRewake`, so after every turn it waits for mail addressed to the agent. When mail arrives it exits with status 2, which wakes the session and shows Claude the new messages' headers (sender, recipient, type, subject) as a system reminder. Claude then reads the messages with `bus_inbox`.
+
+```bash
+qagent --as claude hook claude-code --settings
+```
+
+prints the settings to merge into `.claude/settings.json` (one project) or `~/.claude/settings.json` (every project). Register the MCP server too (`qagent mcp-config --agent claude --client claude`), so the session can read and answer its mail.
+
+- The hook only peeks: the read cursor does not move, and message bodies are not put in the reminder. It records the last message it announced (under `hooks/` next to the database), so a turn that ends without reading the inbox does not wake the session again for the same mail.
+- It listens for up to `--timeout` seconds (default and maximum 3600) after each turn. A session idle for longer stops waking until its next turn ends.
+- Claude Code starts a new copy after every turn and does not stop the old one, so a newer copy for the same agent makes the older one exit. One agent identity should therefore belong to one Claude Code session.
+- While Claude works on a turn, the copy started after the previous turn is still waiting, so mail that arrives mid-turn is announced too.
+
+The hook needs a Claude Code version that supports `asyncRewake` command hooks. The Rust build does not have it.
+
 ### Agent MCP tools
 
 | Tool | Purpose |
@@ -313,7 +351,7 @@ The Codex configuration includes a long tool timeout because `bus_wait` can bloc
 | `bus_inbox` | Read or peek at mail. |
 | `bus_wait` | Block for mail or relevant task activity. |
 | `bus_ack` | Acknowledge a message that requested it. |
-| `bus_task_create` | Create and optionally assign a task. |
+| `bus_task_create` | Create and optionally assign a task. Workers (no delegation rights) may only assign to themselves. |
 | `bus_task_list` | List matching tasks. |
 | `bus_task_get` | Read a task, its notes, and related state. |
 | `bus_task_claim` | Claim an eligible task. |
@@ -345,11 +383,21 @@ qagent doctor coder /workspace/project
 qagent supervise coder /workspace/project
 ```
 
+`supervise --roster` runs every enabled agent in the config from one foreground process (one supervisor loop each, same signals). `--auto-requeue-min M` additionally requeues claims that sit idle longer than M minutes (uses the operator token on the machine), and `qagent task stalled`/`qagent task requeue` do the same by hand. `qagent trace <N>` prints a task's full causal chain — its events, notes and bus mail in order — with `--format json` or `--format html --out FILE` for export.
+
+With `"isolation": "worktree"` under `constraints` in the config, the supervisor claims exactly one task per turn and runs that turn in the task's worktree (see "Isolate a task in its own git worktree"); other tasks wait for later turns. If the worktree cannot be made (no project, not a git repository, no commits), the supervisor adds a note saying why, releases the claim and runs no turn: it never falls back to the project directory. Claims the agent makes itself through `qagent mcp` or the CLI during a turn also require a worktree (the supervisor sets `QAGENT_REQUIRE_WORKTREE=1`). Each task checkout keeps its own CLI session (CLI sessions are tied to their directory). An agent with a pinned `resumeSessionId` cannot run under worktree isolation: the supervisor refuses to start it. The Rust supervisor ignores this setting.
+
 `doctor` performs read-only checks for the identity, token, CLI, project, and configuration. `supervise` stays in the foreground until interrupted.
 
 Configuration defaults to `<project>/.qagent/config.json`. Provider-specific fields and support status are documented in [provider support](provider-support.md).
 
 The supervisor waits for one identity, launches its configured CLI, gives the child its MCP connection, enforces configured limits, and writes logs under `~/.agent-bus/logs/`. Nothing starts merely because a config file exists; `autoStart` defaults to false.
+
+If its configuration policy cannot be applied, supervision stops before claiming
+work or launching a turn. Without an operator token, an agent can only narrow
+its stored restrictions; even a mixed update with tighter delegation and a wider
+claim limit is rejected as a whole. Keep the stored limits in the config, or have
+the operator explicitly authorise the widening, then restart.
 
 For subscription-backed providers, it removes common provider API-key variables unless `QAGENT_ALLOW_API_KEY=1` is set. This reduces accidental metered API use; it is not a substitute for checking the provider CLI's authentication mode.
 
@@ -454,3 +502,24 @@ git diff --check
 The public audit rejects common credential formats, private absolute home paths, local project markers, tracked environment files, and unsafe commit metadata. It reports file and line locations without printing the matched value.
 
 Automated checks reduce risk; they do not prove that prose, screenshots, fixtures, or Git history contain no private information. Review the staged diff and the final public repository separately.
+
+## Implementation differences
+
+ACS exists twice on one SQLite schema: TypeScript on `main` (the npm package) and Rust on the `rust-port` branch. They share `bus.db`, tokens, and signal files. They do not have the same commands. Where one side lacks a feature, that is a gap, not a design choice.
+
+Written against `main` at `4d4cf5a` and `rust-port` at `c6df26b`, read from the source on 2026-10-01 (nothing was executed to produce this table). The `aos` and pause/budget rows were added on 2026-10-04 against `rust-port` at `8543d6b`. `rust-port` is behind `main`, so some rows may already be out of date there.
+
+| Feature | TypeScript (`main`) | Rust (`rust-port`) |
+|---|---|---|
+| Bus, tasks, leases, review gate, MCP server, harness adapter table (`ADAPTERS`) | yes | yes (`rust/README.md` lists the same adapters) |
+| `task stalled`, `task requeue`, `trace` | yes | yes (`rust/src/cli.rs`) |
+| `supervise --roster`, `supervise --auto-requeue-min` | yes | no |
+| Per-task git worktrees (`claim --worktree`, `"isolation": "worktree"`) | yes | no; the supervisor refuses to start under `"isolation": "worktree"` (fails closed) |
+| Delegation and `maxConcurrentTasks` enforced in the core | yes | yes (on `rust-port` since #32) |
+| `aos watch` restarts crashed agents, claim renewal, guard, default budget | no | yes (on `rust-port` since #28) |
+| `hook claude-code` (wake an idle Claude Code session on new mail) | yes | no |
+| Web dashboard | yes | yes (`rust/src/dashboard.rs`) |
+| `acs` terminal UI | no | yes (`rust/src/app.rs`) |
+| `aos` terminal console, crew setup, `install.sh`, release binaries | no | yes (`rust/src/aos/`, release `aos-v0.1.0`) |
+| `agent pause`, `agent resume`, `agent budget` | no | yes |
+| Family-aware router (`src/router.ts`) | present but not on the coordination path | no |

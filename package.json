@@ -1,10 +1,25 @@
 {
   "name": "agent-communication-system",
   "version": "0.2.0",
-  "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Local agent communication and task coordination over one SQLite file, with a CLI, MCP server, optional supervisor, and dashboard.",
-  "engines": {"node": ">=22.13"},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anon5376/agent-communication-system.git"
+  },
+  "mcpName": "io.github.anon5376/agent-communication-system",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "files": [
+    "dist",
+    "schema",
+    "agent-bus.config.json"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "qagent": "./dist/qagent.js",
     "agent-bus": "./dist/qagent.js",
@@ -14,6 +29,7 @@
   "scripts": {
     "build:core": "tsc",
     "build": "tsc",
+    "prepack": "npm run build",
     "test:compile": "tsc -p tsconfig.test.json",
     "test:unit": "npm run test:compile && mkdir -p dist-test && cp tests/fixtures/test-bus.config.json dist-test/agent-bus.config.json && node --test --test-concurrency=1 --test-force-exit dist-test/tests/*.test.js",
     "test:dist": "git diff --exit-code -- dist",
@@ -21,7 +37,7 @@
     "test:lifecycle": "node scripts/v2-cli-smoke.mjs",
     "test": "npm run build && npm run test:dist && npm run test:unit && npm run test:browser && npm run test:lifecycle",
     "check": "npm test",
-    "audit:public": "node scripts/public-release-audit.mjs",
+    "audit:public": "node scripts/public-release-audit.mjs && node scripts/check-readme-claims.mjs",
     "audit:public:history": "node scripts/public-release-audit.mjs --history"
   },
   "dependencies": {

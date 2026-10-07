@@ -22,3 +22,5 @@ macos/output/
 macos/dist/
 macos/build/
 macos/.swiftpm/
+
+bench-runs/

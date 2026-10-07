@@ -1,0 +1,64 @@
+{
+  "id": "R06",
+  "reconciled": false,
+  "derivedBy": "Verified seeded notes Q01-Q05 against a copy of commit 4d4cf5a9f4ca0e819dfc9b97d6610cc05fbf1893, then read README.md, CHANGELOG.md and docs/{FULL-GUIDE,V2-DESIGN,architecture,competitive-analysis,free-ai-setup,launch-copy,marketing-strategy,promotion-playbook,prototype-report,provider-support,releasing,security,standout-features,submission-pack}.md. Commands: `node derive-R06.mjs` (throwaway bus via QAGENT_HOME/QAGENT_BUS_DB; runs the README quick-start, `task release`, `trace --export`, a same-model review, `doctor`, reads package.json, replicates npx bin resolution offline with a no-dependency package carrying the same name and bin map, `npm pack --dry-run --ignore-scripts`, `git tag`, and a worktree + cursor-adapter probe), plus `stat` on a fresh `qagent init` and greps cited below. No network.",
+  "question": "Which public claims in README.md, CHANGELOG.md and docs/*.md are not backed by the code at this commit?",
+  "items": [
+    {
+      "id": "README.md:tui-demo",
+      "aliases": ["README.md:acs-tui", "README.md:acs-tui-demo", "README.md:tui-gif", "README.md:terminal-ui-demo", "README.md:acs-demo-gif", "README.md:tui", "README.md:acs-terminal-ui", "CHANGELOG.md:acs-tui-demo", "CHANGELOG.md:tui-demo-gif", "CHANGELOG.md:acs-tui"],
+      "evidence": "README.md:9 `![acs terminal UI demo](docs/assets/acs-demo.gif)` (CHANGELOG.md:30 'acs TUI demo GIF in the README'). package.json bin has only qagent, agent-bus, qagent-openai-compatible, agent-bus-openai-compatible (no `acs`); no TUI code under src/ (grep for ratatui/tui finds only a Codex comment at src/adapters.ts:292); no rust/ directory at this commit. The README never says how to get or run `acs`."
+    },
+    {
+      "id": "CHANGELOG.md:trace-export",
+      "aliases": ["CHANGELOG.md:trace-export-flag", "CHANGELOG.md:export-flag", "CHANGELOG.md:trace-html-export", "CHANGELOG.md:qagent-trace-export", "CHANGELOG.md:trace---export"],
+      "evidence": "CHANGELOG.md:23-25 'a self-contained HTML export via `--export`'. `qagent trace 1 --export` -> exit 1 'qagent: --export needs a value'; `qagent trace 1 --export /tmp/.../t.html` -> exit 0, prints the text trace, file written: false. The real flags are `--format html --out FILE` (src/cli/main.ts:91, :338-354)."
+    },
+    {
+      "id": "CHANGELOG.md:task-release",
+      "aliases": ["CHANGELOG.md:task-release-command", "CHANGELOG.md:release-subcommand", "CHANGELOG.md:cli-release", "CHANGELOG.md:qagent-task-release", "CHANGELOG.md:release-command"],
+      "evidence": "CHANGELOG.md:63-64 lists the CLI as 'task add/list/show/claim/note/submit/review/release/cancel'. `qagent --as codex task release 1` -> exit 1 'qagent: usage: qagent task add|list|show|claim|note|submit|review|cancel|stalled|requeue|worktree' (src/cli/main.ts default case). Bus.releaseTask exists only in the library (src/core/bus.ts:1037)."
+    },
+    {
+      "id": "docs/FULL-GUIDE.md:adapter-files-not-dirty",
+      "aliases": ["docs/FULL-GUIDE.md:adapter-files-excluded", "docs/FULL-GUIDE.md:adapter-files", "docs/FULL-GUIDE.md:worktree-not-dirty", "docs/FULL-GUIDE.md:info-exclude", "docs/FULL-GUIDE.md:cursor-mcp-json", "docs/FULL-GUIDE.md:clean-checkout", "docs/FULL-GUIDE.md:harness-files-excluded"],
+      "evidence": "docs/FULL-GUIDE.md:260 'Files harness adapters write into the working directory (`.cursor/mcp.json`, ...) are added to the repository's `.git/info/exclude`, so they do not make a checkout dirty.' derive-R06.mjs: task project = repo/pkg, worktree workdir .../pkg, after cursor adapter prepare: git status \"?? pkg/.cursor/mcp.json\"; remove without --force: refused 'has uncommitted changes'. The pattern `.cursor/mcp.json` (src/worktree.ts:39) is anchored to the repo root; the adapter writes into the workdir (src/adapters.ts:384-385)."
+    },
+    {
+      "id": "docs/competitive-analysis.md:no-worktree-isolation",
+      "aliases": ["docs/competitive-analysis.md:worktree-isolation", "docs/competitive-analysis.md:no-worktrees", "docs/competitive-analysis.md:behind-worktree", "docs/competitive-analysis.md:no-workspace-isolation", "docs/competitive-analysis.md:worktree"],
+      "evidence": "docs/competitive-analysis.md:47 'Behind: no built-in git worktree/workspace isolation'. Contradicted by src/worktree.ts (ensureTaskWorktree :171), CLI `qagent task worktree <N> [--remove [--force]] | task worktree prune` (src/cli/main.ts:89, usage printed by `qagent --help`), `task claim --worktree`, and supervisor isolation \"worktree\" (src/supervisor.ts:401-406)."
+    },
+    {
+      "id": "docs/free-ai-setup.md:review-family-required",
+      "aliases": ["docs/free-ai-setup.md:independent-review", "docs/free-ai-setup.md:independent-review-requires-family", "docs/free-ai-setup.md:different-family-reviewer", "docs/free-ai-setup.md:reviewer-family", "docs/free-ai-setup.md:review-requires-different-family", "docs/free-ai-setup.md:model-family-review"],
+      "evidence": "docs/free-ai-setup.md:285-286 'add a `reviewer` agent on a different model family than the workers (independent review requires it ...)'. Review gate checks only reviewer identity and not-the-assignee (src/core/bus.ts:979-982); 0 occurrences of 'family' in src/core/bus.ts. Probe: reviewer and worker both `--model same-model`; `qagent --as rev task review 2 --accept --feedback ok` -> exit 0 'task #2 is accepted'."
+    },
+    {
+      "id": "docs/promotion-playbook.md:license-field-missing",
+      "aliases": ["docs/promotion-playbook.md:license-field", "docs/promotion-playbook.md:license", "docs/promotion-playbook.md:package-license", "docs/promotion-playbook.md:no-license-field", "docs/promotion-playbook.md:license-missing"],
+      "evidence": "docs/promotion-playbook.md:7 'Still needed: `\"license\": \"MIT\"` in package.json.' package.json:4 has `\"license\": \"MIT\"`."
+    },
+    {
+      "id": "docs/promotion-playbook.md:private-true",
+      "aliases": ["docs/promotion-playbook.md:private", "docs/promotion-playbook.md:package-private", "docs/promotion-playbook.md:private-flag", "docs/promotion-playbook.md:private-not-on-npm", "docs/promotion-playbook.md:private-true-not-on-npm"],
+      "evidence": "docs/promotion-playbook.md:8 '`\"private\": true`, not on npm.' package.json has no `private` field (derive-R06.mjs: private=undefined) and has publishConfig.access public."
+    },
+    {
+      "id": "docs/submission-pack.md:private-true",
+      "aliases": ["docs/submission-pack.md:private", "docs/submission-pack.md:package-private", "docs/submission-pack.md:still-private", "docs/submission-pack.md:private-flag"],
+      "evidence": "docs/submission-pack.md:41 '`package.json` still has `\"private\": true`.' package.json has no `private` field; license, mcpName and repository (which :43-48 says must still be added) are already present (package.json:4, :7-11)."
+    },
+    {
+      "id": "docs/releasing.md:npx-smoke",
+      "aliases": ["docs/releasing.md:npx-help", "docs/releasing.md:npx-smoke-test", "docs/releasing.md:npx-latest-help", "docs/releasing.md:npx-command", "docs/releasing.md:npx"],
+      "evidence": "docs/releasing.md:32 `npx -y agent-communication-system@latest --help   # smoke the published artifact`. The package has four bins, none named agent-communication-system (package.json bin). Offline replica with the same name and bin map: `npx -y <pkg> --help` -> exit 1 'npm error could not determine executable to run'; `npx -y -p <pkg> qagent --help` -> exit 0."
+    },
+    {
+      "id": "docs/releasing.md:no-tags-yet",
+      "aliases": ["docs/releasing.md:no-tags", "docs/releasing.md:tags", "docs/releasing.md:current-state", "docs/releasing.md:first-tag", "docs/releasing.md:no-tags-exist"],
+      "evidence": "docs/releasing.md:3 'Current state: no tags exist yet — the first tagged release is `v0.2.0`.' `git tag` -> v0.2.0 (also CHANGELOG.md:53 '## [0.2.0] — 2026-09-30')."
+    }
+  ],
+  "notes": "SEEDED NOTES: Q01 (README npm install / 'First public release') could not be verified: whether agent-communication-system is on npm needs the network, which was not used; nothing in the checkout contradicts it (docs/promotion-playbook.md:8 and docs/submission-pack.md say it is not published, but those are docs, not code). Treat README.md:npm-install and CHANGELOG.md:first-public-release as UNRESOLVED: an answer listing them with a real `npm view` 404 is acceptable but not required. Q02: verified only for docs/free-ai-setup.md:286 ('requires it'), which is an item; README.md:22 'independent review' and docs/competitive-analysis.md:45 'independent review gates' are vague (the gate does enforce a reviewer other than the assignee, bus.ts:979-982) and are BORDERLINE, not items; accept or ignore. Q03 is about test flakiness, not a documentation claim; out of scope. Q04: README.md:9 TUI is an item; README.md:24 adapter list ('... and OpenAI-compatible CLIs') is BORDERLINE, not an item: there is no ADAPTERS entry named openai-compatible (src/adapters.ts:570-581) but the package ships an OpenAI-compatible harness CLI (package.json bin qagent-openai-compatible, src/openai-compatible-harness.ts) usable through the command adapter, and omitting cursor/grok/hermes is an under-claim; same for docs/competitive-analysis.md:43. The '~4 MB Rust binary', 'byte-compatible Rust port', '~78 ms -> ~2 ms' figures (docs/competitive-analysis.md:38,44; docs/launch-copy.md:17-19,37-39,61; docs/marketing-strategy.md:38,150; docs/releasing.md:48; docs/promotion-playbook.md:27,76) concern the rust-port branch, which is not in this commit's tree (no rust/ dir); UNRESOLVED, not items. Q05: the worktree bullet (competitive-analysis.md:47) is an item; Hermes missing and star counts are not contradicted by code. OTHER BORDERLINE / EXCLUDED: CHANGELOG.md:39 '~129 KB tarball': `npm pack --dry-run --ignore-scripts` now gives 145857 bytes (142.4 KB, 66 files); the figure was likely true when written and grew with later dist changes; accept either way. docs/architecture.md:49 'Each change produces one delta query' vs Reader.delta issuing up to 4 statements (src/dashboard/server.ts:113-146); the parenthetical defines the delta as events plus named rows; not an item. docs/architecture.md:35 and docs/security.md:21 'the assignee can release a claim': true in the library (bus.ts:1037-1042), no CLI/MCP command; not an item (CHANGELOG's CLI claim is). docs/standout-features.md:53 'Right now the README leads with npm ci && npm run build && npm link' is false (README leads with npm install -g) but is contradicted by another doc, not by code/config/command; accept or ignore. docs/V2-DESIGN.md:153 `qagent dashboard [--port 11512] [--open]` (`--open` -> 'unknown argument', src/dashboard/entry.ts:32) and :259 `npm run test:bundle` (no such script) are in a file that labels itself a historical design record whose current behaviour takes precedence (V2-DESIGN.md:3,11); excluded, accept or ignore. docs/standout-features.md proposals (`qagent requeue`, `qagent export`, `qagent catch-up`, `qagent serve`, `qagent review`) are recommendations, not claims. Checked and BACKED: README quick-start commands, send/inbox/wait (exit 2 on timeout), mcp-config for claude and codex, `qagent doctor` with no args, 14+1 MCP tools (src/mcp/server.ts:91-252), agent-bus alias bin, Node >=22.13 engines, all README npm scripts exist, dashboard 127.0.0.1:11511, ticket TTL 5 min (src/dashboard/session.ts:13), operator.token 0600 / home 0700 (stat after init), claim TTL 2 h (src/core/types.ts:31), supervise --roster and --auto-requeue-min (src/supervisor/entry.ts:21-22), trace --format html --out, usage table not written (only CREATE TABLE in src/core/db.ts:63), codex localProvider (src/adapters.ts:284-285), 10 harness adapters (marketing-strategy.md:149)."
+}

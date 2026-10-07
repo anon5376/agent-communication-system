@@ -18,6 +18,7 @@ import { Bus } from "../core/bus.js";
 import { agentIdFromEnv, identityForToken, resolveIdentity } from "../core/identity.js";
 import { BusError, LIMITS, MAX_WAIT_SEC, OPERATOR_ID } from "../core/types.js";
 import { waitForMail, waitSeconds } from "../notify/wait.js";
+import { ensureTaskWorktree } from "../worktree.js";
 import { renderAgents, renderError, renderInbox, renderNote, renderSent, renderTask, renderTaskLine, renderTasks, renderWait, renderWhoami, } from "./render.js";
 export const AGENT_TOOLS = [
     "bus_whoami", "bus_agents", "bus_send", "bus_inbox", "bus_wait", "bus_ack",
@@ -125,7 +126,7 @@ export function createBusServer(bus, options) {
         inputSchema: { seq: z.number().int().positive() },
     }, async (input) => run((identity) => `Acknowledged #${bus.ack(identity, input.seq).seq}.`));
     server.registerTool("bus_task_create", {
-        description: "Create a task. With `to` it is assigned and the assignee is sent the brief; without it any agent of the matching role may claim it. The brief must stand alone: the worker has none of your context. You review the result unless the operator does.",
+        description: "Create a task. With `to` it is assigned and the assignee is sent the brief; without it any agent of the matching role may claim it. An agent without delegation rights (workers by default) may only create tasks assigned to itself. The brief must stand alone: the worker has none of your context. You review the result unless the operator does.",
         inputSchema: {
             title: z.string().max(LIMITS.title),
             brief: z.string().max(LIMITS.brief),
@@ -165,11 +166,23 @@ export function createBusServer(bus, options) {
         inputSchema: { task_id: z.number().int().positive() },
     }, async (input) => run(() => renderTask(bus.getTask(input.task_id))));
     server.registerTool("bus_task_claim", {
-        description: "Claim a task. Without task_id, takes the oldest open task assigned to you, or unassigned for your role. Claims expire after two hours without a note or submit.",
-        inputSchema: { task_id: z.number().int().positive().optional() },
-    }, async (input) => run((identity) => {
+        description: "Claim a task. Without task_id, takes the most urgent open task assigned to you, or unassigned for your role. Claims expire after two hours without a note or submit. With worktree: true, also returns a private git worktree for the task (its own branch); make your edits and commits there.",
+        inputSchema: { task_id: z.number().int().positive().optional(), worktree: z.boolean().optional() },
+    }, async (input) => run(async (identity) => {
         const task = bus.claimTask(identity, input.task_id ?? null);
-        return `${renderTaskLine(task, "Claimed")}\n\n${renderTask(bus.getTask(task.id))}`;
+        const text = `${renderTaskLine(task, "Claimed")}\n\n${renderTask(bus.getTask(task.id))}`;
+        // The supervisor sets QAGENT_REQUIRE_WORKTREE when the bus isolates tasks in worktrees.
+        if (!input.worktree && process.env.QAGENT_REQUIRE_WORKTREE !== "1")
+            return text;
+        try {
+            const worktree = await ensureTaskWorktree(task, bus.home);
+            return `${text}\n\nWorktree: ${worktree.workdir} (branch ${worktree.branch}). Edit and commit there, not in ${task.project}.`;
+        }
+        catch (error) {
+            // Isolation was asked for and is not available: give the claim back rather than work in the shared checkout.
+            bus.releaseTask(identity, task.id, "worktree isolation unavailable");
+            throw new BusError("conflict", `task ${task.id} needs its own worktree and none could be made, so the claim was released: ${error.message}`);
+        }
     }));
     server.registerTool("bus_task_note", {
         description: "Add a progress note to a task. A note from the assignee also renews the claim.",

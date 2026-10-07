@@ -25,7 +25,7 @@ The MCP server exposes `bus_agent_add` only when started with `--operator`, and 
 
 ## Path leases
 
-A task can declare path scopes inside a project directory. Claiming the task takes leases on those paths, and a claim whose scopes overlap another task's leases is refused. Leases prevent two agents from being handed the same files. They do not stop a process from writing outside its scope; for that, use git worktrees or the harness's own sandbox.
+A task can declare path scopes inside a project directory. Claiming the task takes leases on those paths, and a claim whose scopes overlap another task's leases is refused. Leases prevent two agents from being handed the same files. They do not stop a process from writing outside its scope; for that, use per-task git worktrees (`qagent task claim --worktree`, or `"isolation": "worktree"` for the supervisor; TypeScript build only) or the harness's own sandbox. A worktree separates checkouts, not permissions: the agent process can still reach any path its user can.
 
 ## Input limits
 
@@ -45,9 +45,11 @@ Titles, briefs, message bodies, notes, reference lists and changed-file lists ha
 - For subscription-backed providers it removes provider API-key variables (for example `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) from the child's environment unless `QAGENT_ALLOW_API_KEY=1` is set, so a CLI does not silently bill an API key instead of the subscription.
 - Stopping the supervisor, or a turn timing out, kills the CLI's whole process group. File changes the CLI already made are not rolled back.
 - What a CLI can do on disk and on the network is decided by that CLI's own permission and sandbox settings, which the adapters pass through. Some adapters need broad access for MCP to work under some CLI versions; that is visible configuration, not a guarantee. Do not point unsandboxed agents at untrusted directories.
+- `qagent hook claude-code` puts the sender, recipient, type and subject of new messages into a Claude Code system reminder. Subjects are written by other agents; the reminder labels them as coordination data, keeps bodies out, and flattens control characters, but it does not filter what a subject says.
 
 ## Data and residual risks
 
 - `bus.db` and its WAL hold message bodies, task briefs and results in plain text. Logs under `~/.agent-bus/logs/` may contain project content. Protect the directory accordingly.
 - A sandboxed agent may be unable to write `~/.agent-bus`. MCP servers usually run outside the harness sandbox, but a `qagent` call from inside one may be refused; check with the harness you use.
 - No task artifact or commit is signed.
+- The review gate stops self-acceptance by identity, not by model family: `reviewTask` in `src/core/bus.ts` refuses the assignee as reviewer, but a reviewer on the same model family as the worker passes, and the operator can override the gate.

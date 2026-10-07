@@ -55,12 +55,30 @@ function busCli() {
         }
         return JSON.parse(result.stdout);
     };
-    const wanted = prompt.match(/\[TASK #(\d+)\]/)?.[1];
-    const claimed = qagent(["task", "claim", ...(wanted ? [wanted] : [])]);
-    const id = String(claimed.id);
-    qagent(["task", "note", id, `fake ${agent} started task #${id}`]);
-    qagent(["task", "submit", id, "--summary", `fake ${agent} submitted task #${id} through qagent`]);
-    return Number(id);
+    // Every task the brief names ([TASK #n] assignments, [CHANGES #n r2] review feedback), else any claimable one.
+    // Also the task a worktree-isolating supervisor claimed for this turn ("Task #n is claimed for you").
+    const wanted = [...new Set([...prompt.matchAll(/\[(?:TASK|CHANGES) #(\d+)|^Task #(\d+) is claimed for you/gm)].map((match) => match[1] ?? match[2]))];
+    const reportDir = process.env.FAKE_HARNESS_REPORTS;
+    const done = [];
+    for (const target of wanted.length ? wanted : [undefined]) {
+        // A supervisor that isolates tasks in worktrees claims before the turn; claim only what is not already ours.
+        const shown = target ? qagent(["task", "show", target]) : null;
+        const claimed = shown && shown.state === "claimed" && shown.assignee === agent ? shown : qagent(["task", "claim", ...(target ? [target] : [])]);
+        const id = String(claimed.id);
+        qagent(["task", "note", id, `fake ${agent} started task #${id}`]);
+        const submit = ["task", "submit", id, "--summary", `fake ${agent} submitted task #${id} through qagent`];
+        // With FAKE_HARNESS_REPORTS set, a canned report named after the task title's key (e.g. R01.txt) is submitted as details.
+        const key = String(claimed.title ?? "").match(/^([A-Za-z]+\d+)/)?.[1];
+        if (reportDir && key) {
+            try {
+                submit.push("--details", readFileSync(`${reportDir}/${key}.txt`, "utf8"));
+            }
+            catch { /* no canned report for this task */ }
+        }
+        qagent(submit);
+        done.push(Number(id));
+    }
+    return done;
 }
 if (mode === "hang") {
     // A grandchild in the same process group, both pids recorded, and no exit:
@@ -71,7 +89,7 @@ if (mode === "hang") {
     setInterval(() => { }, 1000);
 }
 else {
-    const busTask = mode === "bus-cli" ? busCli() : null;
+    const busTasks = mode === "bus-cli" ? busCli() : null;
     const inputTokens = Math.max(1, Math.ceil(prompt.length / 4));
     const outputTokens = 24;
     process.stdout.write(JSON.stringify({
@@ -80,7 +98,7 @@ else {
         usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, costUSD: 0 },
         changedFiles: [],
         validation: [{ passed: true, summary: "deterministic fake harness completed" }],
-        ...(busTask === null ? {} : { busTask }),
+        ...(busTasks === null ? {} : { busTask: busTasks[0], busTasks }),
     }) + "\n");
 }
 //# sourceMappingURL=fake-harness.js.map

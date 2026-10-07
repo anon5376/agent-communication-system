@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { ChildProcess, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { resolveAgent } from "../src/config.js";
 import { Bus } from "../src/core/bus.js";
-import { buildBrief, mcpCommandFor, runHarnessProcess, sanitizedEnvironment } from "../src/supervisor.js";
+import { DatabaseSync } from "node:sqlite";
+import { MAX_FAILED_TURNS, buildBrief, mcpCommandFor, runHarnessProcess, sanitizedEnvironment, supervise } from "../src/supervisor.js";
 import { testConfig } from "./helpers.js";
 
 const QAGENT = fileURLToPath(new URL("../src/qagent.js", import.meta.url));
@@ -71,8 +72,21 @@ function startSupervisor(f: Fixture, agentId: string, configPath: string, extraE
   return child;
 }
 
+function startRosterSupervisor(f: Fixture, configPath: string, extraEnv: NodeJS.ProcessEnv = {}): ChildProcess {
+  const log = openSync(join(f.home, "supervisor-roster.log"), "a");
+  return spawn(process.execPath, [QAGENT, "supervise", "--roster", f.project, "--config", configPath], {
+    env: f.env(undefined, extraEnv),
+    stdio: ["ignore", log, log],
+    detached: true,
+  });
+}
+
 function supervisorLog(f: Fixture, agentId: string): string {
   try { return readFileSync(join(f.home, `supervisor-${agentId}.log`), "utf8"); } catch { return ""; }
+}
+
+function rosterLog(f: Fixture): string {
+  try { return readFileSync(join(f.home, "supervisor-roster.log"), "utf8"); } catch { return ""; }
 }
 
 async function until<T>(label: string, timeoutMs: number, probe: () => T | null | undefined | false, onTimeout = () => ""): Promise<T> {
@@ -103,6 +117,54 @@ function killAll(children: ChildProcess[]): void {
     try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch { /* gone */ } }
   }
 }
+
+test("roster contains one supervisor failure without stopping healthy siblings", { timeout: 60_000 }, async (t) => {
+  // testConfig enables fake-small and fake-strong, but only fake-small exists on the bus.
+  // fake-strong therefore fails immediately while fake-small must keep running.
+  const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
+  const configPath = writeConfig(f.home, (config) => {
+    config.harnesses.fake.features.mcp = true;
+    config.agents["fake-small"].harnessOptions = { mode: "bus-cli" };
+  });
+  const roster = startRosterSupervisor(f, configPath);
+  t.after(() => killAll([roster]));
+
+  await until(
+    "the healthy roster supervisor to hold the wait",
+    15_000,
+    () => f.bus.getAgent("fake-small")?.storedStatus === "waiting",
+    () => rosterLog(f),
+  );
+  await until(
+    "the failed roster supervisor to be reported",
+    5_000,
+    () => /supervisor for fake-strong exited with error/.test(rosterLog(f)),
+    () => rosterLog(f),
+  );
+  assert.equal(roster.exitCode, null, "one supervisor failure must not terminate the roster");
+
+  const created = f.json("operator", ["task", "add", "Still works", "--to", "fake-small"]);
+  const task = await until(
+    "the healthy sibling to submit after another supervisor failed",
+    20_000,
+    () => {
+      const current = f.bus.getTask(created.id);
+      return current.state === "submitted" ? current : null;
+    },
+    () => rosterLog(f),
+  );
+  assert.equal(task.assignee, "fake-small");
+  assert.match(readFileSync(join(f.home, "logs", "fake-small.log"), "utf8"), /supervising fake-small/);
+
+  // SIGTERM still reaches the shared AbortController; the non-zero exit records
+  // that the roster suffered a partial failure without killing healthy siblings early.
+  assert.equal(await stop(roster), 1, rosterLog(f));
+  assert.equal(
+    existsSync(join(f.home, "supervisors", "fake-small.pid")),
+    false,
+    "healthy sibling releases its lock during shared shutdown",
+  );
+});
 
 test("a fake-harness agent under `qagent supervise` claims and submits a CLI-created task as itself, and stays reachable after the supervisor stops", { timeout: 60_000 }, async (t) => {
   const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
@@ -181,6 +243,126 @@ test("a harness without bus tools is supervisor-managed: it claims an unassigned
   assert.equal(task.result?.summary, `key=absent token=absent id=fake-small db=${f.dbPath}`);
   assert.match(task.result?.details ?? "", /auto-submitted by the supervisor/);
   assert.equal(await stop(supervisor), 0, supervisorLog(f, "fake-small"));
+});
+
+test("a Devin CLI agent runs one unattended print-mode turn and the supervisor submits its answer", { timeout: 60_000 }, async (t) => {
+  const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
+  // A stand-in `devin` binary that answers with the arguments it was given.
+  const devin = join(f.home, "devin");
+  writeFileSync(devin, `#!${process.execPath}\nprocess.stdout.write("devin-stub " + JSON.stringify(process.argv.slice(2)) + "\\n");\n`, { mode: 0o755 });
+  const configPath = writeConfig(f.home, (config) => {
+    config.harnesses.fake.adapter = "devin";
+    config.harnesses.fake.command = devin;
+    config.harnesses.fake.features.mcp = false;
+  });
+  const supervisor = startSupervisor(f, "fake-small", configPath);
+  t.after(() => killAll([supervisor]));
+  await until("the supervisor to hold the wait", 15_000, () => f.bus.getAgent("fake-small")?.storedStatus === "waiting", () => supervisorLog(f, "fake-small"));
+
+  const created = f.json("operator", ["task", "add", "Summarise the log", "--role", "cheap-worker"]);
+  const task = await until("the task to be submitted", 20_000, () => {
+    const current = f.bus.getTask(created.id);
+    return current.state === "submitted" ? current : null;
+  }, () => supervisorLog(f, "fake-small"));
+  const summary = task.result?.summary ?? "";
+  assert.ok(summary.startsWith('devin-stub ["-p","=== qagent:'), summary);
+  // The fixture model's exactModel is "fake-small".
+  assert.ok(summary.endsWith('","--permission-mode","dangerous","--model","fake-small"]'), summary);
+  assert.match(summary, /Summarise the log/);
+  assert.match(task.result?.details ?? "", /auto-submitted by the supervisor/);
+  assert.equal(await stop(supervisor), 0, supervisorLog(f, "fake-small"));
+});
+
+test("isolation \"worktree\" runs a single-task turn inside that task's git worktree", { timeout: 60_000 }, async (t) => {
+  const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
+  const gitIn = (args: string[]) => {
+    const result = spawnSync("git", ["-c", "user.email=test@example.com", "-c", "user.name=test", ...args], { cwd: f.project, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  gitIn(["init", "-q"]);
+  writeFileSync(join(f.project, "README"), "x\n");
+  gitIn(["add", "."]);
+  gitIn(["commit", "-q", "-m", "init"]);
+  const probe = "process.stdout.write(JSON.stringify({result: 'cwd=' + process.cwd()}) + '\\n')";
+  const configPath = writeConfig(f.home, (config) => {
+    config.harnesses.fake.adapter = "command";
+    config.harnesses.fake.command = process.execPath;
+    config.harnesses.fake.features.mcp = false;
+    config.constraints.isolation = "worktree";
+    config.agents["fake-small"].harnessOptions = { args: ["-e", probe] };
+  });
+  const supervisor = startSupervisor(f, "fake-small", configPath);
+  t.after(() => killAll([supervisor]));
+  await until("the supervisor to hold the wait", 15_000, () => f.bus.getAgent("fake-small")?.storedStatus === "waiting", () => supervisorLog(f, "fake-small"));
+
+  const created = f.json("operator", ["task", "add", "Edit the readme", "--role", "cheap-worker", "--project", f.project]);
+  const task = await until("the task to be submitted", 20_000, () => {
+    const current = f.bus.getTask(created.id);
+    return current.state === "submitted" ? current : null;
+  }, () => supervisorLog(f, "fake-small"));
+  const worktree = f.json(undefined, ["task", "worktree", String(created.id)]);
+  assert.equal(worktree.created, false);
+  assert.equal(realpathSync(task.result?.summary?.replace(/^cwd=/, "") ?? ""), realpathSync(worktree.workdir));
+  assert.equal(await stop(supervisor), 0, supervisorLog(f, "fake-small"));
+});
+
+test("worktree backlog retries after a concurrent-task limit releases capacity", { timeout: 60_000 }, async (t) => {
+  const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
+  const gitIn = (args: string[]) => {
+    const result = spawnSync("git", ["-c", "user.email=test@example.com", "-c", "user.name=test", ...args], { cwd: f.project, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  gitIn(["init", "-q"]);
+  writeFileSync(join(f.project, "README"), "x\n");
+  gitIn(["add", "."]);
+  gitIn(["commit", "-q", "-m", "init"]);
+
+  const operator = f.bus.identify("operator");
+  const worker = f.bus.identify("fake-small");
+  const holding = f.bus.createTask(operator, { title: "already claimed", to: worker.agentId, project: f.project });
+  f.bus.claimTask(worker, holding.id);
+  const available = f.bus.createTask(operator, { title: "backlog task", role: "cheap-worker", project: f.project });
+  f.bus.inbox(worker, { limit: 50 });
+
+  const probe = "process.stdout.write(JSON.stringify({result: 'cwd=' + process.cwd()}) + '\\n')";
+  const config = testConfig();
+  config.harnesses.fake.adapter = "command";
+  config.harnesses.fake.command = process.execPath;
+  config.harnesses.fake.features.mcp = false;
+  config.constraints.isolation = "worktree";
+  config.constraints.maxConcurrentTasks = 1;
+  config.agents["fake-small"].harnessOptions = { args: ["-e", probe] };
+  const controller = new AbortController();
+  const logLines: string[] = [];
+  const running = supervise({
+    agentId: "fake-small",
+    workdir: f.project,
+    dbPath: f.dbPath,
+    config,
+    waitMs: 50,
+    retryBaseMs: 50,
+    signal: controller.signal,
+    qagentBin: QAGENT,
+    fakeHarnessPath: FAKE_HARNESS,
+    log: (line) => { logLines.push(line); },
+  });
+  t.after(async () => { controller.abort(); await running; });
+  await until("the supervisor to wait at capacity", 15_000, () =>
+    f.bus.getAgent("fake-small")?.storedStatus === "waiting" &&
+    logLines.some((line) => line.includes("at concurrent task limit; waiting for capacity")),
+  () => logLines.join("\n"));
+  assert.equal(f.bus.getTask(available.id).state, "open");
+
+  f.bus.submitTask(worker, holding.id, { summary: "capacity released" });
+  const submitted = await until("the backlog task to be submitted after capacity is released", 30_000, () => {
+    const task = f.bus.getTask(available.id);
+    return task.state === "submitted" ? task : null;
+  }, () => logLines.join("\n"));
+  assert.equal(submitted.assignee, worker.agentId);
+  const worktree = f.json(undefined, ["task", "worktree", String(available.id)]);
+  assert.equal(realpathSync(submitted.result?.summary?.replace(/^cwd=/, "") ?? ""), realpathSync(worktree.workdir));
+  controller.abort();
+  await running;
 });
 
 test("sanitizedEnvironment strips subscription provider keys unless explicitly allowed", () => {
@@ -264,7 +446,6 @@ test("the brief and MCP command carry the agent's own identity and no bus_wait",
   assert.match(native, /Do NOT call bus_wait/);
   assert.match(buildBrief(agent, [message], [], true), /supervisor has claimed/);
 });
-
 test("a supervisor pauses its agent when the budget runs out, holds new work, and carries on after resume", { timeout: 60_000 }, async (t) => {
   const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
   const configPath = writeConfig(f.home, () => {});
@@ -281,10 +462,112 @@ test("a supervisor pauses its agent when the budget runs out, holds new work, an
   assert.ok(mail.includes("fake-small paused: budget reached (1 of 1 turns)"), mail.join("\n"));
 
   const second = f.json("operator", ["task", "add", "second", "--to", "fake-small"]);
+  f.json("operator", ["send", "fake-small", "paused mail", "keep this until resume"]);
   await new Promise((resolve) => setTimeout(resolve, 2500));
   assert.equal(f.bus.getTask(second.id).state, "open", "a paused agent starts no turn");
+  assert.equal(f.bus.unreadCount("fake-small"), 2, "task and ordinary mail remain unread while paused");
 
   f.json("operator", ["agent", "resume", "fake-small"]);
+  await until("paused mail to be consumed after resume", 20_000, () => f.bus.unreadCount("fake-small") === 0, log);
+  await until("the turn budget to pause the agent again", 20_000, () => f.bus.getAgent("fake-small")?.meta.paused, log);
   await until("the second task to be submitted", 20_000, () => f.bus.getTask(second.id).state === "submitted", log);
+  assert.equal(f.bus.getTask(second.id).state, "submitted");
   assert.equal(await stop(supervisor), 0, log());
+});
+
+test("after repeated failed turns the supervisor stops itself, tells the operator, and offers the mail to every retry", { timeout: 60_000 }, async (t) => {
+  const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
+  const config = testConfig();
+  config.harnesses.fake.features.mcp = false;
+  config.agents["fake-small"].harnessOptions = { mode: "fail" };
+  f.bus.send(f.bus.identify("operator"), { to: "fake-small", subject: "look at this", body: "please" });
+  await supervise({
+    agentId: "fake-small",
+    workdir: f.project,
+    dbPath: f.dbPath,
+    config,
+    waitMs: 1_000,
+    retryBaseMs: 20,
+    qagentBin: QAGENT,
+    fakeHarnessPath: FAKE_HARNESS,
+    log: () => {},
+  });
+  // One plain message drove every retry: a failed turn hands its mail to the next one.
+  const session = JSON.parse(readFileSync(join(f.home, "sessions", "fake-small.json"), "utf8"));
+  assert.equal(session.turns, MAX_FAILED_TURNS);
+  // The mail no turn managed to use waits in the session file for the next start.
+  assert.deepEqual(session.pendingMail.map((m: { subject: string }) => m.subject), ["look at this"]);
+  const toOperator = f.bus.inbox(f.bus.identify("operator"), { peek: true }).messages;
+  assert.ok(toOperator.some((m) => m.subject === `fake-small stopped: ${MAX_FAILED_TURNS} turns failed in a row`));
+  assert.equal(existsSync(join(f.home, "supervisors", "fake-small.pid")), false, "the lock is released");
+});
+
+test("a supervisor keeps going through a bus locked past the busy timeout", { timeout: 60_000 }, async (t) => {
+  const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
+  const config = testConfig();
+  config.harnesses.fake.features.mcp = false;
+  const lines: string[] = [];
+  const holder = new DatabaseSync(f.dbPath);
+  holder.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const running = supervise({
+    agentId: "fake-small",
+    workdir: f.project,
+    dbPath: f.dbPath,
+    config,
+    waitMs: 1_000,
+    retryBaseMs: 50,
+    signal: controller.signal,
+    qagentBin: QAGENT,
+    fakeHarnessPath: FAKE_HARNESS,
+    log: (line) => { lines.push(line); },
+  });
+  let settled = false;
+  void running.then(() => { settled = true; }, () => { settled = true; });
+  // Locked at startup: the configuration limits wait for the bus instead of being skipped.
+  await until("a startup retry", 30_000, () => lines.some((l) => l.includes("configuration limits not applied yet")), () => lines.join("\n"));
+  assert.equal(settled, false, "the supervisor must not exit on a locked bus");
+  holder.exec("COMMIT");
+  const created = f.json("operator", ["task", "add", "after the lock", "--to", "fake-small"]);
+  await until("the task to be submitted", 30_000, () => f.bus.getTask(created.id).state === "submitted", () => lines.join("\n"));
+  // Locked while running: the round fails and is retried.
+  holder.exec("BEGIN IMMEDIATE");
+  await until("a failed round", 30_000, () => lines.some((l) => l.includes("round failed")), () => lines.join("\n"));
+  assert.equal(settled, false, "the supervisor must not exit on a locked bus");
+  holder.exec("COMMIT");
+  holder.close();
+  const second = f.json("operator", ["task", "add", "after the second lock", "--to", "fake-small"]);
+  await until("the second task to be submitted", 30_000, () => f.bus.getTask(second.id).state === "submitted", () => lines.join("\n"));
+  controller.abort();
+  await running;
+});
+
+test("a round that fails before its turn runs gives back the task it claimed", { timeout: 60_000 }, async (t) => {
+  const f = fixture(t, [{ id: "fake-small", role: "cheap-worker" }]);
+  const config = testConfig();
+  config.harnesses.fake.features.mcp = false;
+  // The fake adapter prepares <workdir>/.agent-bus; a file in its place fails every round.
+  writeFileSync(join(f.project, ".agent-bus"), "not a directory");
+  const created = f.json("operator", ["task", "add", "never started", "--to", "fake-small"]);
+  const lines: string[] = [];
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const running = supervise({
+    agentId: "fake-small",
+    workdir: f.project,
+    dbPath: f.dbPath,
+    config,
+    waitMs: 1_000,
+    retryBaseMs: 20,
+    signal: controller.signal,
+    qagentBin: QAGENT,
+    fakeHarnessPath: FAKE_HARNESS,
+    log: (line) => { lines.push(line); },
+  });
+  await until("two failed rounds", 30_000, () => lines.filter((l) => l.includes("round failed")).length >= 2, () => lines.join("\n"));
+  controller.abort();
+  await running;
+  const task = f.bus.getTask(created.id);
+  assert.notEqual(task.state, "claimed", lines.join("\n"));
 });

@@ -184,3 +184,21 @@ test("every write appends an events row in the same transaction", (t) => {
   assert.equal((bus.db.prepare("SELECT COUNT(*) AS n FROM tasks").get() as { n: number }).n, 0);
   assert.equal(String((bus.db.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode), "wal");
 });
+
+test("renewClaims keeps a long turn's claim past the claim TTL", (t) => {
+  let clock = 1_700_000_000_000;
+  const { bus, operator, add } = setup(t, () => clock);
+  const w = add("w1");
+  const task = bus.createTask(operator, { title: "long", to: "w1" });
+  bus.claimTask(w, task.id);
+  const hour = 60 * 60_000;
+  for (let i = 0; i < 4; i += 1) {
+    clock += hour;
+    assert.equal(bus.renewClaims(w), 1);
+  }
+  bus.noteTask(operator, task.id, "still yours?");
+  assert.equal(bus.getTask(task.id).state, "claimed");
+  clock += 3 * hour;
+  bus.noteTask(operator, task.id, "and now?");
+  assert.equal(bus.getTask(task.id).state, "open");
+});

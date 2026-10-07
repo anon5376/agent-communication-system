@@ -75,8 +75,10 @@ function stripAnsi(value: string): string {
 function jsonLines(stdout: string): Record<string, unknown>[] {
   const rows: Record<string, unknown>[] = [];
   for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue; // mixed prose lines are common and never parse
     try {
-      const parsed = JSON.parse(line.trim());
+      const parsed = JSON.parse(trimmed);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) rows.push(parsed as Record<string, unknown>);
     } catch {
       // Mixed prose/JSON output is normal for several CLIs.
@@ -529,6 +531,24 @@ const hermesAdapter: HarnessAdapter = {
   },
 };
 
+/**
+ * Devin CLI (Cognition): `devin -p <prompt>` runs one turn and prints the answer. It has no per-run
+ * MCP flag (servers come from `devin mcp add` or .devin/mcp_config*.json), so its harness declares
+ * mcp: false and the supervisor claims the task and submits the printed answer.
+ */
+const devinAdapter: HarnessAdapter = {
+  id: "devin",
+  build(context) {
+    const env = commonEnvironment(context);
+    const args = ["-p", context.prompt, "--permission-mode", "dangerous"];
+    if (context.sessionId) args.push("--resume", context.sessionId);
+    if (context.agent.modelDefinition.exactModel) args.push("--model", context.agent.modelDefinition.exactModel);
+    const autoReport = !context.agent.harnessDefinition.features.mcp;
+    return { command: context.agent.harnessDefinition.command, args, environment: env, autoReport, timeoutMs: 60 * 60_000 };
+  },
+  parse: defaultResult,
+};
+
 const fakeAdapter: HarnessAdapter = {
   id: "fake",
   prepare(context) { mkdirSync(join(context.workdir, ".agent-bus"), { recursive: true }); },
@@ -574,6 +594,7 @@ const ADAPTERS: Record<string, HarnessAdapter> = {
   grok: grokAdapter,
   opencode: opencodeAdapter,
   hermes: hermesAdapter,
+  devin: devinAdapter,
   fake: fakeAdapter,
   command: commandAdapter,
 };

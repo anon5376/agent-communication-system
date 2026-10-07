@@ -19,7 +19,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { appendEvent, getMeta, openDatabase, SCHEMA_SQL, setMeta } from "./db.js";
+import { appendEvent, getMeta, migrate, openDatabase, setMeta } from "./db.js";
 import { isSafeAgentId } from "./identity.js";
 import { CLAIM_TTL_MS, OPERATOR_ID, PRIORITIES, REFERENCE_TYPES } from "./types.js";
 const MESSAGE_TYPES = new Set(["info", "question", "answer", "task", "result", "feedback", "control"]);
@@ -340,7 +340,7 @@ function metaKey(sha256) {
 function openTarget(dbPath, dryRun) {
     if (dryRun && !existsSync(dbPath)) {
         const db = new DatabaseSync(":memory:");
-        db.exec(SCHEMA_SQL);
+        migrate(db);
         return db;
     }
     return openDatabase(dbPath);

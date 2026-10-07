@@ -143,11 +143,13 @@ qagent task add <title> [--brief -] [--to ID] [--parent N] [--dep N]... [--scope
 qagent task list [--mine] [--state S]... [--all] | task show <N>
 qagent task claim [<N>] | task note <N> <text> | task submit <N> --summary S [--file F]...
 qagent task review <N> --accept|--revise --feedback F | task cancel <N> [--reason R]
+qagent task stalled [--stall-min M] | task requeue <N> [--reason R]   idle claims back to open
 qagent log [--follow] [--since SEQ]             events feed; --follow uses core/changes.ts
+qagent trace <N> [--format text|json|html] [--out FILE]               the task's causal chain
 qagent import [--jsonl P] [--qagent-state P] [--prototype P] [--dry-run] [--force]
 qagent mcp [--operator]                         stdio MCP server (lane 2)
 qagent mcp-config [--agent ID] [--client claude|codex]   prints registration snippet (lane 2)
-qagent supervise <agent> [dir] | qagent doctor  optional supervisor (lane 3)
+qagent supervise <agent> [dir] [--auto-requeue-min M] | supervise --roster | doctor   optional supervisor (lane 3)
 qagent dashboard [--port 11512] [--open]        optional dashboard (lane 4)
 ```
 
@@ -172,7 +174,7 @@ bus_task_create { title: string, brief: string, to?: string, parent_id?: number,
                   priority?: "low"|"normal"|"high"|"urgent" }
 bus_task_list   { mine?: boolean /* default true */, state?: string[], include_closed?: boolean, limit?: number }
 bus_task_get    { task_id: number }
-bus_task_claim  { task_id?: number }   // omitted: oldest open task assigned to me or unassigned for my role
+bus_task_claim  { task_id?: number }   // omitted: most urgent open task assigned to me or unassigned for my role
 bus_task_note   { task_id: number, note: string }
 bus_task_submit { task_id: number, summary: string, details?: string, changed_files?: string[],
                   artifacts?: Ref[], validation?: {passed:boolean, summary:string, command?:string}[] }

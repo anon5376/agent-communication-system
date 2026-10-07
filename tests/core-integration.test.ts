@@ -79,3 +79,77 @@ test("taskSummaries, setStatus, releaseTask and failTask", (t) => {
   assert.ok(bus.inbox(alice, { peek: true }).messages.some((m) => m.subject.startsWith(`[ESCALATE #${task.id}]`)));
   assert.equal(bus.getAgent("bob")?.storedStatus, "idle");
 });
+
+test("stalledTasks surfaces idle claims, notes clear the stall, and the operator can requeue", (t) => {
+  const { bus, operator, alice, bob } = setup(t);
+  const task = bus.createTask(alice, { title: "stuck", brief: "b", to: "bob" });
+  bus.claimTask(bob, task.id);
+  assert.deepEqual(bus.stalledTasks(60_000), []);
+
+  bus.db.prepare("UPDATE tasks SET updated_ms = ? WHERE id = ?").run(Date.now() - 3_600_000, task.id);
+  assert.deepEqual(bus.stalledTasks(1_800_000).map((s) => s.id), [task.id]);
+
+  bus.noteTask(bob, task.id, "still on it");
+  assert.deepEqual(bus.stalledTasks(1_800_000), []);
+
+  bus.db.prepare("UPDATE tasks SET updated_ms = ? WHERE id = ?").run(Date.now() - 3_600_000, task.id);
+  const requeued = bus.requeueTask(operator, task.id, "auto-requeue: stalled claim");
+  assert.equal(requeued.state, "open");
+  assert.equal(requeued.assignee, null);
+  assert.ok(bus.events().some((event) => event.kind === "task_released" && event.entityId === String(task.id)));
+});
+
+test("release and requeue work on expired claims, and deadClaims needs a dead worker", (t) => {
+  const { bus, operator, alice, bob } = setup(t);
+  const task = bus.createTask(alice, { title: "expiring", brief: "b", to: "bob" });
+  bus.claimTask(bob, task.id);
+
+  // Alive assignee (fresh last_seen) + unexpired claim: deadClaims must not fire.
+  bus.db.prepare("UPDATE tasks SET updated_ms = ? WHERE id = ?").run(Date.now() - 7_200_000, task.id);
+  assert.deepEqual(bus.deadClaims(3_600_000), []);
+
+  // Expired lease: releaseTask used to throw conflict and roll back the reopen.
+  bus.db.prepare("UPDATE tasks SET claim_expires_ms = ? WHERE id = ?").run(Date.now() - 1, task.id);
+  assert.deepEqual(bus.deadClaims(3_600_000).map((s) => s.id), [task.id]);
+  const released = bus.releaseTask(operator, task.id, "expired");
+  assert.equal(released.state, "open");
+  assert.equal(released.assignee, "bob"); // release restores the preassigned worker
+  bus.claimTask(bob, task.id);
+
+  // Dead assignee: task idle AND agent silent — deadClaims fires; requeue clears assignee.
+  bus.db.prepare("UPDATE tasks SET updated_ms = ? WHERE id = ?").run(Date.now() - 7_200_000, task.id);
+  bus.db.prepare("UPDATE agents SET last_seen_ms = ? WHERE id = 'bob'").run(Date.now() - 7_200_000);
+  assert.deepEqual(bus.deadClaims(3_600_000).map((s) => s.id), [task.id]);
+  const requeued = bus.requeueTask(operator, task.id, "dead worker");
+  assert.equal(requeued.state, "open");
+  assert.equal(requeued.assignee, null); // back to the pool: anyone may claim it
+
+  // Batch of expired claims: the first requeue's internal sweep reopens the
+  // second, so its later requeue must still pool it, not reject as 'open'.
+  const second = bus.createTask(alice, { title: "also expiring", brief: "b", to: "bob" });
+  bus.claimTask(bob, task.id);
+  bus.claimTask(bob, second.id);
+  bus.db.prepare("UPDATE tasks SET claim_expires_ms = ? WHERE id IN (?, ?)").run(Date.now() - 1, task.id, second.id);
+  bus.requeueTask(operator, task.id, "batch");
+  const secondRequeued = bus.requeueTask(operator, second.id, "batch");
+  assert.equal(secondRequeued.state, "open");
+  assert.equal(secondRequeued.assignee, null);
+});
+
+test("traceTask merges events, notes and task mail into one causal timeline", (t) => {
+  const { bus, alice, bob } = setup(t);
+  const upstream = bus.createTask(alice, { title: "upstream", brief: "b" });
+  const task = bus.createTask(alice, { title: "downstream", brief: "b", to: "bob", dependencies: [upstream.id] });
+  bus.noteTask(bob, task.id, "waiting on upstream");
+  const trace = bus.traceTask(task.id);
+
+  assert.deepEqual(trace.dependencies, [upstream.id]);
+  assert.deepEqual(bus.traceTask(upstream.id).dependents, [task.id]);
+  const kinds = trace.timeline.map((item) => item.kind);
+  assert.ok(kinds.includes("task_created"));
+  assert.ok(kinds.includes("note"));
+  assert.ok(kinds.includes("mail")); // the [TASK #N] creation mail to bob
+  for (let index = 1; index < trace.timeline.length; index += 1) {
+    assert.ok(trace.timeline[index].tsMs >= trace.timeline[index - 1].tsMs, "timeline is chronological");
+  }
+});

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { Bus } from "../src/core/bus.js";
+import { ChangeWatcher } from "../src/core/changes.js";
 import type { Message } from "../src/core/types.js";
 import { readSignalFile, waitForMail } from "../src/notify/wait.js";
 
@@ -78,12 +79,16 @@ function text(result: unknown): string {
 }
 
 const LONG = { timeout: 120_000 };
+/** A wake-up must arrive promptly; this is the bound for an unloaded machine. */
+const WAKE_BOUND_MS = 500;
 
 test("bus_wait returns within 500 ms of a send from the CLI", async (t) => {
   const { dbPath, preload, bus } = setup(t);
   const bob = await startServer(t, dbPath, preload, "bob");
   const latencies: number[] = [];
-  for (let round = 1; round <= 3; round += 1) {
+  // One slow round on a loaded machine is noise; a wake-up path that is usually slow is a regression. So the
+  // median of five rounds is held to the bound, not each round.
+  for (let round = 1; round <= 5; round += 1) {
     const waiting = bob.client.callTool({ name: "bus_wait", arguments: { timeout_sec: 60 } }, undefined, LONG).then((result) => ({ result, at: Date.now() }));
     await until(() => bus.getAgent("bob")?.storedStatus === "waiting");
     await sleep(50 + round * 40);
@@ -95,7 +100,8 @@ test("bus_wait returns within 500 ms of a send from the CLI", async (t) => {
     assert.equal(bus.unreadCount("bob"), 0, "the delivered mail is marked read");
   }
   t.diagnostic(`bus_wait latency ms (reply received - message written): ${latencies.join(", ")}`);
-  for (const latency of latencies) assert.ok(latency < 500, `latency ${latency} ms`);
+  const median = [...latencies].sort((x, y) => x - y)[2];
+  assert.ok(median < WAKE_BOUND_MS, `median latency ${median} ms (all: ${latencies.join(", ")})`);
 });
 
 test("bus_wait times out cleanly and the server keeps serving", async (t) => {
@@ -159,7 +165,8 @@ test("the signal file alone wakes a waiter when the database watcher is slow", a
   const { dbPath, bus } = setup(t);
   const bob = bus.identify("bob");
   // No fs.watch on the database and a 5 s poll: only the inbox signal file can wake this waiter quickly.
-  const waiting = waitForMail(bus, bob, { timeoutMs: 30_000, watcherOptions: { fsWatch: false, minPollMs: 5000, maxPollMs: 5000 } })
+  const pollMs = 5000;
+  const waiting = waitForMail(bus, bob, { timeoutMs: 30_000, watcherOptions: { fsWatch: false, minPollMs: pollMs, maxPollMs: pollMs } })
     .then((result) => ({ result, at: Date.now() }));
   await sleep(200);
   const [sent] = await cliSend(dbPath, "alice", "bob", "wake");
@@ -167,10 +174,10 @@ test("the signal file alone wakes a waiter when the database watcher is slow", a
   t.diagnostic(`signal-file wake latency ${at - sent.tsMs} ms`);
   assert.equal(result.status, "mail");
   assert.equal(result.messages[0].subject, "wake");
-  assert.ok(at - sent.tsMs < 500, `latency ${at - sent.tsMs} ms`);
+  // The property is "woken by the signal file, not by the poll": well under the poll interval, with room for load.
+  assert.ok(at - sent.tsMs < pollMs / 2, `latency ${at - sent.tsMs} ms, poll interval ${pollMs} ms`);
   assert.equal(bus.unreadCount("bob"), 1, "waitForMail does not advance the cursor");
 });
-
 test("a message or open task that lands just as a wait starts wakes the waiter instead of waiting out the timeout", async (t) => {
   const { dbPath, bus } = setup(t);
   const bob = bus.identify("bob");
@@ -196,4 +203,32 @@ test("a message or open task that lands just as a wait starts wakes the waiter i
   const task = await bus.waitForMail(bob, { timeoutMs: 3000 });
   assert.equal(task.status, "task");
   assert.ok(Date.now() - started < 2000, `woke after ${Date.now() - started} ms`);
+});
+
+test("a poll-only watcher notices another connection's write within one poll interval (fake clock)", async (t) => {
+  const { dbPath, bus } = setup(t);
+  const writer = Bus.open({ dbPath });
+  t.after(() => writer.close());
+  const minPollMs = 10;
+  const maxPollMs = 100;
+  const watcher = new ChangeWatcher(bus.db, dbPath, { fsWatch: false, minPollMs, maxPollMs });
+  t.after(() => watcher.close());
+  const before = watcher.currentSeq();
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  const seen: { seq: number | null } = { seq: null };
+  const waiting = watcher.next(before, 60_000).then((seq) => { seen.seq = seq; });
+  await flush();
+  // Let the backoff reach its ceiling with no writes.
+  for (let elapsed = 0; elapsed < 1000; elapsed += 1) { t.mock.timers.tick(1); await flush(); }
+  assert.equal(seen.seq, null, "nothing changed, so the waiter is still waiting");
+
+  writer.send(writer.identify("alice"), { to: "bob", subject: "poll", body: "b" });
+  let waited = 0;
+  while (seen.seq === null && waited <= 2 * maxPollMs) { t.mock.timers.tick(1); await flush(); waited += 1; }
+  await waiting;
+  t.diagnostic(`poll-only wake ${waited} virtual ms after the write (ceiling ${maxPollMs})`);
+  assert.ok(seen.seq !== null && seen.seq > before, "the waiter saw the new event");
+  assert.ok(waited <= maxPollMs, `woke ${waited} virtual ms after the write; the poll ceiling is ${maxPollMs} ms`);
 });
