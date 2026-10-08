@@ -14,10 +14,13 @@ const knownPrivateMarkers = [
   "windsurf_" + "api_key",
 ];
 
+// Single-letter usernames (/home/a/, /Users/a/, C:\Users\a\) are test
+// fixtures, not private paths — a few reachable revisions still contain them,
+// so the patterns require at least two characters.
 const contentRules = [
-  { name: "private macOS home path", regex: /\/Users\/[^/\s]+\//g },
-  { name: "private Linux home path", regex: /\/home\/[^/\s]+\//g },
-  { name: "private Windows home path", regex: /[A-Za-z]:\\Users\\[^\\\s]+\\/g },
+  { name: "private macOS home path", regex: /\/Users\/[^/\s]{2,}\//g },
+  { name: "private Linux home path", regex: /\/home\/[^/\s]{2,}\//g },
+  { name: "private Windows home path", regex: /[A-Za-z]:\\Users\\[^\\\s]{2,}\\/g },
   { name: "private project marker", regex: new RegExp(knownPrivateMarkers.map(escapeRegex).join("|"), "gi") },
   { name: "private key block", regex: /-----BEGIN [A-Z ]*PRIVATE KEY-----/g },
   { name: "GitHub token", regex: /gh[pousr]_[A-Za-z0-9_]{20,}/g },
@@ -34,9 +37,14 @@ const allowedEmailDomains = new Set([
   "noreply.github.com",
   "users.noreply.github.com",
 ]);
-// Addresses published on purpose, e.g. the security contact in SECURITY.md.
+// Addresses published on purpose: the security contact in SECURITY.md, the
+// maintainer's public commit identity, and provider noreply addresses that end
+// up on commits authored through Claude Code or the GitHub web UI.
 const allowedEmails = new Set([
   "qeqx1@pm.me",
+  "anon5376@proton.me",
+  "noreply@anthropic.com",
+  "noreply@github.com",
 ]);
 const emailRegex = /[A-Z0-9._%+-]+@([A-Z0-9.-]+\.[A-Z]{2,}|localhost)/gi;
 
@@ -132,9 +140,9 @@ function inspectHistory() {
 
   const trees = [...new Set(git(["log", "--all", "--format=%T"]).split("\n").filter(Boolean))];
   const historyPattern = [
-    "/" + "Users/[^/]+/",
-    "/" + "home/[^/]+/",
-    "[A-Za-z]:\\\\Users\\\\[^\\\\]+\\\\",
+    "/" + "Users/[^/]{2,}/",
+    "/" + "home/[^/]{2,}/",
+    "[A-Za-z]:\\\\Users\\\\[^\\\\]{2,}\\\\",
     ...knownPrivateMarkers.map(escapeRegex),
     "-----BEGIN [A-Z ]*PRIVATE KEY-----",
     "gh[pousr]_[A-Za-z0-9_]{20,}",
