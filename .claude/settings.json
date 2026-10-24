@@ -1,6 +1,27 @@
 {
   "permissions": {
     "defaultMode": "bypassPermissions",
-    "allow": ["WebFetch", "WebSearch", "Bash", "Read", "Edit", "Write", "Glob", "Grep", "NotebookEdit"]
+    "allow": [
+      "WebFetch",
+      "WebSearch",
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "NotebookEdit"
+    ]
+  },
+  "extraKnownMarketplaces": {
+    "cursor-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "cursor/plugins"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "pstack@cursor-plugins": true
   }
 }
